@@ -3,7 +3,7 @@ pandas
 folium
 streamlit-folium
 pyyaml
-streamlit-authenticator==0.3.6
+streamlit-authenticator
 geopy
 xlsxwriter
 openpyxl
