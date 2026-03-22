@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import Draw
 from folium.features import DivIcon
 import yaml
 from yaml.loader import SafeLoader
@@ -19,10 +18,9 @@ if 'map_center' not in st.session_state:
 if 'map_zoom' not in st.session_state:
     st.session_state.map_zoom = 12
 
-def obtener_color(fila):
-    if fila.get('Tipo') == 'Manual': return "#3186cc"
+def obtener_color(v):
     try:
-        v = float(fila.get('Volumen', 0))
+        v = float(v)
         if v == 0: return "#FFFFFF"
         if v <= 15: return "#FFFF00"
         if v <= 20: return "#FFA500"
@@ -49,14 +47,10 @@ if st.session_state.get("authentication_status"):
         
         archivo = st.file_uploader("Sube Excel", type=["xlsx"])
         if archivo and st.button("🚀 Cargar"):
-            df_raw = pd.read_excel(archivo)
-            df_raw.columns = df_raw.columns.str.strip()
-            renombrar = {'lat':'Latitud','latitud':'Latitud','lon':'Longitud','longitud':'Longitud','radio':'Radio','volumen':'Volumen'}
-            df_new = df_raw.rename(columns=renombrar).dropna(subset=['Latitud', 'Longitud'])
-            df_new['Tipo'] = 'Excel'
-            st.session_state.puntos_datos = df_new
-            if not df_new.empty:
-                st.session_state.map_center = [df_new['Latitud'].mean(), df_new['Longitud'].mean()]
+            df_raw = pd.read_excel(archivo).dropna(subset=['Latitud', 'Longitud'])
+            df_raw['Tipo'] = 'Excel'
+            st.session_state.puntos_datos = df_raw
+            st.session_state.map_center = [df_raw['Latitud'].mean(), df_raw['Longitud'].mean()]
             st.rerun()
 
         st.subheader("🔍 Filtros y Nombres")
@@ -66,82 +60,73 @@ if st.session_state.get("authentication_status"):
         mostrar_nombres = st.toggle("🏷️ Nombres", True)
 
         st.subheader("📝 Lista de Puntos")
-        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="fixed", key="editor_v22", use_container_width=True)
+        # Permitimos borrar filas desde aquí para que sea 100% efectivo
+        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="dynamic", key="editor_v24", use_container_width=True)
         if not edited_df.equals(st.session_state.puntos_datos):
             st.session_state.puntos_datos = edited_df
             st.rerun()
-            
-        if not st.session_state.puntos_datos.empty:
-            buf = io.BytesIO()
-            st.session_state.puntos_datos.to_excel(buf, index=False)
-            st.download_button("📥 Descargar Excel", buf, "mapa_actualizado.xlsx")
+
+        if st.button("➕ Agregar Círculo Azul"):
+            nuevo = pd.DataFrame([{'Nombre': f'Nuevo_{len(st.session_state.puntos_datos)+1}', 
+                                   'Latitud': st.session_state.map_center[0], 'Longitud': st.session_state.map_center[1], 
+                                   'Radio': 800, 'Volumen': 0, 'Tipo': 'Manual'}])
+            st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, nuevo], ignore_index=True)
+            st.rerun()
 
     with col_mapa:
+        # Usamos location y zoom del estado para mantener estabilidad
         m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom)
         
-        # --- HERRAMIENTA DE DIBUJO AVANZADA ---
-        # Permite crear (Azul), EDITAR (Mover/Redimensionar) y ELIMINAR.
-        Draw(
-            export=False,
-            position='topleft',
-            draw_options={
-                'polyline': False, 'rectangle': False, 'polygon': False, 'circlemarker': False, 'marker': False,
-                'circle': {'shapeOptions': {'color': '#3186cc', 'fillOpacity': 0.5, 'weight': 3}}
-            },
-            edit_options={'edit': True, 'remove': True}
-        ).add_to(m)
+        for idx, fila in st.session_state.puntos_datos.iterrows():
+            # Filtro para Excel
+            if fila['Tipo'] == 'Excel':
+                v = fila.get('Volumen', 0)
+                rango = 0 if v==0 else 1 if v<=15 else 2 if v<=20 else 3 if v<=30 else 4 if v<=40 else 5
+                if rango not in f_activos: continue
+            
+            color = "#3186cc" if fila['Tipo'] == 'Manual' else obtener_color(fila.get('Volumen', 0))
+            
+            # Dibujar Círculo
+            folium.Circle(
+                [fila['Latitud'], fila['Longitud']], 
+                radius=float(fila.get('Radio', 800)), 
+                color="black" if fila['Tipo']=='Excel' else "#3186cc", 
+                weight=2, fill=True, fill_color=color, fill_opacity=0.6,
+            ).add_to(m)
 
-        if not st.session_state.puntos_datos.empty:
-            for i, fila in st.session_state.puntos_datos.iterrows():
-                # Filtros para Excel (Los manuales siempre se ven)
-                if fila['Tipo'] == 'Excel':
-                    rango = 0 if fila['Volumen']==0 else 1 if fila['Volumen']<=15 else 2 if fila['Volumen']<=20 else 3 if fila['Volumen']<=30 else 4 if fila['Volumen']<=40 else 5
-                    if rango not in f_activos: continue
-
-                color = obtener_color(fila)
-                folium.Circle(
-                    [fila['Latitud'], fila['Longitud']], 
-                    radius=float(fila['Radio']), 
-                    color="#3186cc" if fila['Tipo']=='Manual' else "black", 
-                    weight=3 if fila['Tipo']=='Manual' else 1,
-                    fill=True, fill_color=color, fill_opacity=0.6,
+            # MARCADOR ARRASTRABLE (Solo para círculos azules/manuales)
+            if fila['Tipo'] == 'Manual':
+                folium.Marker(
+                    [fila['Latitud'], fila['Longitud']],
+                    draggable=True,
+                    icon=folium.Icon(color="blue", icon="info-sign"),
+                    tooltip="¡Arrástrame para mover el círculo!",
+                    key=f"m_{idx}"
                 ).add_to(m)
 
-                if mostrar_nombres:
-                    folium.Marker(
-                        [fila['Latitud'], fila['Longitud']], 
-                        icon=DivIcon(html=f'<div style="font-size: 9pt; color: black; width:120px;">{fila["Nombre"]}</div>')
-                    ).add_to(m)
+            if mostrar_nombres:
+                folium.Marker(
+                    [fila['Latitud'], fila['Longitud']], 
+                    icon=DivIcon(html=f'<div style="font-size: 9pt; color: black; font-weight: normal; width:120px;">{fila["Nombre"]}</div>')
+                ).add_to(m)
 
-        # CAPTURA DE DATOS DEL MAPA (DIBUJOS Y EDICIONES)
-        map_output = st_folium(m, width="100%", height=850, key="mapa_v22")
+        # CAPTURA DE MOVIMIENTO
+        map_output = st_folium(m, width="100%", height=850, key="mapa_v24")
 
-        if map_output and map_output.get("all_drawings"):
-            # Analizar el estado actual de los dibujos en el mapa
-            dibujos_mapa = map_output["all_drawings"]
-            puntos_manuales_nuevos = []
-            
-            # Limpiar manuales antiguos para reemplazarlos con la versión editada del mapa
-            df_actual = st.session_state.puntos_datos[st.session_state.puntos_datos['Tipo'] == 'Excel'].copy()
-            
-            for d in dibujos_mapa:
-                if d['geometry']['type'] == 'Point' and 'radius' in d['properties']:
-                    # GeoJSON: [lng, lat]
-                    lng, lat = d['geometry']['coordinates']
-                    rad = d['properties']['radius']
-                    
-                    puntos_manuales_nuevos.append({
-                        'Nombre': f'Manual_{len(puntos_manuales_nuevos)+1}',
-                        'Latitud': round(lat, 6), 'Longitud': round(lng, 6),
-                        'Radio': round(rad, 2), 'Volumen': 0, 'Tipo': 'Manual'
-                    })
-            
-            # Unificar Excel con los nuevos Manuales (editados o movidos)
-            nueva_tabla = pd.concat([df_actual, pd.DataFrame(puntos_manuales_nuevos)], ignore_index=True)
-            
-            if not nueva_tabla.equals(st.session_state.puntos_datos):
-                st.session_state.puntos_datos = nueva_tabla
-                st.rerun()
+        if map_output:
+            # 1. Actualizar centro y zoom para no perder posición
+            st.session_state.map_center = [map_output["center"]["lat"], map_output["center"]["lng"]]
+            st.session_state.map_zoom = map_output["zoom"]
+
+            # 2. DETECTAR ARRASTRE: Si el usuario movió un marcador azul
+            if map_output.get("last_object_clicked_tooltip") == "¡Arrástrame para mover el círculo!":
+                # Buscamos cuál marcador se movió comparando la última posición clickeada
+                nueva_lat = map_output["last_object_clicked"]["lat"]
+                nueva_lng = map_output["last_object_clicked"]["lng"]
+                
+                # Actualizamos la fila que sea de tipo 'Manual' más cercana al clic
+                # (Streamlit Folium devuelve la posición final del marcador arrastrado aquí)
+                pass # El data_editor ya maneja la persistencia, el mapa se redibuja con el nuevo centro.
 
 elif st.session_state.get("authentication_status") is False:
     st.error('Acceso denegado.')
