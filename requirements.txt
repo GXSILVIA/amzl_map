@@ -2,8 +2,8 @@ streamlit
 pandas
 folium
 streamlit-folium
-pyyaml
-streamlit-authenticator
+streamlit-authenticator==0.3.1
 geopy
-xlsxwriter
 openpyxl
+pyyaml
+xlsxwriter
