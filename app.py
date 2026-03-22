@@ -6,7 +6,7 @@ from folium.features import DivIcon
 import yaml
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
-from geopy.geocoders import ArcGIS, Nominatim
+from geopy.geocoders import ArcGIS
 import io
 
 # 1. CONFIGURACIÓN DE PÁGINA
@@ -37,6 +37,12 @@ def geolocalizar(df_input):
     progreso.empty()
     return df
 
+def asignar_rango(v):
+    try:
+        v = float(v)
+        return 0 if v==0 else 1 if v<=15 else 2 if v<=20 else 3 if v<=30 else 4 if v<=40 else 5
+    except: return 0
+
 # 2. AUTENTICACIÓN
 try:
     with open('config.yaml') as file:
@@ -54,35 +60,49 @@ if st.session_state.get("authentication_status"):
         st.title("Panel de Control")
         authenticator.logout('Cerrar Sesión', 'main')
         
-        # --- SECCIÓN DE CARGA ---
+        # --- CARGA CON LIMPIEZA AUTOMÁTICA ---
         st.subheader("📁 Cargar Datos")
         modo = st.radio("Entrada por:", ["Coordenadas", "Código Postal"])
-        archivo = st.file_uploader("Excel (.xlsx)", type=["xlsx"])
+        archivo = st.file_uploader("Sube tu Excel (.xlsx)", type=["xlsx"])
         
         if archivo and st.button("🚀 Cargar y Dibujar"):
             df_raw = pd.read_excel(archivo)
             df_raw.columns = df_raw.columns.str.strip()
+            
             if modo == "Código Postal":
                 df_new = geolocalizar(df_raw)
             else:
                 renombrar = {'lat':'Latitud','latitud':'Latitud','lon':'Longitud','longitud':'Longitud','radio':'Radio','volumen':'Volumen'}
                 df_new = df_raw.rename(columns=renombrar)
             
-            st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, df_new], ignore_index=True)
-            if not df_new.empty:
-                st.session_state.map_center = [df_new['Latitud'].dropna().iloc[0], df_new['Longitud'].dropna().iloc[0]]
+            # Limpiamos lo anterior y enfocamos mapa
+            df_final = df_new.dropna(subset=['Latitud', 'Longitud'])
+            st.session_state.puntos_datos = df_final
+            
+            if not df_final.empty:
+                st.session_state.map_center = [df_final['Latitud'].mean(), df_final['Longitud'].mean()]
+                st.session_state.map_zoom = 13
             st.rerun()
 
-        # --- SECCIÓN DE GESTIÓN ---
-        st.subheader("📍 Editar Puntos")
+        # --- FILTROS POR VOLUMEN ---
+        st.subheader("🔍 Filtros de Visualización")
+        f_cols = st.columns(2)
+        f0 = f_cols[0].checkbox("⚪ R0 (Cero)", value=True)
+        f1 = f_cols[0].checkbox("🟡 R1-15", value=True)
+        f2 = f_cols[0].checkbox("🟠 R16-20", value=True)
+        f3 = f_cols[1].checkbox("🔴 R21-30", value=True)
+        f4 = f_cols[1].checkbox("🏮 R31-40", value=True)
+        f5 = f_cols[1].checkbox("🍷 R40+", value=True)
         
-        # Botón para Borrar Todo
-        if st.button("🗑️ Borrar Todos los Puntos", type="secondary"):
+        filtros_activos = [i for i, check in enumerate([f0, f1, f2, f3, f4, f5]) if check]
+
+        # --- GESTIÓN DE PUNTOS ---
+        st.subheader("📍 Editor de Puntos")
+        if st.button("🗑️ Borrar Todo"):
             st.session_state.puntos_datos = pd.DataFrame(columns=['Nombre', 'Latitud', 'Longitud', 'Radio', 'Volumen'])
             st.rerun()
 
-        # Editor de tabla interactiva
-        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="dynamic", key="editor_v3")
+        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="dynamic", key="editor_v5")
         if not edited_df.equals(st.session_state.puntos_datos):
             st.session_state.puntos_datos = edited_df
             st.rerun()
@@ -90,52 +110,56 @@ if st.session_state.get("authentication_status"):
         if not st.session_state.puntos_datos.empty:
             buf = io.BytesIO()
             st.session_state.puntos_datos.to_excel(buf, index=False)
-            st.download_button("📥 Exportar Excel Final", buf, "mapa_amzl.xlsx")
+            st.download_button("📥 Descargar Excel Final", buf, "mapa_exportado.xlsx")
 
     with col_mapa:
-        # Dibujo del mapa estable
-        m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom)
-        folium.LatLngPopup().add_to(m)
+        # EL MAPA SOLO APARECE SI HAY DATOS
+        if not st.session_state.puntos_datos.empty:
+            df_temp = st.session_state.puntos_datos.copy()
+            df_temp['rango_id'] = df_temp['Volumen'].apply(asignar_rango)
+            df_filtrado = df_temp[df_temp['rango_id'].isin(filtros_activos)]
 
-        df_draw = st.session_state.puntos_datos.dropna(subset=['Latitud', 'Longitud'])
-        
-        for i, fila in df_draw.iterrows():
-            vol = float(fila.get('Volumen', 0))
-            # Escala de colores según volumen
-            color = "#800" if vol > 40 else "#F00" if vol > 30 else "#F77" if vol > 20 else "#FFA500" if vol > 15 else "#FF0" if vol > 0 else "#FFF"
-            rad = float(fila.get('Radio', 800))
+            m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom)
+            folium.LatLngPopup().add_to(m)
 
-            folium.Circle(
-                [fila['Latitud'], fila['Longitud']], 
-                radius=rad, color="black", weight=1, fill=True, fill_color=color, fill_opacity=0.6,
-                popup=f"<b>{fila.get('Nombre','')}</b><br>Radio: {rad}m<br>Vol: {vol}"
-            ).add_to(m)
-            
-            folium.Marker(
-                [fila['Latitud'], fila['Longitud']], 
-                icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; color: black; text-shadow: 1px 1px white; width:120px">{fila.get("Nombre","")}</div>')
-            ).add_to(m)
+            for _, fila in df_filtrado.iterrows():
+                colores_map = {0:"#FFFFFF", 1:"#FFFF00", 2:"#FFA500", 3:"#FF7777", 4:"#FF0000", 5:"#800000"}
+                color = colores_map.get(fila['rango_id'], "#888")
+                
+                folium.Circle(
+                    [fila['Latitud'], fila['Longitud']], 
+                    radius=float(fila.get('Radio', 800)), 
+                    color="black", weight=1, fill=True, fill_color=color, fill_opacity=0.6,
+                    popup=f"Nombre: {fila['Nombre']}<br>Vol: {fila['Volumen']}<br>Radio: {fila['Radio']}m"
+                ).add_to(m)
+                
+                folium.Marker(
+                    [fila['Latitud'], fila['Longitud']], 
+                    icon=DivIcon(html=f'<div style="font-size: 8.5pt; font-weight: bold; width:150px">{fila["Nombre"]}</div>')
+                ).add_to(m)
 
-        # Captura de interacción y mantenimiento de vista
-        output = st_folium(m, width="100%", height=800, key="mapa_final", returned_objects=["last_clicked", "center", "zoom"])
+            # Mapa interactivo estable
+            output = st_folium(m, width="100%", height=850, key="mapa_final", returned_objects=["last_clicked", "center", "zoom"])
 
-        if output:
-            # Mantener el mapa donde el usuario lo movió
-            if output.get("center"):
-                st.session_state.map_center = [output["center"]["lat"], output["center"]["lng"]]
-            if output.get("zoom"):
-                st.session_state.map_zoom = output["zoom"]
+            if output:
+                # Mantener la vista donde el usuario la dejó
+                if output.get("center"):
+                    st.session_state.map_center = [output["center"]["lat"], output["center"]["lng"]]
+                if output.get("zoom"):
+                    st.session_state.map_zoom = output["zoom"]
 
-            # Agregar punto nuevo al hacer clic
-            clic = output.get("last_clicked")
-            if clic:
-                # Evitar que el clic se repita infinitamente en la recarga
-                clic_id = f"{clic['lat']}_{clic['lng']}"
-                if 'ultimo_clic_id' not in st.session_state or st.session_state.ultimo_clic_id != clic_id:
-                    st.session_state.ultimo_clic_id = clic_id
-                    nuevo_p = {'Nombre': f'Punto_{len(st.session_state.puntos_datos)+1}', 'Latitud': clic['lat'], 'Longitud': clic['lng'], 'Radio': 800, 'Volumen': 0}
-                    st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, pd.DataFrame([nuevo_p])], ignore_index=True)
-                    st.rerun()
+                # Lógica para agregar punto nuevo al hacer clic
+                clic = output.get("last_clicked")
+                if clic:
+                    clic_id = f"{clic['lat']}_{clic['lng']}"
+                    if st.session_state.get('last_clic_id') != clic_id:
+                        st.session_state.last_clic_id = clic_id
+                        nuevo = {'Nombre': f'Punto_{len(st.session_state.puntos_datos)+1}', 'Latitud': clic['lat'], 'Longitud': clic['lng'], 'Radio': 800, 'Volumen': 0}
+                        st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, pd.DataFrame([nuevo])], ignore_index=True)
+                        st.rerun()
+        else:
+            st.info("👋 Sube un archivo Excel para comenzar. El mapa se centrará automáticamente en tus datos.")
+            st.warning("Asegúrate de que tu Excel tenga las columnas: Nombre, Latitud, Longitud (o CP), Radio y Volumen.")
 
 elif st.session_state.get("authentication_status") is False:
-    st.error('Credenciales incorrectas.')
+    st.error('Usuario o contraseña incorrectos.')
