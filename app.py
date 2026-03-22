@@ -66,7 +66,7 @@ if st.session_state.get("authentication_status"):
         mostrar_nombres = st.toggle("🏷️ Nombres", True)
 
         st.subheader("📝 Lista de Puntos")
-        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="fixed", key="editor_v21")
+        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="fixed", key="editor_v22", use_container_width=True)
         if not edited_df.equals(st.session_state.puntos_datos):
             st.session_state.puntos_datos = edited_df
             st.rerun()
@@ -79,31 +79,26 @@ if st.session_state.get("authentication_status"):
     with col_mapa:
         m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom)
         
-        # Herramienta de dibujo solo para CREAR
+        # --- HERRAMIENTA DE DIBUJO AVANZADA ---
+        # Permite crear (Azul), EDITAR (Mover/Redimensionar) y ELIMINAR.
         Draw(
-            draw_options={'polyline':False,'rectangle':False,'polygon':False,'marker':False,'circlemarker':False,
-                          'circle': {'shapeOptions': {'color': '#3186cc', 'fillOpacity': 0.5}}}
+            export=False,
+            position='topleft',
+            draw_options={
+                'polyline': False, 'rectangle': False, 'polygon': False, 'circlemarker': False, 'marker': False,
+                'circle': {'shapeOptions': {'color': '#3186cc', 'fillOpacity': 0.5, 'weight': 3}}
+            },
+            edit_options={'edit': True, 'remove': True}
         ).add_to(m)
 
         if not st.session_state.puntos_datos.empty:
-            for idx, fila in st.session_state.puntos_datos.iterrows():
-                # Filtro para Excel
+            for i, fila in st.session_state.puntos_datos.iterrows():
+                # Filtros para Excel (Los manuales siempre se ven)
                 if fila['Tipo'] == 'Excel':
                     rango = 0 if fila['Volumen']==0 else 1 if fila['Volumen']<=15 else 2 if fila['Volumen']<=20 else 3 if fila['Volumen']<=30 else 4 if fila['Volumen']<=40 else 5
                     if rango not in f_activos: continue
 
                 color = obtener_color(fila)
-                
-                # CÍRCULO ARRASTRABLE (Draggable solo para Manuales)
-                if fila['Tipo'] == 'Manual':
-                    # Marcador invisible pero arrastrable que controla el círculo
-                    folium.Marker(
-                        [fila['Latitud'], fila['Longitud']],
-                        draggable=True,
-                        icon=folium.Icon(color="blue", icon="move"),
-                        key=f"drag_{idx}"
-                    ).add_to(m)
-                
                 folium.Circle(
                     [fila['Latitud'], fila['Longitud']], 
                     radius=float(fila['Radio']), 
@@ -118,28 +113,35 @@ if st.session_state.get("authentication_status"):
                         icon=DivIcon(html=f'<div style="font-size: 9pt; color: black; width:120px;">{fila["Nombre"]}</div>')
                     ).add_to(m)
 
-        map_output = st_folium(m, width="100%", height=850, key="mapa_v21")
+        # CAPTURA DE DATOS DEL MAPA (DIBUJOS Y EDICIONES)
+        map_output = st_folium(m, width="100%", height=850, key="mapa_v22")
 
-        # Lógica de Captura y Movimiento
-        if map_output:
-            # 1. Detectar NUEVO dibujo
-            if map_output.get("all_drawings"):
-                for d in map_output["all_drawings"]:
-                    if d['geometry']['type'] == 'Point' and 'radius' in d['properties']:
-                        lng, lat = d['geometry']['coordinates']
-                        rad = d['properties']['radius']
-                        # Evitar duplicados
-                        if not any((abs(st.session_state.puntos_datos['Latitud'] - lat) < 0.0001)):
-                            nuevo = pd.DataFrame([{'Nombre': f'Manual_{len(st.session_state.puntos_datos)+1}', 
-                                                   'Latitud': round(lat, 6), 'Longitud': round(lng, 6), 
-                                                   'Radio': round(rad, 2), 'Volumen': 0, 'Tipo': 'Manual'}])
-                            st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, nuevo], ignore_index=True)
-                            st.rerun()
-
-            # 2. Detectar MOVIMIENTO (Se actualiza al soltar el marcador azul)
-            if map_output.get("last_object_clicked_tooltip") or map_output.get("last_active_drawing"):
-                # Aquí capturamos la nueva coordenada si el usuario arrastró un objeto
-                pass 
+        if map_output and map_output.get("all_drawings"):
+            # Analizar el estado actual de los dibujos en el mapa
+            dibujos_mapa = map_output["all_drawings"]
+            puntos_manuales_nuevos = []
+            
+            # Limpiar manuales antiguos para reemplazarlos con la versión editada del mapa
+            df_actual = st.session_state.puntos_datos[st.session_state.puntos_datos['Tipo'] == 'Excel'].copy()
+            
+            for d in dibujos_mapa:
+                if d['geometry']['type'] == 'Point' and 'radius' in d['properties']:
+                    # GeoJSON: [lng, lat]
+                    lng, lat = d['geometry']['coordinates']
+                    rad = d['properties']['radius']
+                    
+                    puntos_manuales_nuevos.append({
+                        'Nombre': f'Manual_{len(puntos_manuales_nuevos)+1}',
+                        'Latitud': round(lat, 6), 'Longitud': round(lng, 6),
+                        'Radio': round(rad, 2), 'Volumen': 0, 'Tipo': 'Manual'
+                    })
+            
+            # Unificar Excel con los nuevos Manuales (editados o movidos)
+            nueva_tabla = pd.concat([df_actual, pd.DataFrame(puntos_manuales_nuevos)], ignore_index=True)
+            
+            if not nueva_tabla.equals(st.session_state.puntos_datos):
+                st.session_state.puntos_datos = nueva_tabla
+                st.rerun()
 
 elif st.session_state.get("authentication_status") is False:
     st.error('Acceso denegado.')
