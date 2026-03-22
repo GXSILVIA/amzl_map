@@ -12,14 +12,18 @@ import io
 # 1. CONFIGURACIÓN DE PÁGINA
 st.set_page_config(page_title="AMZL Hub - Localizador Pro", layout="wide")
 
-# Inicializar estados de sesión para evitar que el mapa se borre al interactuar
-if 'puntos_capturados' not in st.session_state:
-    st.session_state.puntos_capturados = []
-if 'df_final' not in st.session_state:
-    st.session_state.df_final = None
+# Inicializar estados de sesión para estabilidad
+if 'puntos_datos' not in st.session_state:
+    st.session_state.puntos_datos = pd.DataFrame(columns=['Nombre', 'Latitud', 'Longitud', 'Radio', 'Volumen'])
+if 'map_center' not in st.session_state:
+    st.session_state.map_center = [19.4326, -99.1332]
+if 'map_zoom' not in st.session_state:
+    st.session_state.map_zoom = 12
+if 'ultimo_clic' not in st.session_state:
+    st.session_state.ultimo_clic = None
 
 searcher_main = ArcGIS(timeout=15)
-searcher_backup = Nominatim(user_agent="amzl_hub_mx_v16")
+searcher_backup = Nominatim(user_agent="amzl_hub_mx_v20")
 
 def geolocalizar_con_precision(df_input):
     df = df_input.copy()
@@ -28,16 +32,16 @@ def geolocalizar_con_precision(df_input):
     
     lats, lons = [], []
     progreso = st.progress(0)
-    total = len(df)
     for i, fila in df.iterrows():
-        cp, nombre = fila.get('CP', ''), str(fila.get('Nombre', ''))
+        cp, nombre = str(fila.get('CP', '')), str(fila.get('Nombre', ''))
         try:
             loc = searcher_main.geocode(f"{cp}, {nombre}, Mexico")
             if not loc: loc = searcher_backup.geocode(query={"postalcode": cp, "country": "Mexico"})
             lats.append(loc.latitude if loc else None)
             lons.append(loc.longitude if loc else None)
-        except: lats.append(None); lons.append(None)
-        progreso.progress((i + 1) / total)
+        except: 
+            lats.append(None); lons.append(None)
+        progreso.progress((i + 1) / len(df))
     df['Latitud'], df['Longitud'] = lats, lons
     progreso.empty()
     return df
@@ -49,7 +53,7 @@ try:
     authenticator = stauth.Authenticate(config['credentials'], config['cookie']['name'], config['cookie']['key'], config['cookie']['expiry_days'])
     authenticator.login(location='main')
 except Exception as e:
-    st.error(f"Error al cargar configuración: {e}")
+    st.error(f"Error con config.yaml: {e}")
     st.stop()
 
 if st.session_state.get("authentication_status"):
@@ -59,90 +63,87 @@ if st.session_state.get("authentication_status"):
         st.title("Panel de Control")
         authenticator.logout('Cerrar Sesión', 'main')
         st.markdown("---")
+        
         modo = st.radio("Modo de entrada:", ["Coordenadas", "Código Postal"])
         archivo = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
         
-        # Limpieza manual si se quita el archivo
-        if archivo is None:
-            st.session_state.df_final = None
-        
-        st.subheader("📍 Puntos Capturados")
-        if st.button("Limpiar Lista"):
-            st.session_state.puntos_capturados = []
+        if archivo and st.button("Cargar datos de Excel"):
+            df_raw = pd.read_excel(archivo)
+            df_raw.columns = df_raw.columns.str.strip()
+            
+            if modo == "Código Postal":
+                df_procesado = geolocalizar_con_precision(df_raw)
+            else:
+                renombrar = {'lat':'Latitud','latitud':'Latitud','lon':'Longitud','longitud':'Longitud','lng':'Longitud','radio':'Radio','volumen':'Volumen'}
+                df_procesado = df_raw.rename(columns=renombrar)
+            
+            st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, df_procesado], ignore_index=True)
             st.rerun()
 
-        if st.session_state.puntos_capturados:
-            df_cap = pd.DataFrame(st.session_state.puntos_capturados)
-            st.dataframe(df_cap, height=150)
-            csv = df_cap.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Descargar CSV", csv, "puntos.csv")
+        st.subheader("📍 Editor de Puntos")
+        # Tabla interactiva para mover puntos o cambiar radios
+        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="dynamic", key="editor_puntos")
+        if not edited_df.equals(st.session_state.puntos_datos):
+            st.session_state.puntos_datos = edited_df
+            st.rerun()
 
-        st.subheader("🔍 Filtros")
-        labels = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🏮 R31-40", "🍷 R40+"]
-        # Usamos st.session_state para que los checkboxes no se reseteen solos
-        f_checks = [st.checkbox(labels[i], value=True, key=f"f_{i}") for i in range(6)]
-        mostrar_nombres = st.checkbox("🏷️ Mostrar Nombres", value=True)
+        # Exportación
+        if not st.session_state.puntos_datos.empty:
+            buffer = io.BytesIO()
+            st.session_state.puntos_datos.to_excel(buffer, index=False, engine='openpyxl')
+            st.download_button("📥 Descargar Excel Actualizado", buffer, "mapa_exportado.xlsx")
+
+        mostrar_nombres = st.checkbox("🏷️ Mostrar Nombres en Mapa", value=True)
 
     with col_mapa:
-        if archivo:
-            if st.session_state.df_final is None:
-                df_raw = pd.read_excel(archivo)
-                df_raw.columns = df_raw.columns.str.strip()
-                if modo == "Código Postal":
-                    st.session_state.df_final = geolocalizar_con_precision(df_raw)
-                else:
-                    renombrar = {'lat':'Latitud','latitud':'Latitud','lon':'Longitud','longitud':'Longitud','lng':'Longitud'}
-                    st.session_state.df_final = df_raw.rename(columns=renombrar)
+        # Definir centro dinámico
+        df_ver = st.session_state.puntos_datos.dropna(subset=['Latitud', 'Longitud'])
+        
+        m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom)
+        folium.LatLngPopup().add_to(m)
 
-        if st.session_state.df_final is not None:
-            df = st.session_state.df_final.copy().dropna(subset=['Latitud', 'Longitud'])
+        for i, fila in df_ver.iterrows():
+            # Asignar color por volumen (opcional)
+            v = float(fila.get('Volumen', 0))
+            color = "#FF0000" if v > 30 else "#FFA500" if v > 15 else "#3186cc"
+            rad = float(fila.get('Radio', 800))
+
+            folium.Circle(
+                [fila['Latitud'], fila['Longitud']], 
+                radius=rad, color="black", weight=1, fill=True, fill_color=color, fill_opacity=0.5,
+                popup=f"ID: {i}<br><b>Nombre:</b> {fila.get('Nombre','')}<br><b>Radio:</b> {rad}m"
+            ).add_to(m)
             
-            def asignar_rango(x):
-                try: 
-                    v = float(x)
-                    return 0 if v==0 else 1 if v<=15 else 2 if v<=20 else 3 if v<=30 else 4 if v<=40 else 5
-                except: return 0
-            
-            df['rango_id'] = df['Volumen'].apply(asignar_rango)
-            filtros_activos = [i for i, v in enumerate(f_checks) if v]
-            df_filtrado = df[df['rango_id'].isin(filtros_activos)]
+            if mostrar_nombres:
+                folium.Marker(
+                    [fila['Latitud'], fila['Longitud']], 
+                    icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; color: black; text-shadow: 1px 1px white;">{fila.get("Nombre","")}</div>')
+                ).add_to(m)
 
-            if not df_filtrado.empty:
-                m = folium.Map(location=[df_filtrado['Latitud'].mean(), df_filtrado['Longitud'].mean()], zoom_start=12)
-                folium.LatLngPopup().add_to(m)
+        # Captura de interacción con el mapa
+        map_output = st_folium(m, width="100%", height=750, key="mapa_v2", returned_objects=["last_clicked", "center", "zoom"])
 
-                for _, fila in df_filtrado.iterrows():
-                    color = {0:"#FFF", 1:"#FF0", 2:"#FFA500", 3:"#F77", 4:"#F00", 5:"#800"}.get(fila['rango_id'], "#888")
-                    rad = fila.get('Radio', 800)
-                    vol = fila.get('Volumen', 0)
-                    
-                    # Círculo con Popup que muestra el VOLUMEN
-                    folium.Circle(
-                        [fila['Latitud'], fila['Longitud']], 
-                        radius=float(rad), color="black", weight=1, fill=True, fill_color=color, fill_opacity=0.6,
-                        popup=f"<b>Nombre:</b> {fila.get('Nombre','')}<br><b>Volumen:</b> {vol}<br><b>Radio:</b> {rad}m"
-                    ).add_to(m)
-                    
-                    if mostrar_nombres:
-                        folium.Marker(
-                            [fila['Latitud'], fila['Longitud']], 
-                            icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; color: black; text-shadow: 1px 1px white; width: 150px;">{fila.get("Nombre","")}</div>')
-                        ).add_to(m)
+        # 1. Guardar posición para estabilidad
+        if map_output:
+            if map_output.get("center"):
+                st.session_state.map_center = [map_output["center"]["lat"], map_output["center"]["lng"]]
+            if map_output.get("zoom"):
+                st.session_state.map_zoom = map_output["zoom"]
 
-                # Marcas azules de puntos capturados
-                for p in st.session_state.puntos_capturados:
-                    folium.Marker([p['Latitud'], p['Longitud']], icon=folium.Icon(color='blue', icon='info-sign')).add_to(m)
-                
-                # Renderizado y captura de clics
-                map_output = st_folium(m, width="100%", height=750, key="mapa_v1")
-                
-                if map_output and map_output.get("last_clicked"):
-                    click_p = {"Latitud": round(map_output["last_clicked"]["lat"], 6), "Longitud": round(map_output["last_clicked"]["lng"], 6)}
-                    if click_p not in st.session_state.puntos_capturados:
-                        st.session_state.puntos_capturados.append(click_p)
-                        st.rerun()
-            else:
-                st.warning("No hay datos para mostrar con los filtros seleccionados.")
+            # 2. Lógica de clic para nuevo punto (evitar duplicidad)
+            if map_output.get("last_clicked"):
+                clic_actual = map_output["last_clicked"]
+                if clic_actual != st.session_state.ultimo_clic:
+                    st.session_state.ultimo_clic = clic_actual
+                    nuevo_reg = {
+                        'Nombre': f"Nuevo_{len(st.session_state.puntos_datos)+1}",
+                        'Latitud': clic_actual['lat'], 'Longitud': clic_actual['lng'],
+                        'Radio': 800, 'Volumen': 0
+                    }
+                    st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, pd.DataFrame([nuevo_reg])], ignore_index=True)
+                    st.rerun()
 
 elif st.session_state.get("authentication_status") is False:
-    st.error('Acceso denegado')
+    st.error('Usuario/Contraseña incorrectos')
+elif st.session_state.get("authentication_status") is None:
+    st.warning('Por favor, ingrese sus credenciales')
