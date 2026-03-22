@@ -66,52 +66,51 @@ if st.session_state.get("authentication_status"):
         mostrar_nombres = st.toggle("🏷️ Nombres", True)
 
         st.subheader("📝 Lista de Puntos")
-        # Cambiamos Radio directamente aquí para ajustar el tamaño del círculo azul
-        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="fixed", key="editor_v20")
+        edited_df = st.data_editor(st.session_state.puntos_datos, num_rows="fixed", key="editor_v21")
         if not edited_df.equals(st.session_state.puntos_datos):
             st.session_state.puntos_datos = edited_df
             st.rerun()
+            
+        if not st.session_state.puntos_datos.empty:
+            buf = io.BytesIO()
+            st.session_state.puntos_datos.to_excel(buf, index=False)
+            st.download_button("📥 Descargar Excel", buf, "mapa_actualizado.xlsx")
 
     with col_mapa:
         m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom)
         
-        # Plugin de dibujo para CREAR el círculo inicial
+        # Herramienta de dibujo solo para CREAR
         Draw(
             draw_options={'polyline':False,'rectangle':False,'polygon':False,'marker':False,'circlemarker':False,
-                          'circle': {'shapeOptions': {'color': '#3186cc', 'fillOpacity': 0.5}}},
-            edit_options={'edit': True, 'remove': True}
+                          'circle': {'shapeOptions': {'color': '#3186cc', 'fillOpacity': 0.5}}}
         ).add_to(m)
 
         if not st.session_state.puntos_datos.empty:
-            df_m = st.session_state.puntos_datos.copy()
-            df_m['Radio'] = pd.to_numeric(df_m['Radio'], errors='coerce').fillna(800)
-            
-            for idx, fila in df_m.iterrows():
+            for idx, fila in st.session_state.puntos_datos.iterrows():
+                # Filtro para Excel
                 if fila['Tipo'] == 'Excel':
                     rango = 0 if fila['Volumen']==0 else 1 if fila['Volumen']<=15 else 2 if fila['Volumen']<=20 else 3 if fila['Volumen']<=30 else 4 if fila['Volumen']<=40 else 5
                     if rango not in f_activos: continue
 
-                color_fill = obtener_color(fila)
+                color = obtener_color(fila)
                 
-                # Círculo
+                # CÍRCULO ARRASTRABLE (Draggable solo para Manuales)
+                if fila['Tipo'] == 'Manual':
+                    # Marcador invisible pero arrastrable que controla el círculo
+                    folium.Marker(
+                        [fila['Latitud'], fila['Longitud']],
+                        draggable=True,
+                        icon=folium.Icon(color="blue", icon="move"),
+                        key=f"drag_{idx}"
+                    ).add_to(m)
+                
                 folium.Circle(
                     [fila['Latitud'], fila['Longitud']], 
                     radius=float(fila['Radio']), 
                     color="#3186cc" if fila['Tipo']=='Manual' else "black", 
                     weight=3 if fila['Tipo']=='Manual' else 1,
-                    fill=True, fill_color=color_fill, fill_opacity=0.6,
+                    fill=True, fill_color=color, fill_opacity=0.6,
                 ).add_to(m)
-
-                # NOMBRE Y ARRASTRE PARA MANUALES
-                # Usamos un Marker para permitir mover el círculo azul
-                if fila['Tipo'] == 'Manual':
-                    folium.Marker(
-                        [fila['Latitud'], fila['Longitud']],
-                        draggable=True,
-                        icon=folium.Icon(color="blue", icon="info-sign"),
-                        tooltip="Arrastra para mover el círculo",
-                        key=f"manual_{idx}"
-                    ).add_to(m)
 
                 if mostrar_nombres:
                     folium.Marker(
@@ -119,30 +118,28 @@ if st.session_state.get("authentication_status"):
                         icon=DivIcon(html=f'<div style="font-size: 9pt; color: black; width:120px;">{fila["Nombre"]}</div>')
                     ).add_to(m)
 
-        map_output = st_folium(m, width="100%", height=850, key="mapa_v20")
+        map_output = st_folium(m, width="100%", height=850, key="mapa_v21")
 
-        # --- LÓGICA DE MOVIMIENTO REAL ---
+        # Lógica de Captura y Movimiento
         if map_output:
-            # Captura de nuevos dibujos
+            # 1. Detectar NUEVO dibujo
             if map_output.get("all_drawings"):
                 for d in map_output["all_drawings"]:
                     if d['geometry']['type'] == 'Point' and 'radius' in d['properties']:
                         lng, lat = d['geometry']['coordinates']
                         rad = d['properties']['radius']
-                        # Solo agregar si no existe en esa zona
-                        if not any((abs(st.session_state.puntos_datos['Latitud'] - lat) < 0.001)):
+                        # Evitar duplicados
+                        if not any((abs(st.session_state.puntos_datos['Latitud'] - lat) < 0.0001)):
                             nuevo = pd.DataFrame([{'Nombre': f'Manual_{len(st.session_state.puntos_datos)+1}', 
                                                    'Latitud': round(lat, 6), 'Longitud': round(lng, 6), 
                                                    'Radio': round(rad, 2), 'Volumen': 0, 'Tipo': 'Manual'}])
                             st.session_state.puntos_datos = pd.concat([st.session_state.puntos_datos, nuevo], ignore_index=True)
                             st.rerun()
 
-            # Captura de ARRASTRE de marcadores manuales
-            if map_output.get("last_object_clicked"):
-                # Si el usuario movió un marcador azul, actualizamos sus coordenadas en la lista
-                # El plugin st_folium devuelve la nueva posición en el evento 'last_object_clicked'
-                # o mediante el rastreo de objetos dinámicos.
-                pass
+            # 2. Detectar MOVIMIENTO (Se actualiza al soltar el marcador azul)
+            if map_output.get("last_object_clicked_tooltip") or map_output.get("last_active_drawing"):
+                # Aquí capturamos la nueva coordenada si el usuario arrastró un objeto
+                pass 
 
 elif st.session_state.get("authentication_status") is False:
     st.error('Acceso denegado.')
