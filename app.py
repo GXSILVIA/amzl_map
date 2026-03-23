@@ -8,7 +8,7 @@ import yaml
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 
-# --- CONFIGURACIÓN ---
+# 1. CONFIGURACIÓN
 st.set_page_config(page_title="AMZL Hub - Localizador Pro", layout="wide")
 
 def obtener_color(v):
@@ -22,16 +22,20 @@ def obtener_color(v):
         return "#800000"
     except: return "#888888"
 
-# --- AUTENTICACIÓN ---
+# 2. AUTENTICACIÓN (CORREGIDO: cookie_expiry_days)
 try:
     with open('config.yaml') as file:
         config = yaml.load(file, Loader=SafeLoader)
+    
     authenticator = stauth.Authenticate(
-        config['credentials'], "amzl_cookie", "signature_key", expiry_days=0
+        config['credentials'],
+        config['cookie']['name'],
+        config['cookie']['key'],
+        cookie_expiry_days=config['cookie']['expiry_days'] # CORRECCIÓN AQUÍ
     )
     authenticator.login(location='main')
 except Exception as e:
-    st.error(f"Error: {e}"); st.stop()
+    st.error(f"Error de Autenticación: {e}"); st.stop()
 
 if st.session_state.get("authentication_status"):
     col_mapa, col_controles = st.columns([3.5, 1.2]) 
@@ -63,13 +67,13 @@ if st.session_state.get("authentication_status"):
                 
                 if rango in activos:
                     r_val = float(fila.get('Radio', 800))
-                    # Círculo con Tooltip permanente para el radio
+                    # Usamos Circle directamente para que el plugin Draw lo capture como editable
                     folium.Circle(
                         location=[fila['Latitud'], fila['Longitud']],
                         radius=r_val,
                         color='black', weight=1,
                         fill=True, fill_color=obtener_color(v), fill_opacity=0.6,
-                        tooltip=f"Nombre: {fila.get('Nombre')}<br>Radio: {int(r_val)}m"
+                        tooltip=f"Nombre: {fila.get('Nombre')}"
                     ).add_to(m)
 
                     if mostrar_nombres:
@@ -90,28 +94,10 @@ if st.session_state.get("authentication_status"):
         )
         draw.add_to(m)
 
-        # INYECCIÓN DE JAVASCRIPT: Actualiza el texto del radio al editar
-        script_radio = """
-        <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            var map = L.DomUtil.get('map');
-            window.map_obj.on('draw:edited', function (e) {
-                var layers = e.layers;
-                layers.eachLayer(function (layer) {
-                    if (layer instanceof L.Circle) {
-                        var rad = Math.round(layer.getRadius());
-                        layer.setTooltipContent("Radio: " + rad + "m");
-                    }
-                });
-            });
-        });
-        </script>
-        """
-        m.get_root().html.add_child(folium.Element(script_radio))
+        # Renderizar mapa
+        map_output = st_folium(m, width="100%", height=800, key="mapa_v_corregida")
 
-        map_output = st_folium(m, width="100%", height=800, key="mapa_v_final_radio")
-
-    # 5. EXPORTACIÓN
+    # 5. EXPORTACIÓN (Recuperar nombres del tooltip)
     if map_output and map_output.get("all_drawings"):
         datos_actualizados = []
         for i, dibujo in enumerate(map_output["all_drawings"]):
@@ -119,12 +105,11 @@ if st.session_state.get("authentication_status"):
             geom = dibujo.get('geometry', {})
             if 'radius' in props:
                 lng, lat = geom['coordinates']
-                # Limpiar el nombre del tooltip (quitando el radio del texto)
-                raw_name = props.get('tooltip', f"Nuevo_{i+1}")
-                clean_name = raw_name.split('<br>')[0].replace("Nombre: ", "")
+                nombre_raw = props.get('tooltip', f"Nuevo_{i+1}")
+                nombre_limpio = nombre_raw.replace("Nombre: ", "")
                 
                 datos_actualizados.append({
-                    "Nombre": clean_name,
+                    "Nombre": nombre_limpio,
                     "Latitud": round(lat, 6), "Longitud": round(lng, 6),
                     "Radio_m": round(props['radius'], 1)
                 })
@@ -133,8 +118,8 @@ if st.session_state.get("authentication_status"):
             with col_controles:
                 st.subheader("💾 Exportar")
                 df_export = pd.DataFrame(datos_actualizados)
-                st.download_button("📥 Descargar CSV", df_export.to_csv(index=False).encode('utf-8'), "zonas_actualizadas.csv", "text/csv")
+                st.download_button("📥 Bajar CSV", df_export.to_csv(index=False).encode('utf-8'), "mapa_actualizado.csv", "text/csv")
                 st.dataframe(df_export, height=200)
 
 elif st.session_state.get("authentication_status") is False:
-    st.error('Acceso denegado')
+    st.error('Usuario/Contraseña incorrectos')
