@@ -8,27 +8,17 @@ import yaml
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 
-# 1. CONFIGURACIÓN Y ESTADO PERSISTENTE
+# 1. CONFIGURACIÓN Y ESTADO
 st.set_page_config(page_title="AMZL Hub - Localizador Pro", layout="wide")
 
-# Inicializar estados si no existen
 if 'dibujos_persistentes' not in st.session_state:
     st.session_state.dibujos_persistentes = []
 if 'map_center' not in st.session_state:
     st.session_state.map_center = [19.4326, -99.1332]
+if 'zoom_nivel' not in st.session_state:
+    st.session_state.zoom_nivel = 12
 
-def obtener_color(v):
-    try:
-        v = float(v)
-        if v == 0: return "#FFFFFF"
-        if v <= 15: return "#FFFF00"
-        if v <= 20: return "#FFA500"
-        if v <= 30: return "#FF7777"
-        if v <= 40: return "#FF0000"
-        return "#800000"
-    except: return "#888888"
-
-# 2. AUTENTICACIÓN (Asegúrate de tener tu config.yaml)
+# 2. AUTENTICACIÓN
 try:
     with open('config.yaml') as file:
         config = yaml.load(file, Loader=SafeLoader)
@@ -36,106 +26,125 @@ try:
         config['credentials'], config['cookie']['name'], 
         config['cookie']['key'], config['cookie']['expiry_days']
     )
-except: st.error("Error en config.yaml"); st.stop()
+except: st.error("Falta config.yaml"); st.stop()
 
 name, auth_status, username = authenticator.login(location='main')
 
 if auth_status:
-    col_mapa, col_controles = st.columns([4, 1.2]) 
+    col_mapa, col_controles = st.columns([3.8, 1.2]) 
 
     with col_controles:
-        st.title(f"Usuario: {name}")
+        st.title(f"📍 Gestión")
         authenticator.logout('Cerrar Sesión', 'main')
-        archivo = st.file_uploader("Cargar Excel", type=["xlsx"])
-        puntos_excel = pd.read_excel(archivo).dropna(subset=['Latitud', 'Longitud']) if archivo else pd.DataFrame()
         
-        st.divider()
-        mostrar_nombres = st.toggle("🏷️ Nombres Excel", True)
+        # --- SECCIÓN EXCEL ---
+        st.subheader("📁 Datos Excel")
+        archivo = st.file_uploader("Subir Archivo", type=["xlsx"], label_visibility="collapsed")
         
-        # Filtros de Volumen
-        c1, c2 = st.columns(2)
-        f_v = [c1.checkbox("⚪ R0", True), c1.checkbox("🟡 R1-15", True), c1.checkbox("🟠 R16-20", True),
-               c2.checkbox("🔴 R21-30", True), c2.checkbox("🏮 R31-40", True), c2.checkbox("🍷 R40+", True)]
-        activos = [i for i, v in enumerate(f_v) if v]
+        if archivo:
+            puntos_excel = pd.read_excel(archivo).dropna(subset=['Latitud', 'Longitud'])
+            if 'ultimo_archivo' not in st.session_state or st.session_state.ultimo_archivo != archivo.name:
+                st.session_state.map_center = [puntos_excel['Latitud'].mean(), puntos_excel['Longitud'].mean()]
+                st.session_state.ultimo_archivo = archivo.name
+                st.rerun()
+        else:
+            puntos_excel = pd.DataFrame()
 
-        if st.button("🗑️ Borrar Dibujos Manuales"):
+        mostrar_nombres = st.toggle("🏷️ Ver Nombres", True)
+        
+        # --- SECCIÓN HERRAMIENTAS ---
+        st.divider()
+        st.subheader("🛠️ Herramientas de Capa")
+        st.info("Usa los iconos del mapa (arriba izquierda) para: \n1. **Nuevo Círculo** (🔵)\n2. **Editar/Mover** (✏️)\n3. **Borrar** (🗑️)")
+        
+        if st.button("💾 Guardar Cambios Manuales", use_container_width=True, type="primary"):
+            # La lógica de guardado se dispara al final del script mediante st_folium
+            st.success("¡Cambios registrados!")
+            st.rerun()
+
+        if st.button("❌ Limpiar Todo", use_container_width=True):
             st.session_state.dibujos_persistentes = []
             st.rerun()
 
     with col_mapa:
-        # Crear objeto Mapa
-        m = folium.Map(location=st.session_state.map_center, zoom_start=12)
+        # Crear Mapa
+        m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.zoom_nivel)
         
-        # --- CAPA 1: DATOS EXCEL (Dinámica por filtros) ---
+        # JS PARA RADIO EN TIEMPO REAL AL EDITAR
+        script_radio = """
+        <script>
+        function updateRadius(e) {
+            var layer = e.layer;
+            var radius = Math.round(layer.getRadius());
+            layer.bindTooltip("Radio: " + radius + "m", {permanent: true, direction: 'center'}).openTooltip();
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            var map = L.DomUtil.get('map');
+            window.map_obj.on('draw:editresize', updateRadius);
+        });
+        </script>
+        """
+        m.get_root().html.add_child(folium.Element(script_radio))
+
+        # CAPA EXCEL
         if not puntos_excel.empty:
             for _, fila in puntos_excel.iterrows():
-                v = fila.get('Volumen', 0)
-                rango = 0 if v==0 else 1 if v<=15 else 2 if v<=20 else 3 if v<=30 else 4 if v<=40 else 5
-                if rango in activos:
-                    folium.Circle(
-                        location=[fila['Latitud'], fila['Longitud']], radius=float(fila.get('Radio', 800)),
-                        color='black', weight=1, fill=True, fill_color=obtener_color(v), fill_opacity=0.4
-                    ).add_to(m)
-                    if mostrar_nombres:
-                        folium.Marker([fila['Latitud'], fila['Longitud']], 
-                            icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; color: black;">{fila["Nombre"]}</div>')).add_to(m)
+                folium.Circle(
+                    location=[fila['Latitud'], fila['Longitud']], radius=float(fila.get('Radio', 800)),
+                    color='black', weight=1, fill=True, fill_color='#FF5733', fill_opacity=0.3
+                ).add_to(m)
+                if mostrar_nombres:
+                    folium.Marker([fila['Latitud'], fila['Longitud']], 
+                        icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; width:150px;">{fila["Nombre"]}</div>')).add_to(m)
 
-        # --- CAPA 2: DIBUJOS MANUALES (Persistentes) ---
-        # Volvemos a dibujar los círculos que ya estaban guardados en el estado
+        # CAPA MANUAL (PERSISTENTE)
         for d in st.session_state.dibujos_persistentes:
             folium.Circle(
                 location=[d['lat'], d['lon']], radius=d['radius'],
-                color='blue', weight=2, fill=True, fill_color='blue', fill_opacity=0.2
+                color='blue', weight=2, fill=True, fill_color='blue', fill_opacity=0.2,
+                tooltip=f"Radio: {int(d['radius'])}m"
             ).add_to(m)
 
-        # Herramienta de dibujo
-        Draw(export=False, position='topleft', draw_options={
-            'circle': {'showRadius': True, 'metric': True, 'shapeOptions': {'color': '#0000FF'}},
-            'polyline': False, 'rectangle': False, 'polygon': False, 'marker': False
-        }).add_to(m)
+        # HERRAMIENTA DE DIBUJO (CAPA DE ACCIÓN)
+        Draw(
+            export=False,
+            position='topleft',
+            draw_options={
+                'circle': {'showRadius': True, 'metric': True, 'shapeOptions': {'color': '#0000FF'}},
+                'polyline': False, 'rectangle': False, 'polygon': False, 'marker': False, 'circlemarker': False
+            },
+            edit_options={'edit': True, 'remove': True}
+        ).add_to(m)
 
-        # --- LEYENDA FLOTANTE (DENTRO DEL MAPA) ---
-        filas_html = ""
-        for i, d in enumerate(st.session_state.dibujos_persistentes):
-            filas_html += f"<tr><td>M_{i+1}</td><td>{d['lat']:.4f}</td><td>{d['lon']:.4f}</td><td>{d['radius']:.1f}m</td></tr>"
-
-        if filas_html:
+        # LEYENDA FIJA DE RADIOS (TABLA INTERNA)
+        if st.session_state.dibujos_persistentes:
+            filas = "".join([f"<tr><td>{i+1}</td><td>{d['radius']:.0f}m</td></tr>" 
+                            for i, d in enumerate(st.session_state.dibujos_persistentes)])
             legend_html = f"""
-            <div style="position: fixed; top: 20px; right: 70px; width: 260px; height: auto; 
-                        z-index:9999; background: white; padding: 10px; border: 2px solid #333; 
-                        border-radius: 8px; font-family: sans-serif; font-size: 11px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
-                <b style="font-size: 13px;">📍 Nuevos Radios</b><br>
-                <div style="max-height: 150px; overflow-y: auto; margin-top: 5px;">
-                    <table style="width:100%; border-collapse: collapse; text-align: left;">
-                        <tr style="border-bottom: 1px solid #ddd; background: #f9f9f9;"><th>ID</th><th>Lat</th><th>Lon</th><th>Radio</th></tr>
-                        {filas_html}
-                    </table>
-                </div>
+            <div style="position: fixed; top: 10px; right: 50px; z-index: 10000; background: white; padding: 10px; 
+                        border: 2px solid #0000FF; border-radius: 8px; font-family: sans-serif; font-size: 11px;">
+                <b style="color: blue;">🔵 Radios Manuales</b>
+                <table style="width:100%; border-collapse: collapse; margin-top:5px;">
+                    <tr style="background:#eee;"><th>ID</th><th>Radio</th></tr>
+                    {filas}
+                </table>
             </div>
             """
             m.get_root().html.add_child(folium.Element(legend_html))
 
         # Renderizado
-        map_output = st_folium(m, width=1400, height=750, key="mapa_final")
+        map_output = st_folium(m, width="100%", height=750, key="mapa_v4")
 
-    # --- 3. LÓGICA DE PERSISTENCIA (CAPTURA) ---
+    # 3. LÓGICA DE CAPTURA AL PULSAR "SAVE" O TERMINAR DIBUJO
     if map_output and map_output.get("all_drawings"):
-        nuevos_datos = []
-        for dibujo in map_output["all_drawings"]:
-            if 'radius' in dibujo['properties']:
-                lng, lat = dibujo['geometry']['coordinates']
-                nuevos_datos.append({
-                    'lat': lat, 'lon': lng, 'radius': dibujo['properties']['radius']
-                })
+        nuevos = []
+        for d in map_output["all_drawings"]:
+            if 'radius' in d['properties']:
+                lng, lat = d['geometry']['coordinates']
+                nuevos.append({'lat': lat, 'lon': lng, 'radius': d['properties']['radius']})
         
-        # Si el número de dibujos cambió, actualizamos el estado y reiniciamos para mostrar la tabla
-        if nuevos_datos != st.session_state.dibujos_persistentes:
-            st.session_state.dibujos_persistentes = nuevos_datos
+        if nuevos != st.session_state.dibujos_persistentes:
+            st.session_state.dibujos_persistentes = nuevos
             st.rerun()
 
-    # Descarga
-    if st.session_state.dibujos_persistentes:
-        df_save = pd.DataFrame(st.session_state.dibujos_persistentes)
-        st.download_button("📥 Exportar Radios Manuales (CSV)", df_save.to_csv(index=False), "mis_radios.csv")
-
-elif auth_status is False: st.error('Error de login')
+elif auth_status is False: st.error('Credenciales incorrectas')
