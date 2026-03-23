@@ -32,7 +32,7 @@ try:
     )
     authenticator.login(location='main')
 except Exception as e:
-    st.error(f"Error de config: {e}"); st.stop()
+    st.error(f"Error: {e}"); st.stop()
 
 if st.session_state.get("authentication_status"):
     col_mapa, col_controles = st.columns([3.5, 1.2]) 
@@ -54,13 +54,11 @@ if st.session_state.get("authentication_status"):
         activos = [i for i, v in enumerate(f_v) if v]
 
     with col_mapa:
+        # Centrar mapa
         centro = [puntos_excel['Latitud'].mean(), puntos_excel['Longitud'].mean()] if not puntos_excel.empty else [19.4326, -99.1332]
         m = folium.Map(location=centro, zoom_start=12)
 
-        # 3. CAPA FIJA (EXCEL) - NO EDITABLE
-        # Usamos un FeatureGroup específico para que NO sea parte de la capa de dibujo
-        fg_fijo = folium.FeatureGroup(name="Capa Base (Fija)").add_to(m)
-        
+        # 3. CAPA FIJA (EXCEL) - SE MANTIENEN ESTÁTICOS
         if not puntos_excel.empty:
             for _, fila in puntos_excel.iterrows():
                 v = fila.get('Volumen', 0)
@@ -72,17 +70,16 @@ if st.session_state.get("authentication_status"):
                         radius=float(fila.get('Radio', 800)),
                         color='black', weight=1,
                         fill=True, fill_color=obtener_color(v), fill_opacity=0.4,
-                        interactive=False # ESTO EVITA QUE SE PUEDAN EDITAR
-                    ).add_to(fg_fijo)
+                        interactive=False # No se pueden tocar ni borrar
+                    ).add_to(m)
 
                     if mostrar_nombres:
                         folium.Marker(
                             [fila['Latitud'], fila['Longitud']], 
                             icon=DivIcon(html=f'<div style="font-size: 8pt; color: black; font-weight: bold; width:100px;">{fila["Nombre"]}</div>')
-                        ).add_to(fg_fijo)
+                        ).add_to(m)
 
-        # 4. HERRAMIENTA DE DIBUJO (SOLO PARA CÍRCULOS AZULES NUEVOS)
-        # showRadius=True funciona al crear. Para edición agregamos JS abajo.
+        # 4. HERRAMIENTA DE DIBUJO (SOLO PARA CÍRCULOS AZULES)
         draw = Draw(
             export=False,
             position='topleft',
@@ -94,29 +91,14 @@ if st.session_state.get("authentication_status"):
         )
         draw.add_to(m)
 
-        # JS PARA MOSTRAR RADIO DURANTE EDICIÓN
-        js_radio = """
-        <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            var map = L.DomUtil.get('map');
-            window.map_obj.on('draw:editresize draw:editmove', function(e) {
-                var layer = e.layer;
-                if (layer instanceof L.Circle) {
-                    var radius = Math.round(layer.getRadius());
-                    layer.bindTooltip("Radio: " + radius + "m", {permanent: true, direction: 'center'}).openTooltip();
-                }
-            });
-        });
-        </script>
-        """
-        m.get_root().html.add_child(folium.Element(js_radio))
+        # RENDERIZAR MAPA
+        # Cambiamos la 'key' dinámicamente si es necesario para forzar limpieza
+        map_output = st_folium(m, width=1200, height=800, key="mapa_limpio_v1")
 
-        # Renderizar mapa
-        map_output = st_folium(m, width="100%", height=800, key="mapa_final_estable")
-
-    # 5. EXPORTACIÓN (SOLO DIBUJOS MANUALES NUEVOS)
-    if map_output and map_output.get("all_drawings") is not None:
+    # 5. EXPORTACIÓN (SOLO SI HAY DIBUJOS REALES)
+    if map_output and map_output.get("all_drawings"):
         datos_nuevos = []
+        # Solo procesamos si hay geometría válida (esto evita el error de círculos fantasma)
         for i, dibujo in enumerate(map_output["all_drawings"]):
             geom = dibujo.get('geometry')
             props = dibujo.get('properties')
@@ -132,9 +114,9 @@ if st.session_state.get("authentication_status"):
 
         if datos_nuevos:
             with col_controles:
-                st.subheader("💾 Exportar Nuevos")
+                st.subheader("💾 Exportar")
                 df_exp = pd.DataFrame(datos_nuevos)
-                st.download_button("📥 Bajar CSV", df_exp.to_csv(index=False).encode('utf-8'), "nuevas_zonas.csv", "text/csv")
+                st.download_button("📥 Descargar CSV", df_exp.to_csv(index=False).encode('utf-8'), "zonas.csv", "text/csv")
                 st.dataframe(df_exp, height=150)
 
 elif st.session_state.get("authentication_status") is False:
