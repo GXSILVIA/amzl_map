@@ -8,24 +8,14 @@ import yaml
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 
-# 1. CONFIGURACIÓN
+# 1. CONFIGURACIÓN Y ESTADO PERSISTENTE
 st.set_page_config(page_title="AMZL Hub - Localizador Pro", layout="wide")
 
-# CSS para superponer la tabla sobre el mapa
-st.markdown("""
-    <style>
-    .overlay-table {
-        position: absolute; top: 10px; right: 10px; z-index: 1000;
-        background: rgba(255, 255, 255, 0.9); padding: 10px;
-        border-radius: 5px; border: 1px solid #ccc; max-width: 300px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
+# Inicializar estados si no existen
+if 'dibujos_persistentes' not in st.session_state:
+    st.session_state.dibujos_persistentes = []
 if 'map_center' not in st.session_state:
     st.session_state.map_center = [19.4326, -99.1332]
-if 'dibujos_manuales' not in st.session_state:
-    st.session_state.dibujos_manuales = []
 
 def obtener_color(v):
     try:
@@ -38,7 +28,7 @@ def obtener_color(v):
         return "#800000"
     except: return "#888888"
 
-# 2. AUTENTICACIÓN
+# 2. AUTENTICACIÓN (Asegúrate de tener tu config.yaml)
 try:
     with open('config.yaml') as file:
         config = yaml.load(file, Loader=SafeLoader)
@@ -46,93 +36,106 @@ try:
         config['credentials'], config['cookie']['name'], 
         config['cookie']['key'], config['cookie']['expiry_days']
     )
-except Exception as e:
-    st.error(f"Error config: {e}"); st.stop()
+except: st.error("Error en config.yaml"); st.stop()
 
-name, authentication_status, username = authenticator.login(location='main')
+name, auth_status, username = authenticator.login(location='main')
 
-if authentication_status:
-    col_mapa, col_controles = st.columns([3.5, 1.2]) 
+if auth_status:
+    col_mapa, col_controles = st.columns([4, 1.2]) 
 
     with col_controles:
-        st.title(f"Hola, {name}")
+        st.title(f"Usuario: {name}")
         authenticator.logout('Cerrar Sesión', 'main')
         archivo = st.file_uploader("Cargar Excel", type=["xlsx"])
         puntos_excel = pd.read_excel(archivo).dropna(subset=['Latitud', 'Longitud']) if archivo else pd.DataFrame()
         
         st.divider()
-        mostrar_nombres = st.toggle("🏷️ Mostrar Nombres", True)
+        mostrar_nombres = st.toggle("🏷️ Nombres Excel", True)
         
+        # Filtros de Volumen
         c1, c2 = st.columns(2)
         f_v = [c1.checkbox("⚪ R0", True), c1.checkbox("🟡 R1-15", True), c1.checkbox("🟠 R16-20", True),
                c2.checkbox("🔴 R21-30", True), c2.checkbox("🏮 R31-40", True), c2.checkbox("🍷 R40+", True)]
         activos = [i for i, v in enumerate(f_v) if v]
 
+        if st.button("🗑️ Borrar Dibujos Manuales"):
+            st.session_state.dibujos_persistentes = []
+            st.rerun()
+
     with col_mapa:
-        # Contenedor para la tabla flotante
-        placeholder = st.empty()
-        
-        if not puntos_excel.empty and 'cargado' not in st.session_state:
-            st.session_state.map_center = [puntos_excel['Latitud'].mean(), puntos_excel['Longitud'].mean()]
-            st.session_state.cargado = True
-        
+        # Crear objeto Mapa
         m = folium.Map(location=st.session_state.map_center, zoom_start=12)
         
-        # Grupo para nombres (permite ocultarlos dinámicamente)
-        grupo_nombres = folium.FeatureGroup(name="Nombres")
-        
+        # --- CAPA 1: DATOS EXCEL (Dinámica por filtros) ---
         if not puntos_excel.empty:
             for _, fila in puntos_excel.iterrows():
                 v = fila.get('Volumen', 0)
                 rango = 0 if v==0 else 1 if v<=15 else 2 if v<=20 else 3 if v<=30 else 4 if v<=40 else 5
-                
                 if rango in activos:
-                    lat, lon = fila['Latitud'], fila['Longitud']
                     folium.Circle(
-                        location=[lat, lon], radius=float(fila.get('Radio', 800)),
-                        color='black', weight=1, fill=True, fill_color=obtener_color(v), fill_opacity=0.4,
-                        tooltip=f"{fila['Nombre']} | Vol: {v}"
+                        location=[fila['Latitud'], fila['Longitud']], radius=float(fila.get('Radio', 800)),
+                        color='black', weight=1, fill=True, fill_color=obtener_color(v), fill_opacity=0.4
                     ).add_to(m)
-
                     if mostrar_nombres:
-                        folium.Marker(
-                            [lat, lon], 
-                            icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; color: black; width:150px;">{fila["Nombre"]}</div>')
-                        ).add_to(grupo_nombres)
-            
-            if mostrar_nombres:
-                grupo_nombres.add_to(m)
+                        folium.Marker([fila['Latitud'], fila['Longitud']], 
+                            icon=DivIcon(html=f'<div style="font-size: 8pt; font-weight: bold; color: black;">{fila["Nombre"]}</div>')).add_to(m)
 
+        # --- CAPA 2: DIBUJOS MANUALES (Persistentes) ---
+        # Volvemos a dibujar los círculos que ya estaban guardados en el estado
+        for d in st.session_state.dibujos_persistentes:
+            folium.Circle(
+                location=[d['lat'], d['lon']], radius=d['radius'],
+                color='blue', weight=2, fill=True, fill_color='blue', fill_opacity=0.2
+            ).add_to(m)
+
+        # Herramienta de dibujo
         Draw(export=False, position='topleft', draw_options={
             'circle': {'showRadius': True, 'metric': True, 'shapeOptions': {'color': '#0000FF'}},
-            'polyline': False, 'rectangle': False, 'polygon': False, 'marker': False, 'circlemarker': False
+            'polyline': False, 'rectangle': False, 'polygon': False, 'marker': False
         }).add_to(m)
 
-        map_output = st_folium(m, width="100%", height=750, key="map_v3")
+        # --- LEYENDA FLOTANTE (DENTRO DEL MAPA) ---
+        filas_html = ""
+        for i, d in enumerate(st.session_state.dibujos_persistentes):
+            filas_html += f"<tr><td>M_{i+1}</td><td>{d['lat']:.4f}</td><td>{d['lon']:.4f}</td><td>{d['radius']:.1f}m</td></tr>"
 
-    # 3. PROCESAR DIBUJOS MANUALES Y MOSTRAR TABLA SOBRE EL MAPA
+        if filas_html:
+            legend_html = f"""
+            <div style="position: fixed; top: 20px; right: 70px; width: 260px; height: auto; 
+                        z-index:9999; background: white; padding: 10px; border: 2px solid #333; 
+                        border-radius: 8px; font-family: sans-serif; font-size: 11px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
+                <b style="font-size: 13px;">📍 Nuevos Radios</b><br>
+                <div style="max-height: 150px; overflow-y: auto; margin-top: 5px;">
+                    <table style="width:100%; border-collapse: collapse; text-align: left;">
+                        <tr style="border-bottom: 1px solid #ddd; background: #f9f9f9;"><th>ID</th><th>Lat</th><th>Lon</th><th>Radio</th></tr>
+                        {filas_html}
+                    </table>
+                </div>
+            </div>
+            """
+            m.get_root().html.add_child(folium.Element(legend_html))
+
+        # Renderizado
+        map_output = st_folium(m, width=1400, height=750, key="mapa_final")
+
+    # --- 3. LÓGICA DE PERSISTENCIA (CAPTURA) ---
     if map_output and map_output.get("all_drawings"):
-        datos_temp = []
-        for i, dibujo in enumerate(map_output["all_drawings"]):
-            props = dibujo.get('properties')
-            geom = dibujo.get('geometry')
-            if props and 'radius' in props:
-                lng, lat = geom['coordinates']
-                datos_temp.append({
-                    "ID": f"NUEVO_{i+1}",
-                    "Lat": round(lat, 5),
-                    "Lon": round(lng, 5),
-                    "Radio_m": round(props['radius'], 1)
+        nuevos_datos = []
+        for dibujo in map_output["all_drawings"]:
+            if 'radius' in dibujo['properties']:
+                lng, lat = dibujo['geometry']['coordinates']
+                nuevos_datos.append({
+                    'lat': lat, 'lon': lng, 'radius': dibujo['properties']['radius']
                 })
         
-        if datos_temp:
-            df_new = pd.DataFrame(datos_temp)
-            # Inyectar la tabla sobre el mapa usando el placeholder
-            with placeholder.container():
-                st.markdown('<div class="overlay-table"><b>Nuevos Radios</b>', unsafe_allow_html=True)
-                st.dataframe(df_new, height=150, hide_index=True)
-                st.download_button("📥 Descargar CSV", df_new.to_csv(index=False).encode('utf-8'), "zonas.csv", use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+        # Si el número de dibujos cambió, actualizamos el estado y reiniciamos para mostrar la tabla
+        if nuevos_datos != st.session_state.dibujos_persistentes:
+            st.session_state.dibujos_persistentes = nuevos_datos
+            st.rerun()
 
-elif authentication_status is False:
-    st.error('Credenciales incorrectas')
+    # Descarga
+    if st.session_state.dibujos_persistentes:
+        df_save = pd.DataFrame(st.session_state.dibujos_persistentes)
+        st.download_button("📥 Exportar Radios Manuales (CSV)", df_save.to_csv(index=False), "mis_radios.csv")
+
+elif auth_status is False: st.error('Error de login')
