@@ -8,7 +8,7 @@ import yaml
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 
-# 1. CONFIGURACIÓN Y ESTILO
+# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="AMZL Hub - Localizador Pro", layout="wide")
 
 def obtener_color(v):
@@ -22,16 +22,16 @@ def obtener_color(v):
         return "#800000"
     except: return "#888888"
 
-# 2. AUTENTICACIÓN (Parche Cookie Streamlit Cloud)
+# --- AUTENTICACIÓN ---
 try:
     with open('config.yaml') as file:
         config = yaml.load(file, Loader=SafeLoader)
     authenticator = stauth.Authenticate(
-        config['credentials'], "amzl_hub_auth", "key_999", cookie_expiry_days=0
+        config['credentials'], "amzl_cookie", "signature_key", expiry_days=0
     )
     authenticator.login(location='main')
 except Exception as e:
-    st.error(f"Error de config: {e}"); st.stop()
+    st.error(f"Error: {e}"); st.stop()
 
 if st.session_state.get("authentication_status"):
     col_mapa, col_controles = st.columns([3.5, 1.2]) 
@@ -41,13 +41,10 @@ if st.session_state.get("authentication_status"):
         authenticator.logout('Cerrar Sesión', 'main')
         
         archivo = st.file_uploader("Sube Excel", type=["xlsx"])
-        puntos_excel = pd.DataFrame()
-        if archivo:
-            puntos_excel = pd.read_excel(archivo).dropna(subset=['Latitud', 'Longitud'])
+        puntos_excel = pd.read_excel(archivo).dropna(subset=['Latitud', 'Longitud']) if archivo else pd.DataFrame()
 
-        st.divider()
-        st.subheader("🔍 Filtros y Visualización")
-        mostrar_nombres = st.toggle("🏷️ Mostrar Nombres", True)
+        st.subheader("🔍 Filtros")
+        mostrar_nombres = st.toggle("🏷️ Nombres", True)
         
         c1, c2 = st.columns(2)
         f_v = [c1.checkbox("⚪ R0", True), c1.checkbox("🟡 R1-15", True), c1.checkbox("🟠 R16-20", True),
@@ -58,66 +55,86 @@ if st.session_state.get("authentication_status"):
         centro = [puntos_excel['Latitud'].mean(), puntos_excel['Longitud'].mean()] if not puntos_excel.empty else [19.4326, -99.1332]
         m = folium.Map(location=centro, zoom_start=12)
 
-        # 3. DIBUJAR PUNTOS EXCEL (CON NOMBRES VINCULADOS A DIBUJO)
+        # 3. DIBUJAR PUNTOS EXCEL (CON RADIO VISIBLE)
         if not puntos_excel.empty:
             for _, fila in puntos_excel.iterrows():
                 v = fila.get('Volumen', 0)
                 rango = 0 if v==0 else 1 if v<=15 else 2 if v<=20 else 3 if v<=30 else 4 if v<=40 else 5
                 
                 if rango in activos:
-                    # Agregamos el nombre a la propiedad del círculo para que Folium Draw lo reconozca
+                    r_val = float(fila.get('Radio', 800))
+                    # Círculo con Tooltip permanente para el radio
                     folium.Circle(
                         location=[fila['Latitud'], fila['Longitud']],
-                        radius=float(fila.get('Radio', 800)),
+                        radius=r_val,
                         color='black', weight=1,
                         fill=True, fill_color=obtener_color(v), fill_opacity=0.6,
-                        tooltip=fila.get('Nombre', 'Sin Nombre') # El Tooltip se vuelve la llave del nombre
+                        tooltip=f"Nombre: {fila.get('Nombre')}<br>Radio: {int(r_val)}m"
                     ).add_to(m)
 
                     if mostrar_nombres:
                         folium.Marker(
                             [fila['Latitud'], fila['Longitud']], 
-                            icon=DivIcon(html=f'<div style="font-size: 8pt; color: black; font-weight: bold; width:120px;">{fila["Nombre"]}</div>')
+                            icon=DivIcon(html=f'<div style="font-size: 8pt; color: black; font-weight: bold; width:100px;">{fila["Nombre"]}</div>')
                         ).add_to(m)
 
-        # 4. CAPA DE DIBUJO (Muestra radio al editar)
+        # 4. PLUGIN DRAW (Edición habilitada)
         draw = Draw(
-            export=False, position='topleft',
+            export=False,
+            position='topleft',
             draw_options={
-                'polyline': False, 'rectangle': False, 'polygon': False, 'marker': False, 'circlemarker': False,
-                'circle': {'showRadius': True, 'metric': True, 'shapeOptions': {'color': '#0000FF', 'fillOpacity': 0.4}}
+                'circle': {'showRadius': True, 'metric': True, 'shapeOptions': {'color': '#0000FF'}},
+                'polyline': False, 'rectangle': False, 'polygon': False, 'marker': False, 'circlemarker': False
             },
             edit_options={'edit': True, 'remove': True}
         )
         draw.add_to(m)
-        m.add_child(folium.LatLngPopup())
 
-        map_output = st_folium(m, width="100%", height=800, key="mapa_final_names")
+        # INYECCIÓN DE JAVASCRIPT: Actualiza el texto del radio al editar
+        script_radio = """
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var map = L.DomUtil.get('map');
+            window.map_obj.on('draw:edited', function (e) {
+                var layers = e.layers;
+                layers.eachLayer(function (layer) {
+                    if (layer instanceof L.Circle) {
+                        var rad = Math.round(layer.getRadius());
+                        layer.setTooltipContent("Radio: " + rad + "m");
+                    }
+                });
+            });
+        });
+        </script>
+        """
+        m.get_root().html.add_child(folium.Element(script_radio))
 
-    # 5. EXTRACCIÓN CON NOMBRES ORIGINALES
-    if map_output and map_output.get("all_drawings") is not None:
-        datos_finales = []
+        map_output = st_folium(m, width="100%", height=800, key="mapa_v_final_radio")
+
+    # 5. EXPORTACIÓN
+    if map_output and map_output.get("all_drawings"):
+        datos_actualizados = []
         for i, dibujo in enumerate(map_output["all_drawings"]):
-            geom = dibujo.get('geometry')
             props = dibujo.get('properties', {})
-            if geom and geom['type'] == 'Point' and 'radius' in props:
+            geom = dibujo.get('geometry', {})
+            if 'radius' in props:
                 lng, lat = geom['coordinates']
-                # Recuperar nombre del Tooltip (Excel) o asignar genérico (Nuevos)
-                nombre_obj = props.get('tooltip', f"Nuevo_{i+1}")
+                # Limpiar el nombre del tooltip (quitando el radio del texto)
+                raw_name = props.get('tooltip', f"Nuevo_{i+1}")
+                clean_name = raw_name.split('<br>')[0].replace("Nombre: ", "")
                 
-                datos_finales.append({
-                    "Nombre": nombre_obj,
-                    "Latitud": round(lat, 6),
-                    "Longitud": round(lng, 6),
+                datos_actualizados.append({
+                    "Nombre": clean_name,
+                    "Latitud": round(lat, 6), "Longitud": round(lng, 6),
                     "Radio_m": round(props['radius'], 1)
                 })
 
-        if datos_finales:
+        if datos_actualizados:
             with col_controles:
-                st.subheader("💾 Exportar Mapa")
-                df_exp = pd.DataFrame(datos_finales)
-                st.download_button("📥 Bajar CSV con Nombres", df_exp.to_csv(index=False).encode('utf-8'), "mapa_hub.csv", "text/csv")
-                st.dataframe(df_exp, height=250, use_container_width=True)
+                st.subheader("💾 Exportar")
+                df_export = pd.DataFrame(datos_actualizados)
+                st.download_button("📥 Descargar CSV", df_export.to_csv(index=False).encode('utf-8'), "zonas_actualizadas.csv", "text/csv")
+                st.dataframe(df_export, height=200)
 
 elif st.session_state.get("authentication_status") is False:
-    st.error('Acceso incorrecto')
+    st.error('Acceso denegado')
