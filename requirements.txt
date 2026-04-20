@@ -2,7 +2,7 @@ streamlit
 pandas
 folium
 geopandas
-shapely
+shapely>=2.0.0
 numpy
 PyYAML
 streamlit-authenticator
