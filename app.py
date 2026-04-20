@@ -26,7 +26,10 @@ def calcular_traslape_real(p1, otros_pts):
     return (np.sum(cubiertos) / n) * 100
 
 def normalizar_cp(val):
-    return str(val).split('.')[0].strip().zfill(5)
+    try:
+        return str(int(float(val))).strip().zfill(5)
+    except:
+        return str(val).strip().zfill(5)
 
 # --- 2. AUTENTICACIÓN ---
 with open('config.yaml') as f:
@@ -50,7 +53,7 @@ if st.session_state["authentication_status"]:
             buf = io.BytesIO()
             cols = ["ZONA", "LATITUD", "LONGITUD", "RADIO", "VOLUMEN"] if t == "Coordenadas" else ["Nombre", "CP", "Email", "Telefono"]
             pd.DataFrame(columns=cols).to_excel(buf, index=False)
-            st.download_button(f"Descargar {t}", data=buf.getvalue(), file_name=n, key=n, use_container_width=True)
+            st.download_button(f"Descargar {t}", data=buf.getvalue(), file_name=n, key=f"btn_{n}", use_container_width=True)
 
         f_coords = st.file_uploader("📂 Archivo Coordenadas", type=["xlsx"])
         f_sales = st.file_uploader("📂 Archivo Salesforce", type=["xlsx"])
@@ -60,15 +63,13 @@ if st.session_state["authentication_status"]:
 
     with col_m:
         if f_coords and f_sales:
-            # Procesar Salesforce
             df_s = pd.read_excel(f_sales).fillna(0)
             df_s['CP'] = df_s['CP'].apply(normalizar_cp)
             df_s_grp = df_s.groupby('CP').agg({
-                'Nombre': lambda x: " / ".join(map(str, x)), # Separador para visualización en etiqueta
+                'Nombre': lambda x: " / ".join(map(str, x)),
                 'Email': 'first', 'Telefono': 'first', 'CP': 'count'
             }).rename(columns={'CP': 'Cantidad'}).reset_index()
 
-            # Leer Listas de CPs desde archivos TXT
             def get_cp_txt(folder):
                 path = f"{folder}/{edo_sel}.txt"
                 if os.path.exists(path):
@@ -80,12 +81,13 @@ if st.session_state["authentication_status"]:
             cp_qq = get_cp_txt("CP_QQ")
 
             gdf = gpd.read_file(f"mapas/{edo_sel}.geojson").to_crs("EPSG:4326")
-            cp_col = next((c for c in ['d_cp','CP','CODIGOPOSTAL'] if c in gdf.columns), gdf.columns[0])
+            cp_col = next((c for c in ['d_cp','CP','CODIGOPOSTAL','cp'] if c in gdf.columns), gdf.columns[0])
             gdf[cp_col] = gdf[cp_col].apply(normalizar_cp)
 
             df_c = pd.read_excel(f_coords)
             df_c.columns = df_c.columns.str.upper()
             pts = df_c.to_dict('records')
+            # Buffer aproximado en grados (RADIO / 111139)
             circles_geom = [Point(p['LONGITUD'], p['LATITUD']).buffer(p['RADIO']/111139) for p in pts]
             
             m = folium.Map(location=[df_c['LATITUD'].mean(), df_c['LONGITUD'].mean()], zoom_start=11, tiles="CartoDB Voyager")
@@ -111,20 +113,18 @@ if st.session_state["authentication_status"]:
                     elif cp_act in cp_qq:
                         color, tipo, accion = "red", "QQ", "Dar Seguimiento"
                     
-                    if tipo in filtros:
-                        # Reemplazar ' / ' por '<br>' para el tooltip HTML
-                        tooltip_names = data_s['Nombre'].replace(" / ", "<br>")
+                    if tipo in filtros or (tipo == "Descartar" and "Descartar" in filtros):
+                        tooltip_names = str(data_s['Nombre']).replace(" / ", "<br>")
                         folium.GeoJson(poly['geometry'], style_function=lambda x, c=color: {
                             'fillColor': c, 'color': 'black', 'weight': 1, 'fillOpacity': 0.6
                         }, tooltip=f"<b>CP: {cp_act}</b><br>Personas: {data_s['Cantidad']}<br>{tooltip_names}").add_to(m)
                         
                         if ver_n:
                             c_point = poly['geometry'].centroid
-                            # Muestra los nombres directamente en el mapa (ajustado para que no sea gigante)
-                            display_names = data_s['Nombre'] if len(data_s['Nombre']) < 30 else data_s['Nombre'][:27]+"..."
-                            folium.Marker([c_point.y, c_point.x], icon=folium.DivIcon(html=f'<div style="font-size:7pt; color:black; font-weight:bold; width:150px;">{display_names}</div>')).add_to(m)
+                            d_name = data_s['Nombre'] if len(data_s['Nombre']) < 35 else data_s['Nombre'][:32]+"..."
+                            folium.Marker([c_point.y, c_point.x], icon=folium.DivIcon(html=f'<div style="font-size:7pt; color:black; font-weight:bold; width:150px;">{d_name}</div>')).add_to(m)
                         
-                        for nom_indiv in data_s['Nombre'].split(" / "):
+                        for nom_indiv in str(data_s['Nombre']).split(" / "):
                             reporte_final.append({
                                 "Nombre": nom_indiv, "CP": cp_act, "Email": data_s['Email'],
                                 "Telefono": data_s['Telefono'], "Accion": accion, "Tipo": tipo
@@ -135,11 +135,12 @@ if st.session_state["authentication_status"]:
             st.write("---")
             c1, c2 = st.columns(2)
             c1.download_button("💾 Descargar Mapa HTML", m._repr_html_(), f"Mapa_{edo_sel}.html", "text/html", use_container_width=True)
+            
             df_rep = pd.DataFrame(reporte_final)
             buf_rep = io.BytesIO()
             df_rep.to_excel(buf_rep, index=False)
             c2.download_button("📊 Descargar Reporte Excel", buf_rep.getvalue(), f"Reporte_{edo_sel}.xlsx", use_container_width=True)
-            st.dataframe(df_rep, use_container_width=True)
+            st.dataframe(df_rep, use_container_width=True, hide_index=True)
 
 elif st.session_state["authentication_status"] is False:
     st.error("Usuario/Contraseña incorrectos")
