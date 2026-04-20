@@ -55,92 +55,110 @@ if st.session_state["authentication_status"]:
             pd.DataFrame(columns=cols).to_excel(buf, index=False)
             st.download_button(f"Descargar {t}", data=buf.getvalue(), file_name=n, key=f"btn_{n}", use_container_width=True)
 
-        f_coords = st.file_uploader("📂 Archivo Coordenadas", type=["xlsx"])
-        f_sales = st.file_uploader("📂 Archivo Salesforce", type=["xlsx"])
+        st.subheader("📂 Carga de Archivos")
+        f_coords = st.file_uploader("Archivo Coordenadas", type=["xlsx"])
+        f_sales = st.file_uploader("Archivo Salesforce", type=["xlsx"])
         
+        # --- BOTÓN DE PROCESAR ---
+        procesar = st.button("🚀 Procesar Información", use_container_width=True, type="primary")
+        
+        st.write("---")
         ver_n = st.toggle("🏷️ Ver Nombres de Personas", value=True)
         filtros = st.multiselect("Mostrar en mapa:", ["Tienditas", "QQ", "Descartar"], default=["Tienditas", "QQ", "Descartar"])
 
     with col_m:
-        if f_coords and f_sales:
-            df_s = pd.read_excel(f_sales).fillna(0)
-            df_s['CP'] = df_s['CP'].apply(normalizar_cp)
-            df_s_grp = df_s.groupby('CP').agg({
-                'Nombre': lambda x: " / ".join(map(str, x)),
-                'Email': 'first', 'Telefono': 'first', 'CP': 'count'
-            }).rename(columns={'CP': 'Cantidad'}).reset_index()
+        if f_coords and f_sales and procesar:
+            with st.spinner("Procesando datos y generando mapa..."):
+                # Procesar Salesforce
+                df_s = pd.read_excel(f_sales).fillna(0)
+                df_s['CP'] = df_s['CP'].apply(normalizar_cp)
+                df_s_grp = df_s.groupby('CP').agg({
+                    'Nombre': lambda x: " / ".join(map(str, x)),
+                    'Email': 'first', 'Telefono': 'first', 'CP': 'count'
+                }).rename(columns={'CP': 'Cantidad'}).reset_index()
 
-            def get_cp_txt(folder):
-                path = f"{folder}/{edo_sel}.txt"
-                if os.path.exists(path):
-                    with open(path, 'r') as file:
-                        return set(line.strip().zfill(5) for line in file if line.strip())
-                return set()
-            
-            cp_tienditas = get_cp_txt("CP_tienditas")
-            cp_qq = get_cp_txt("CP_QQ")
-
-            gdf = gpd.read_file(f"mapas/{edo_sel}.geojson").to_crs("EPSG:4326")
-            cp_col = next((c for c in ['d_cp','CP','CODIGOPOSTAL','cp'] if c in gdf.columns), gdf.columns[0])
-            gdf[cp_col] = gdf[cp_col].apply(normalizar_cp)
-
-            df_c = pd.read_excel(f_coords)
-            df_c.columns = df_c.columns.str.upper()
-            pts = df_c.to_dict('records')
-            # Buffer aproximado en grados (RADIO / 111139)
-            circles_geom = [Point(p['LONGITUD'], p['LATITUD']).buffer(p['RADIO']/111139) for p in pts]
-            
-            m = folium.Map(location=[df_c['LATITUD'].mean(), df_c['LONGITUD'].mean()], zoom_start=11, tiles="CartoDB Voyager")
-            reporte_final = []
-
-            for p in pts:
-                folium.Circle([p['LATITUD'], p['LONGITUD']], radius=p['RADIO'], color='blue', fill=True, fill_opacity=0.2, tooltip=f"Zona: {p['ZONA']}").add_to(m)
-
-            for _, poly in gdf.iterrows():
-                cp_act = poly[cp_col]
-                match_s = df_s_grp[df_s_grp['CP'] == cp_act]
+                # CPs desde TXT
+                def get_cp_txt(folder):
+                    path = f"{folder}/{edo_sel}.txt"
+                    if os.path.exists(path):
+                        with open(path, 'r') as file:
+                            return set(line.strip().zfill(5) for line in file if line.strip())
+                    return set()
                 
-                if not match_s.empty:
-                    data_s = match_s.iloc[0]
-                    color, tipo, accion = "gray", "Descartar", "Descartar"
-                    
-                    toca = any(shape(poly['geometry']).intersects(c) for c in circles_geom)
-                    
-                    if toca: 
-                        color, tipo = "gray", "Descartar"
-                    elif cp_act in cp_tienditas:
-                        color, tipo, accion = "green", "Tienditas", "Dar Seguimiento"
-                    elif cp_act in cp_qq:
-                        color, tipo, accion = "red", "QQ", "Dar Seguimiento"
-                    
-                    if tipo in filtros or (tipo == "Descartar" and "Descartar" in filtros):
-                        tooltip_names = str(data_s['Nombre']).replace(" / ", "<br>")
-                        folium.GeoJson(poly['geometry'], style_function=lambda x, c=color: {
-                            'fillColor': c, 'color': 'black', 'weight': 1, 'fillOpacity': 0.6
-                        }, tooltip=f"<b>CP: {cp_act}</b><br>Personas: {data_s['Cantidad']}<br>{tooltip_names}").add_to(m)
-                        
-                        if ver_n:
-                            c_point = poly['geometry'].centroid
-                            d_name = data_s['Nombre'] if len(data_s['Nombre']) < 35 else data_s['Nombre'][:32]+"..."
-                            folium.Marker([c_point.y, c_point.x], icon=folium.DivIcon(html=f'<div style="font-size:7pt; color:black; font-weight:bold; width:150px;">{d_name}</div>')).add_to(m)
-                        
-                        for nom_indiv in str(data_s['Nombre']).split(" / "):
-                            reporte_final.append({
-                                "Nombre": nom_indiv, "CP": cp_act, "Email": data_s['Email'],
-                                "Telefono": data_s['Telefono'], "Accion": accion, "Tipo": tipo
-                            })
+                cp_tienditas = get_cp_txt("CP_tienditas")
+                cp_qq = get_cp_txt("CP_QQ")
 
-            components.html(m._repr_html_(), height=600)
-            
-            st.write("---")
-            c1, c2 = st.columns(2)
-            c1.download_button("💾 Descargar Mapa HTML", m._repr_html_(), f"Mapa_{edo_sel}.html", "text/html", use_container_width=True)
-            
-            df_rep = pd.DataFrame(reporte_final)
-            buf_rep = io.BytesIO()
-            df_rep.to_excel(buf_rep, index=False)
-            c2.download_button("📊 Descargar Reporte Excel", buf_rep.getvalue(), f"Reporte_{edo_sel}.xlsx", use_container_width=True)
-            st.dataframe(df_rep, use_container_width=True, hide_index=True)
+                # GeoJSON
+                gdf = gpd.read_file(f"mapas/{edo_sel}.geojson").to_crs("EPSG:4326")
+                cp_col = next((c for c in ['d_cp','CP','CODIGOPOSTAL','cp'] if c in gdf.columns), gdf.columns[0])
+                gdf[cp_col] = gdf[cp_col].apply(normalizar_cp)
+
+                # Coordenadas
+                df_c = pd.read_excel(f_coords)
+                df_c.columns = df_c.columns.str.upper()
+                pts = df_c.to_dict('records')
+                circles_geom = [Point(p['LONGITUD'], p['LATITUD']).buffer(p['RADIO']/111139) for p in pts]
+                
+                m = folium.Map(location=[df_c['LATITUD'].mean(), df_c['LONGITUD'].mean()], zoom_start=11, tiles="CartoDB Voyager")
+                reporte_final = []
+
+                # Dibujar Círculos Coordenadas
+                for p in pts:
+                    folium.Circle([p['LATITUD'], p['LONGITUD']], radius=p['RADIO'], color='blue', fill=True, fill_opacity=0.2, tooltip=f"Zona: {p['ZONA']}").add_to(m)
+
+                # Procesar Polígonos
+                for _, poly in gdf.iterrows():
+                    cp_act = poly[cp_col]
+                    match_s = df_s_grp[df_s_grp['CP'] == cp_act]
+                    
+                    if not match_s.empty:
+                        data_s = match_s.iloc[0]
+                        color, tipo, accion = "gray", "Descartar", "Descartar"
+                        toca = any(shape(poly['geometry']).intersects(c) for c in circles_geom)
+                        
+                        if toca: 
+                            color, tipo = "gray", "Descartar"
+                        elif cp_act in cp_tienditas: 
+                            color, tipo, accion = "green", "Tienditas", "Dar Seguimiento"
+                        elif cp_act in cp_qq: 
+                            color, tipo, accion = "red", "QQ", "Dar Seguimiento"
+                        
+                        if tipo in filtros or (tipo == "Descartar" and "Descartar" in filtros):
+                            t_names = str(data_s['Nombre']).replace(" / ", "<br>")
+                            folium.GeoJson(poly['geometry'], style_function=lambda x, c=color: {
+                                'fillColor': c, 'color': 'black', 'weight': 1, 'fillOpacity': 0.6
+                            }, tooltip=f"<b>CP: {cp_act}</b><br>Cant: {data_s['Cantidad']}<br>{t_names}").add_to(m)
+                            
+                            if ver_n:
+                                c_pt = poly['geometry'].centroid
+                                d_n = data_s['Nombre'] if len(data_s['Nombre']) < 35 else data_s['Nombre'][:32]+"..."
+                                folium.Marker([c_pt.y, c_pt.x], icon=folium.DivIcon(html=f'<div style="font-size:7pt; color:black; font-weight:bold; width:150px;">{d_n}</div>')).add_to(m)
+                            
+                            for n_indiv in str(data_s['Nombre']).split(" / "):
+                                reporte_final.append({"Nombre": n_indiv, "CP": cp_act, "Email": data_s['Email'], "Telefono": data_s['Telefono'], "Accion": accion, "Tipo": tipo})
+
+                # --- MOSTRAR MÉTRICAS ---
+                df_rep = pd.DataFrame(reporte_final)
+                if not df_rep.empty:
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("👥 Total Personas", len(df_rep))
+                    m2.metric("🏪 Tienditas", len(df_rep[df_rep['Tipo'] == 'Tienditas']))
+                    m3.metric("🔴 Cobertura QQ", len(df_rep[df_rep['Tipo'] == 'QQ']))
+                    m4.metric("🔘 Descartados", len(df_rep[df_rep['Tipo'] == 'Descartar']))
+
+                # Mostrar Mapa
+                components.html(m._repr_html_(), height=600)
+                
+                st.write("---")
+                c1, c2 = st.columns(2)
+                c1.download_button("💾 Descargar Mapa HTML", m._repr_html_(), f"Mapa_{edo_sel}.html", "text/html", use_container_width=True)
+                
+                buf_rep = io.BytesIO()
+                df_rep.to_excel(buf_rep, index=False)
+                c2.download_button("📊 Descargar Reporte Excel", buf_rep.getvalue(), f"Reporte_{edo_sel}.xlsx", use_container_width=True)
+                st.dataframe(df_rep, use_container_width=True, hide_index=True)
+        else:
+            st.info("👋 Sube los archivos de Coordenadas y Salesforce, luego haz clic en 'Procesar Información'.")
 
 elif st.session_state["authentication_status"] is False:
     st.error("Usuario/Contraseña incorrectos")
