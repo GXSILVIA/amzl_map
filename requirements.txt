@@ -1,9 +1,12 @@
 streamlit
 pandas
-folium==0.15.1
-streamlit-folium==0.18.0
-streamlit-authenticator==0.3.1
-geopy
+folium
+geopandas
+shapely
+numpy
+PyYAML
+streamlit-authenticator
 openpyxl
-pyyaml
 xlsxwriter
+fiona
+pyproj
