@@ -67,7 +67,8 @@ if st.session_state["authentication_status"]:
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
                 
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
+                # CORRECCIÓN DEFINITIVA EXTRAYENDO EL PRIMER ELEMENTO CON [0] SI FALLA LA BÚSQUEDA
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
@@ -76,7 +77,6 @@ if st.session_state["authentication_status"]:
                     st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
                     st.stop()
                 
-                # Nombre de variable corregido con guion bajo para evitar el SyntaxError
                 estados_con_cobertura_real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
                 
                 for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']: df_zonas_user[c] = pd.to_numeric(df_zonas_user[c], errors='coerce')
