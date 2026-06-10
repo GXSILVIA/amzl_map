@@ -85,7 +85,7 @@ if st.session_state["authentication_status"]:
                     
                     # Identificar la columna CP en el GeoJSON base
                     posibles_cp = ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp']
-                    cp_col_geojson = next((c for c in posibles_cp if c in gdf_base_completo.columns), gdf_base_completo.columns)
+                    cp_col_geojson = next((c for c in posibles_cp if c in gdf_base_completo.columns), gdf_base_completo.columns[0])
                     gdf_base_completo[cp_col_geojson] = gdf_base_completo[cp_col_geojson].astype(str).apply(normalizar_cp)
                     
                     # Filtrar GeoJSON conservando solo los CP solicitados en el Excel de Polígonos
