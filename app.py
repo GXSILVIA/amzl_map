@@ -67,11 +67,17 @@ if st.session_state["authentication_status"]:
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
                 
-                # CORRECCIÓN DEFINITIVA DEL KEYERROR: Extrae string puro usando .columns[0]
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
+                
+                if gdf_cobertura.empty:
+                    st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
+                    st.stop()
+                
+                # Identificar únicamente los estados que SÍ tienen cobertura en el Excel
+                estados_con_cobertura real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
                 
                 for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']: df_zonas_user[c] = pd.to_numeric(df_zonas_user[c], errors='coerce')
                 df_zonas_user = df_zonas_user.dropna(subset=['LATITUD', 'LONGITUD', 'RADIO'])
@@ -86,7 +92,7 @@ if st.session_state["authentication_status"]:
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 desglose_estados = []
-                for est in estados_a_cargar:
+                for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
