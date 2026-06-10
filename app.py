@@ -76,8 +76,8 @@ if st.session_state["authentication_status"]:
                     st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
                     st.stop()
                 
-                # Identificar únicamente los estados que SÍ tienen cobertura en el Excel
-                estados_con_cobertura real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
+                # Nombre de variable corregido con guion bajo para evitar el SyntaxError
+                estados_con_cobertura_real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
                 
                 for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']: df_zonas_user[c] = pd.to_numeric(df_zonas_user[c], errors='coerce')
                 df_zonas_user = df_zonas_user.dropna(subset=['LATITUD', 'LONGITUD', 'RADIO'])
