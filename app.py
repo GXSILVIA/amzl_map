@@ -46,7 +46,7 @@ if st.session_state["authentication_status"]:
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
         
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
-            with st.spinner("Calculando áreas por estado..."):
+            with st.spinner("Calculando áreas y eficiencias..."):
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
@@ -66,7 +66,7 @@ if st.session_state["authentication_status"]:
                         gdfs.append(g)
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
@@ -79,8 +79,8 @@ if st.session_state["authentication_status"]:
                 gdf_cobertura_m = gdf_cobertura.to_crs("EPSG:6362")
                 gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
                 gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda r: r['geometry'].buffer(r['RADIO']), axis=1)
-                gdf_circles_m['AREA_M2'] = gdf_circles_m['geometry'].area
                 
+                gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 desglose_estados = []
@@ -90,11 +90,20 @@ if st.session_state["authentication_status"]:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
                         g_ocu_est = g_cob_est.intersection(geom_cir_total)
                         g_lib_est = g_cob_est.difference(geom_cir_total)
+                        
+                        cob_km2 = g_cob_est.area / 1000000.0
+                        ocu_km2 = g_ocu_est.area / 1000000.0
+                        lib_km2 = g_lib_est.area / 1000000.0
+                        
+                        # Cálculo del porcentaje de eficiencia de ocupación
+                        eficiencia = (ocu_km2 / cob_km2 * 100) if cob_km2 > 0 else 0.0
+                        
                         desglose_estados.append({
                             "Estado": est,
-                            "Territorio Cobertura Total (m²)": round(g_cob_est.area, 2),
-                            "Territorio Ocupado Total (m²)": round(g_ocu_est.area, 2),
-                            "Territorio Libre Total (m²)": round(g_lib_est.area, 2)
+                            "Territorio Cobertura Total (km²)": round(cob_km2, 4),
+                            "Territorio Ocupado Total (km²)": round(ocu_km2, 4),
+                            "Territorio Libre Total (km²)": round(lib_km2, 4),
+                            "Eficiencia de Ocupación": f"{round(eficiencia, 2)}%"
                         })
                 
                 df_desglose = pd.DataFrame(desglose_estados)
@@ -104,7 +113,7 @@ if st.session_state["authentication_status"]:
                     'df_desglose': df_desglose,
                     'gdf_cobertura_wgs84': gdf_cobertura.to_crs("EPSG:4326"),
                     'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
-                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_M2']].copy()
+                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2']].copy()
                 }
                 st.session_state.procesado = True
 
@@ -129,7 +138,7 @@ if st.session_state["authentication_status"]:
             
             st.write("---")
             st.markdown("### 🖥️ Consola de Control de Territorios")
-            st.markdown(f"**Filtro de Consulta:** `{res['estado_nombre']}`")
+            st.markdown(f"**Filtro de Consulta Activo:** `{res['estado_nombre']}`")
             
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
             st.write("---")
@@ -140,7 +149,7 @@ if st.session_state["authentication_status"]:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                 res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_M2': 'Territorio Ocupado Individual (m²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
+                res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
             c2.download_button("📊 Descargar Reporte Excel", buf.getvalue(), f"Reporte_{res['estado_nombre']}.xlsx", "application/vnd.ms-excel", use_container_width=True)
 
 elif st.session_state["authentication_status"] is False:
