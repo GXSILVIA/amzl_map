@@ -2,7 +2,7 @@ credentials:
   usernames:
     amzl.hub:
       name: "Usuario AMZL"
-      password: $2b$12$OgXrMkU7sDpK26M7H2bKieKZ0ceLQau2LdrhR4SWo9Q4k7i2XTXBC 
+      password: 12345 
 cookie:
   expiry_days: 30
   # Esta es la clave que debes poner (es larga para que no marque error):
