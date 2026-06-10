@@ -84,7 +84,7 @@ if st.session_state["authentication_status"]:
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 desglose_estados = []
-                for est en estados_a_cargar:
+                for est in estados_a_cargar:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
