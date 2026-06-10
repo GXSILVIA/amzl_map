@@ -67,7 +67,7 @@ if st.session_state["authentication_status"]:
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
                 
-                # Extracción segura de la columna de Código Postal usando .columns[0] si falla la búsqueda estricta
+                # CORRECCIÓN DEFINITIVA DEL KEYERROR: Extrae string puro usando .columns[0]
                 cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
