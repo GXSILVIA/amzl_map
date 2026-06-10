@@ -67,12 +67,7 @@ if st.session_state["authentication_status"]:
                         gdfs.append(g)
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
-                
-                # SE INCLUYE 'd_codigo' DE FORMA ESTRICTA. Si falla, se extrae el string de la primera columna indexada por seguridad [0]
-                posibles_cp = ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp']
-                cp_col = next((c for c in posibles_cp if c in gdf_base.columns), gdf_base.columns[0])
-                
-                # Forzar a string y aplicar formato de 5 dígitos (Normalización de CPs enteros como 20049)
+                cp_col = next((c for c in ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
@@ -80,6 +75,9 @@ if st.session_state["authentication_status"]:
                 if gdf_cobertura.empty:
                     st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
                     st.stop()
+                
+                # ELIMINACIÓN DE DUPLICADOS EN EL MAPA: Garantiza que un CP con múltiples polígonos repetidos se procese una sola vez
+                gdf_cobertura = gdf_cobertura.drop_duplicates(subset=['CP'])
                 
                 estados_con_cobertura_real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
                 
@@ -168,9 +166,9 @@ if st.session_state["authentication_status"]:
                 res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
             with c2:
                 st.download_button(
-                    label="📊 Descargar Reporte de Cobertura Excel",
+                    label="📊 Descargar Reporte Excel",
                     data=buf.getvalue(),
-                    file_name=f"Reporte_Areas_{res['estado_nombre']}.xlsx",
+                    file_name=f"Reporte_{res['estado_nombre']}.xlsx",
                     mime="application/vnd.ms-excel",
                     use_container_width=True
                 )
