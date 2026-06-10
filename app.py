@@ -66,7 +66,7 @@ if st.session_state["authentication_status"]:
                         gdfs.append(g)
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
@@ -131,7 +131,6 @@ if st.session_state["authentication_status"]:
             st.markdown("### 🖥️ Consola de Control de Territorios")
             st.markdown(f"**Filtro de Consulta:** `{res['estado_nombre']}`")
             
-            # Mostrar la tabla detallada estado por estado en la consola web
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
             st.write("---")
             
