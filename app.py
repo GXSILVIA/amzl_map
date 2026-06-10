@@ -50,6 +50,7 @@ if st.session_state["authentication_status"]:
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
+                df_poly_user = df_poly_user.drop_duplicates(subset=['CP'])
                 
                 df_zonas_user = pd.read_excel(f_zonas)
                 df_zonas_user.columns = df_zonas_user.columns.str.strip()
@@ -67,8 +68,11 @@ if st.session_state["authentication_status"]:
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
                 
-                # CORRECCIÓN DEFINITIVA EXTRAYENDO EL PRIMER ELEMENTO CON [0] SI FALLA LA BÚSQUEDA
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
+                # SE INCLUYE 'd_codigo' DE FORMA ESTRICTA. Si falla, se extrae el string de la primera columna indexada por seguridad [0]
+                posibles_cp = ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp']
+                cp_col = next((c for c in posibles_cp if c in gdf_base.columns), gdf_base.columns[0])
+                
+                # Forzar a string y aplicar formato de 5 dígitos (Normalización de CPs enteros como 20049)
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
@@ -103,22 +107,27 @@ if st.session_state["authentication_status"]:
                         ocu_km2 = g_ocu_est.area / 1000000.0
                         lib_km2 = g_lib_est.area / 1000000.0
                         
-                        eficiencia = (ocu_km2 / cob_km2 * 100) if cob_km2 > 0 else 0.0
-                        
-                        desglose_estados.append({
-                            "Estado": est,
-                            "Territorio Cobertura Total (km²)": round(cob_km2, 4),
-                            "Territorio Ocupado Total (km²)": round(ocu_km2, 4),
-                            "Territorio Libre Total (km²)": round(lib_km2, 4),
-                            "Eficiencia de Ocupación": f"{round(eficiencia, 2)}%"
-                        })
+                        if ocu_km2 > 0:
+                            eficiencia = (ocu_km2 / cob_km2 * 100) if cob_km2 > 0 else 0.0
+                            desglose_estados.append({
+                                "Estado": est,
+                                "Territorio Cobertura Total (km²)": round(cob_km2, 4),
+                                "Territorio Ocupado Total (km²)": round(ocu_km2, 4),
+                                "Territorio Libre Total (km²)": round(lib_km2, 4),
+                                "Eficiencia de Ocupación": f"{round(eficiencia, 2)}%"
+                            })
                 
                 df_desglose = pd.DataFrame(desglose_estados)
+                if df_desglose.empty:
+                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
+                
+                estados_validos = df_desglose['Estado'].unique().tolist()
+                gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
                 
                 st.session_state.resultados = {
                     'estado_nombre': edo_sel,
                     'df_desglose': df_desglose,
-                    'gdf_cobertura_wgs84': gdf_cobertura.to_crs("EPSG:4326"),
+                    'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
                     'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
                     'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2']].copy()
                 }
@@ -157,7 +166,14 @@ if st.session_state["authentication_status"]:
             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                 res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
                 res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
-            c2.download_button("📊 Descargar Reporte Excel", buf.getvalue(), f"Reporte_{res['estado_nombre']}.xlsx", "application/vnd.ms-excel", use_container_width=True)
+            with c2:
+                st.download_button(
+                    label="📊 Descargar Reporte de Cobertura Excel",
+                    data=buf.getvalue(),
+                    file_name=f"Reporte_Areas_{res['estado_nombre']}.xlsx",
+                    mime="application/vnd.ms-excel",
+                    use_container_width=True
+                )
 
 elif st.session_state["authentication_status"] is False:
     st.error("Error de acceso: Usuario o contraseña incorrectos.")
