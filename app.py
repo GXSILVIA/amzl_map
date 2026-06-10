@@ -66,7 +66,9 @@ if st.session_state["authentication_status"]:
                         gdfs.append(g)
                         
                 gdf_base = pd.concat(gdfs, ignore_index=True)
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
+                
+                # Extracción segura de la columna de Código Postal usando .columns[0] si falla la búsqueda estricta
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
                 
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
@@ -95,7 +97,6 @@ if st.session_state["authentication_status"]:
                         ocu_km2 = g_ocu_est.area / 1000000.0
                         lib_km2 = g_lib_est.area / 1000000.0
                         
-                        # Cálculo del porcentaje de eficiencia de ocupación
                         eficiencia = (ocu_km2 / cob_km2 * 100) if cob_km2 > 0 else 0.0
                         
                         desglose_estados.append({
