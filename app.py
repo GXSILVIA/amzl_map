@@ -9,25 +9,22 @@ from shapely.geometry import Point
 from shapely.ops import unary_union
 import streamlit.components.v1 as components
 
-# --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="Sistema Pro AMZL - Cobertura", layout="wide")
 
-def normalizar_cp(val):
-    try: return str(int(float(val))).strip().zfill(5)
-    except: return str(val).strip().zfill(5)
+def normalizar_cp(v):
+    try: return str(int(float(v))).strip().zfill(5)
+    except: return str(v).strip().zfill(5)
 
-def obtener_color_rango(volumen):
+def obtener_color_rango(v):
     try:
-        vol = float(volumen)
+        vol = float(v)
         if vol <= 15: return "yellow", "🟡 R1-15"
         elif vol <= 20: return "orange", "🟠 R16-20"
         elif vol <= 30: return "red", "🔴 R21-30"
         elif vol <= 40: return "purple", "🟣 R31-40"
         else: return "brown", "🟤 R41+"
-    except:
-        return "gray", "⚪ Desconocido"
+    except: return "gray", "⚪ Desconocido"
 
-# --- 2. AUTENTICACIÓN ---
 with open('config.yaml') as f: config = yaml.load(f, SafeLoader)
 auth = stauth.Authenticate(config['credentials'], config['cookie']['name'], config['cookie']['key'], config['cookie']['expiry_days'])
 auth.login(location='main')
@@ -41,163 +38,72 @@ if st.session_state["authentication_status"]:
     with col_p:
         st.title("🛡️ Panel AMZL")
         auth.logout('Cerrar Sesión', 'sidebar')
-        
-        if not os.path.exists('mapas'):
-            st.error("Error: La carpeta 'mapas' no se encuentra en el directorio.")
-            st.stop()
-            
+        if not os.path.exists('mapas'): st.error("Falta carpeta mapas"); st.stop()
         archs_geo = sorted([f for f in os.listdir('mapas') if f.endswith('.geojson')])
         estados_disponibles = [f.replace('.geojson','') for f in archs_geo]
-        
-        # Selección de estado con opción de "Todos"
-        opciones_estado = ["Todos"] + estados_disponibles
-        edo_sel = st.selectbox("📍 Seleccionar Estado:", opciones_estado)
-        
+        edo_sel = st.selectbox("📍 Seleccionar Estado:", ["Todos"] + estados_disponibles)
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
         
-        if st.button("🚀 Procesar Información", use_container_width=True, type="primary"):
-            if f_poligonos and f_zonas:
-                with st.spinner("Procesando geometrías y calculando áreas métricas..."):
-                    # 1. Cargar archivo de Polígonos / Cobertura
-                    df_poly_user = pd.read_excel(f_poligonos)
-                    df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
-                    df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
-                    
-                    # 2. Cargar archivo de Zonas Círculos y estandarizar columnas de forma flexible
-                    df_zonas_user = pd.read_excel(f_zonas)
-                    df_zonas_user.columns = df_zonas_user.columns.str.strip()
-                    
-                    mapa_columnas = {}
-                    for col in df_zonas_user.columns:
-                        col_upper = col.upper()
-                        if col_upper in ['NOMBRE', 'LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']:
-                            mapa_columnas[col] = col_upper
-                    
-                    df_zonas_user = df_zonas_user.rename(columns=mapa_columnas)
-                    
-                    # 3. Cargar mapas GeoJSON requeridos
-                    estados_a_cargar = estados_disponibles if edo_sel == "Todos" else [edo_sel]
-                    gdfs_estados = []
-                    for edo in estados_a_cargar:
-                        path_geo = os.path.join("mapas", f"{edo}.geojson")
-                        if os.path.exists(path_geo):
-                            gdf_e = gpd.read_file(path_geo)
-                            if not gdf_e.empty:
-                                gdf_e['ESTADO_ORIGEN'] = edo
-                                gdfs_estados.append(gdf_e)
-                    
-                    if not gdfs_estados:
-                        st.error("No se pudieron cargar mapas base GeoJSON.")
-                        st.stop()
-                        
-                    gdf_base_completo = pd.concat(gdfs_estados, ignore_index=True)
-                    
-                    # Identificar de forma segura la columna CP en el GeoJSON base (Extrayendo el valor string de la lista)
-                    posibles_cp = ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp']
-                    cp_col_geojson = next((c for c in posibles_cp if c in gdf_base_completo.columns), gdf_base_completo.columns[0])
-                    gdf_base_completo[cp_col_geojson] = gdf_base_completo[cp_col_geojson].astype(str).apply(normalizar_cp)
-                    
-                    # Filtrar GeoJSON conservando solo los CP solicitados en el Excel de Polígonos
-                    gdf_cobertura = gdf_base_completo.merge(df_poly_user, left_on=cp_col_geojson, right_on='CP', how='inner')
-                    
-                    if gdf_cobertura.empty:
-                        st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
-                        st.stop()
-                    
-                    # Asegurar SRC geográfico inicial
-                    if gdf_cobertura.crs is None:
-                        gdf_cobertura.set_crs("EPSG:4326", inplace=True)
-                    else:
-                        gdf_cobertura = gdf_cobertura.to_crs("EPSG:4326")
-                        
-                    # 4. Limpiar y estructurar coordenadas para las Zonas circulares
-                    df_zonas_user['LATITUD'] = pd.to_numeric(df_zonas_user['LATITUD'], errors='coerce')
-                    df_zonas_user['LONGITUD'] = pd.to_numeric(df_zonas_user['LONGITUD'], errors='coerce')
-                    df_zonas_user['RADIO'] = pd.to_numeric(df_zonas_user['RADIO'], errors='coerce')
-                    df_zonas_user['VOLUMEN'] = pd.to_numeric(df_zonas_user['VOLUMEN'], errors='coerce')
-                    
-                    df_zonas_user = df_zonas_user.dropna(subset=['LATITUD', 'LONGITUD', 'RADIO'])
-                    
-                    if df_zonas_user.empty:
-                        st.error("❌ El archivo de Zonas Círculos no contiene coordenadas válidas o las columnas difieren del estándar.")
-                        st.stop()
-                        
-                    puntos_geometria = [Point(xy) for xy in zip(df_zonas_user['LONGITUD'], df_zonas_user['LATITUD'])]
-                    gdf_circles = gpd.GeoDataFrame(df_zonas_user, geometry=puntos_geometria, crs="EPSG:4326")
-                    
-                    # 5. Cambiar a proyección métrica local (EPSG:6362 - UTM 14N para México) para cálculo de áreas m²
-                    gdf_cobertura_m = gdf_cobertura.to_crs("EPSG:6362")
-                    gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
-                    
-                    # Buffer en metros usando la columna RADIO del archivo
-                    gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda row: row['geometry'].buffer(row['RADIO']), axis=1)
-                    
-                    # Áreas individuales de cada círculo en m²
-                    gdf_circles_m['AREA_M2'] = gdf_circles_m['geometry'].area
-                    
-                    # Geometría total de Cobertura (Unión de polígonos) y Círculos Ocupados
-                    geom_cobertura_total = unary_union(gdf_cobertura_m['geometry'].buffer(0))
-                    geom_circulos_total = unary_union(gdf_circles_m['geometry'].buffer(0))
-                    
-                    # Intersección real: territorio ocupado que está DENTRO de la cobertura
-                    geom_ocupada_real = geom_cobertura_total.intersection(geom_circulos_total)
-                    geom_libre_real = geom_cobertura_total.difference(geom_circulos_total)
-                    
-                    # Cálculos finales de áreas globales en metros cuadrados
-                    area_cobertura_total_m2 = geom_cobertura_total.area
-                    area_ocupada_total_m2 = geom_ocupada_real.area
-                    area_libre_total_m2 = geom_libre_real.area
-                    
-                    # Guardar resultados en el estado de la sesión
-                    st.session_state.resultados = {
-                        'estado_nombre': edo_sel,
-                        'area_cobertura': area_cobertura_total_m2,
-                        'area_ocupada': area_ocupada_total_m2,
-                        'area_libre': area_libre_total_m2,
-                        'gdf_cobertura_wgs84': gdf_cobertura.to_crs("EPSG:4326"),
-                        'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
-                        'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_M2']].copy()
-                    }
-                    st.session_state.procesado = True
-            else:
-                st.warning("⚠️ Asegúrate de cargar ambos archivos de Excel antes de procesar.")
+        if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
+            with st.spinner("Calculando áreas..."):
+                df_poly_user = pd.read_excel(f_poligonos)
+                df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
+                df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
+                
+                df_zonas_user = pd.read_excel(f_zonas)
+                df_zonas_user.columns = df_zonas_user.columns.str.strip()
+                mapa_cols = {c: c.upper() for c in df_zonas_user.columns if c.upper() in ['NOMBRE', 'LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']}
+                df_zonas_user = df_zonas_user.rename(columns=mapa_cols)
+                
+                estados_a_cargar = estados_disponibles if edo_sel == "Todos" else [edo_sel]
+                gdfs = [gpd.read_file(os.path.join("mapas", f"{e}.geojson")) for e in estados_a_cargar if os.path.exists(os.path.join("mapas", f"{e}.geojson"))]
+                gdf_base = pd.concat(gdfs, ignore_index=True)
+                
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
+                gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
+                gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
+                
+                for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']: df_zonas_user[c] = pd.to_numeric(df_zonas_user[c], errors='coerce')
+                df_zonas_user = df_zonas_user.dropna(subset=['LATITUD', 'LONGITUD', 'RADIO'])
+                pts = [Point(xy) for xy in zip(df_zonas_user['LONGITUD'], df_zonas_user['LATITUD'])]
+                gdf_circles = gpd.GeoDataFrame(df_zonas_user, geometry=pts, crs="EPSG:4326")
+                
+                gdf_cobertura_m = gdf_cobertura.to_crs("EPSG:6362")
+                gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
+                gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda r: r['geometry'].buffer(r['RADIO']), axis=1)
+                gdf_circles_m['AREA_M2'] = gdf_circles_m['geometry'].area
+                
+                geom_cob = unary_union(gdf_cobertura_m['geometry'].buffer(0))
+                geom_cir = unary_union(gdf_circles_m['geometry'].buffer(0))
+                
+                st.session_state.resultados = {
+                    'estado_nombre': edo_sel, 'area_cobertura': geom_cob.area,
+                    'area_ocupada': geom_cob.intersection(geom_cir).area, 'area_libre': geom_cob.difference(geom_cir).area,
+                    'gdf_cobertura_wgs84': gdf_cobertura.to_crs("EPSG:4326"), 'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
+                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_M2']].copy()
+                }
+                st.session_state.procesado = True
 
     with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
+            c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
+            c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
+            m = folium.Map(location=[c_lat, c_lon], zoom_start=10, tiles="CartoDB Voyager")
             
-            # Obtener punto central para enfocar el mapa folium de manera correcta (X=Long, Y=Lat)
-            centro_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
-            centro_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
-            
-            m = folium.Map(location=[centro_lat, centro_lon], zoom_start=10, tiles="CartoDB Voyager")
-            
-            # Pintar Polígonos de Cobertura en Azul Transparente
-            for _, row in res['gdf_cobertura_wgs84'].iterrows():
-                tt = f"<b>ZONA: {row.get('ZONA','S/N')}</b><br>CP: {row['CP']}<br>Volumen: {row.get('VOLUMEN', 0)}"
-                folium.GeoJson(
-                    row['geometry'],
-                    style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35},
-                    tooltip=tt
-                ).add_to(m)
+            for _, r in res['gdf_cobertura_wgs84'].iterrows():
+                tt = f"<b>ZONA: {r.get('ZONA','S/N')}</b><br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
+                folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
                 
-            # Pintar Círculos de Zonas Ocupadas basados en su Rango de Volumen
-            for _, row in res['gdf_circles_wgs84'].iterrows():
-                color_hex, rango_txt = obtener_color_rango(row['VOLUMEN'])
-                tt_c = f"<b>Zona: {row['NOMBRE']}</b><br>Rango: {rango_txt}<br>Volumen: {row['VOLUMEN']}<br>Radio: {row['RADIO']}m"
-                
-                folium.GeoJson(
-                    row['geometry'],
-                    style_function=lambda x, c=color_hex: {'fillColor': c, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55},
-                    tooltip=tt_c
-                ).add_to(m)
+            for _, r in res['gdf_circles_wgs84'].iterrows():
+                c_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
+                tt_c = f"<b>Zona: {r['NOMBRE']}</b><br>Rango: {r_txt}<br>Volumen: {r['VOLUMEN']}<br>Radio: {r['RADIO']}m"
+                folium.GeoJson(r['geometry'], style_function=lambda x, col=c_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55}, tooltip=tt_c).add_to(m)
             
-            # Desplegar Mapa HTML en la interfaz
             m_html = m._repr_html_()
             components.html(m_html, height=600)
             
-            # --- SECCIÓN CONSOLA (Debajo del mapa) ---
             st.write("---")
             st.markdown("### 🖥️ Consola de Control de Territorios")
             st.markdown(f"**Estado Correspondiente:** `{res['estado_nombre']}`")
@@ -205,44 +111,14 @@ if st.session_state["authentication_status"]:
             st.markdown(f"**Cantidad de Territorio Libre:** `{res['area_libre']:.2f} m²`")
             st.write("---")
             
-            # --- EXPORTACIONES Y REPORTES ---
             c1, c2 = st.columns(2)
-            c1.download_button(
-                label="💾 Descargar Mapa HTML",
-                data=m_html,
-                file_name=f"Mapa_Cobertura_{res['estado_nombre']}.html",
-                mime="text/html",
-                use_container_width=True
-            )
+            c1.download_button("💾 Descargar Mapa HTML", m_html, f"Mapa_{res['estado_nombre']}.html", "text/html", use_container_width=True)
             
-            # Generación de la bitácora consolidada en Excel
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                # Pestaña 1: Resumen General de Áreas
-                df_resumen = pd.DataFrame([{
-                    "Estado": res['estado_nombre'],
-                    "Territorio Cobertura Total (m²)": res['area_cobertura'],
-                    "Territorio Ocupado Total (m²)": res['area_ocupada'],
-                    "Territorio Libre Total (m²)": res['area_libre']
-                }])
-                df_resumen.to_excel(writer, index=False, sheet_name='Resumen General')
-                
-                # Pestaña 2: Desglose por Zonas de círculos individuales
-                df_detalles_zonas = res['df_zonas_detalles'].rename(columns={
-                    'NOMBRE': 'Nombre de la Zona',
-                    'RADIO': 'Radio (m)',
-                    'VOLUMEN': 'Volumen Registrado',
-                    'AREA_M2': 'Territorio Ocupado Individual (m²)'
-                })
-                df_detalles_zonas.to_excel(writer, index=False, sheet_name='Ocupación por Zona')
-                
-            c2.download_button(
-                label="📊 Descargar Reporte de Cobertura Excel",
-                data=buf.getvalue(),
-                file_name=f"Reporte_Areas_{res['estado_nombre']}.xlsx",
-                mime="application/vnd.ms-excel",
-                use_container_width=True
-            )
+                pd.DataFrame([{"Estado": res['estado_nombre'], "Territorio Cobertura Total (m²)": res['area_cobertura'], "Territorio Ocupado Total (m²)": res['area_ocupada'], "Territorio Libre Total (m²)": res['area_libre']}]).to_excel(writer, index=False, sheet_name='Resumen General')
+                res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_M2': 'Territorio Ocupado Individual (m²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
+            c2.download_button("📊 Descargar Reporte Excel", buf.getvalue(), f"Reporte_{res['estado_nombre']}.xlsx", "application/vnd.ms-excel", use_container_width=True)
 
 elif st.session_state["authentication_status"] is False:
     st.error("Error de acceso: Usuario o contraseña incorrectos.")
