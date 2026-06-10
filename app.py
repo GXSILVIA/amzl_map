@@ -3,13 +3,14 @@ import pandas as pd
 import folium
 import geopandas as gpd
 import os, io, yaml
+import numpy as np
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 from shapely.geometry import Point
 from shapely.ops import unary_union
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Sistema Pro AMZL - Cobertura", layout="wide")
+st.set_page_config(page_title="Sistema Pro AMZL - Cobertura Montecarlo", layout="wide")
 
 def normalizar_cp(v):
     try: return str(int(float(v))).strip().zfill(5)
@@ -45,8 +46,11 @@ if st.session_state["authentication_status"]:
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
         
+        # Parámetro deslizable para controlar la densidad del muestreo estadístico
+        n_simulaciones = st.slider("🎯 Puntos de Muestreo Montecarlo:", 2000, 20000, 10000, 2000)
+        
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
-            with st.spinner("Calculando áreas y eficiencias..."):
+            with st.spinner("Ejecutando simulación estadística sobre la cobertura..."):
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
@@ -76,9 +80,7 @@ if st.session_state["authentication_status"]:
                     st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
                     st.stop()
                 
-                # ELIMINACIÓN DE DUPLICADOS EN EL MAPA: Garantiza que un CP con múltiples polígonos repetidos se procese una sola vez
                 gdf_cobertura = gdf_cobertura.drop_duplicates(subset=['CP'])
-                
                 estados_con_cobertura_real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
                 
                 for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']: df_zonas_user[c] = pd.to_numeric(df_zonas_user[c], errors='coerce')
@@ -97,13 +99,27 @@ if st.session_state["authentication_status"]:
                 for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
+                        # Fusionamos los códigos postales del estado para tener el polígono unificado de la cobertura
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
-                        g_ocu_est = g_cob_est.intersection(geom_cir_total)
-                        g_lib_est = g_cob_est.difference(geom_cir_total)
                         
-                        cob_km2 = g_cob_est.area / 1000000.0
-                        ocu_km2 = g_ocu_est.area / 1000000.0
-                        lib_km2 = g_lib_est.area / 1000000.0
+                        # --- ALGORITMO MONTECARLO ORIENTADO A COBERTURA ---
+                        # Delimitamos la simulación estrictamente a la caja que encierra tus polígonos de códigos postales
+                        minx, miny, maxx, maxy = g_cob_est.bounds
+                        area_caja_cobertura = (maxx - minx) * (maxy - miny)
+                        
+                        # Disparamos las coordenadas aleatorias dentro del territorio delimitado por los CPs
+                        x_rand = np.random.uniform(minx, maxx, n_simulaciones)
+                        y_rand = np.random.uniform(miny, maxy, n_simulaciones)
+                        puntos_simulados = [Point(x, y) for x, y in zip(x_rand, y_rand)]
+                        
+                        # Contamos cuántos aciertos estadísticos caen dentro de la figura azul de cobertura
+                        puntos_en_cobertura = sum(1 for p in puntos_simulados if g_cob_est.contains(p))
+                        puntos_en_ocupacion = sum(1 for p in puntos_simulados if g_cob_est.contains(p) and geom_cir_total.contains(p))
+                        
+                        # Proyección matemática proporcional en kilómetros cuadrados (km²)
+                        cob_km2 = (puntos_en_cobertura / n_simulaciones) * (area_caja_cobertura / 1000000.0)
+                        ocu_km2 = (puntos_en_ocupacion / n_simulaciones) * (area_caja_cobertura / 1000000.0)
+                        lib_km2 = max(0.0, cob_km2 - ocu_km2)
                         
                         if ocu_km2 > 0:
                             eficiencia = (ocu_km2 / cob_km2 * 100) if cob_km2 > 0 else 0.0
@@ -144,27 +160,37 @@ if st.session_state["authentication_status"]:
                 
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 c_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
+                color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
                 tt_c = f"<b>Zona: {r['NOMBRE']}</b><br>Rango: {r_txt}<br>Volumen: {r['VOLUMEN']}<br>Radio: {r['RADIO']}m"
-                folium.GeoJson(r['geometry'], style_function=lambda x, col=c_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55}, tooltip=tt_c).add_to(m)
+                folium.GeoJson(
+                    r['geometry'], 
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55}, 
+                    tooltip=tt_c
+                ).add_to(m)
             
             m_html = m._repr_html_()
             components.html(m_html, height=600)
             
             st.write("---")
-            st.markdown("### 🖥️ Consola de Control de Territorios")
+            st.markdown("### 🖥️ Consola de Control de Territorios (Muestreo de Cobertura Montecarlo)")
             st.markdown(f"**Filtro de Consulta Activo:** `{res['estado_nombre']}`")
-            
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
             st.write("---")
             
             c1, c2 = st.columns(2)
-            c1.download_button("💾 Descargar Mapa HTML", m_html, f"Mapa_{res['estado_nombre']}.html", "text/html", use_container_width=True)
-            
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
+            with c1:
+                st.download_button(
+                    label="💾 Descargar Mapa HTML",
+                    data=m_html,
+                    file_name=f"Mapa_{res['estado_nombre']}.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
             with c2:
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                    res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
+                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
                 st.download_button(
                     label="📊 Descargar Reporte Excel",
                     data=buf.getvalue(),
