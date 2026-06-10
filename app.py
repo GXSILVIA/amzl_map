@@ -104,7 +104,7 @@ if st.session_state["authentication_status"]:
                     # 3. Crear Zonas circulares (A partir de coordenadas WGS84)
                     puntos_geometria = []
                     for _, r in df_zonas_user.iterrows():
-                        puntos_geometria.append(Point(r['LONGITUD'], r['LATITUD']))
+                        puntos_geometria.append(Point(r['Latitud'], r['Longitud']))
                     
                     gdf_circles = gpd.GeoDataFrame(df_zonas_user, geometry=puntos_geometria, crs="EPSG:4326")
                     
