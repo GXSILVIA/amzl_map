@@ -46,7 +46,7 @@ if st.session_state["authentication_status"]:
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
         
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
-            with st.spinner("Calculando áreas..."):
+            with st.spinner("Calculando áreas por estado..."):
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
@@ -57,11 +57,18 @@ if st.session_state["authentication_status"]:
                 df_zonas_user = df_zonas_user.rename(columns=mapa_cols)
                 
                 estados_a_cargar = estados_disponibles if edo_sel == "Todos" else [edo_sel]
-                gdfs = [gpd.read_file(os.path.join("mapas", f"{e}.geojson")) for e in estados_a_cargar if os.path.exists(os.path.join("mapas", f"{e}.geojson"))]
+                gdfs = []
+                for e in estados_a_cargar:
+                    p = os.path.join("mapas", f"{e}.geojson")
+                    if os.path.exists(p):
+                        g = gpd.read_file(p)
+                        g['ESTADO_PERTENECE'] = e
+                        gdfs.append(g)
+                        
                 gdf_base = pd.concat(gdfs, ignore_index=True)
-                
-                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
+                cp_col = next((c for c in ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
                 gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
+                
                 gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
                 
                 for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']: df_zonas_user[c] = pd.to_numeric(df_zonas_user[c], errors='coerce')
@@ -74,13 +81,29 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda r: r['geometry'].buffer(r['RADIO']), axis=1)
                 gdf_circles_m['AREA_M2'] = gdf_circles_m['geometry'].area
                 
-                geom_cob = unary_union(gdf_cobertura_m['geometry'].buffer(0))
-                geom_cir = unary_union(gdf_circles_m['geometry'].buffer(0))
+                geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
+                
+                desglose_estados = []
+                for est en estados_a_cargar:
+                    sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
+                    if not sub_cob.empty:
+                        g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
+                        g_ocu_est = g_cob_est.intersection(geom_cir_total)
+                        g_lib_est = g_cob_est.difference(geom_cir_total)
+                        desglose_estados.append({
+                            "Estado": est,
+                            "Territorio Cobertura Total (m²)": round(g_cob_est.area, 2),
+                            "Territorio Ocupado Total (m²)": round(g_ocu_est.area, 2),
+                            "Territorio Libre Total (m²)": round(g_lib_est.area, 2)
+                        })
+                
+                df_desglose = pd.DataFrame(desglose_estados)
                 
                 st.session_state.resultados = {
-                    'estado_nombre': edo_sel, 'area_cobertura': geom_cob.area,
-                    'area_ocupada': geom_cob.intersection(geom_cir).area, 'area_libre': geom_cob.difference(geom_cir).area,
-                    'gdf_cobertura_wgs84': gdf_cobertura.to_crs("EPSG:4326"), 'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
+                    'estado_nombre': edo_sel,
+                    'df_desglose': df_desglose,
+                    'gdf_cobertura_wgs84': gdf_cobertura.to_crs("EPSG:4326"),
+                    'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
                     'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_M2']].copy()
                 }
                 st.session_state.procesado = True
@@ -90,10 +113,10 @@ if st.session_state["authentication_status"]:
             res = st.session_state.resultados
             c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
             c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
-            m = folium.Map(location=[c_lat, c_lon], zoom_start=10, tiles="CartoDB Voyager")
+            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="CartoDB Voyager")
             
             for _, r in res['gdf_cobertura_wgs84'].iterrows():
-                tt = f"<b>ZONA: {r.get('ZONA','S/N')}</b><br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
+                tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
                 folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
                 
             for _, r in res['gdf_circles_wgs84'].iterrows():
@@ -106,9 +129,10 @@ if st.session_state["authentication_status"]:
             
             st.write("---")
             st.markdown("### 🖥️ Consola de Control de Territorios")
-            st.markdown(f"**Estado Correspondiente:** `{res['estado_nombre']}`")
-            st.markdown(f"**Cantidad de Territorio Ocupado:** `{res['area_ocupada']:.2f} m²`")
-            st.markdown(f"**Cantidad de Territorio Libre:** `{res['area_libre']:.2f} m²`")
+            st.markdown(f"**Filtro de Consulta:** `{res['estado_nombre']}`")
+            
+            # Mostrar la tabla detallada estado por estado en la consola web
+            st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
             st.write("---")
             
             c1, c2 = st.columns(2)
@@ -116,7 +140,7 @@ if st.session_state["authentication_status"]:
             
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                pd.DataFrame([{"Estado": res['estado_nombre'], "Territorio Cobertura Total (m²)": res['area_cobertura'], "Territorio Ocupado Total (m²)": res['area_ocupada'], "Territorio Libre Total (m²)": res['area_libre']}]).to_excel(writer, index=False, sheet_name='Resumen General')
+                res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
                 res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_M2': 'Territorio Ocupado Individual (m²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
             c2.download_button("📊 Descargar Reporte Excel", buf.getvalue(), f"Reporte_{res['estado_nombre']}.xlsx", "application/vnd.ms-excel", use_container_width=True)
 
