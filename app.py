@@ -59,23 +59,33 @@ if st.session_state["authentication_status"]:
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary"):
             if f_poligonos and f_zonas:
                 with st.spinner("Procesando geometrías y calculando áreas métricas..."):
-                    # 1. Cargar archivos del usuario
+                    # 1. Cargar archivo de Polígonos / Cobertura
                     df_poly_user = pd.read_excel(f_poligonos)
                     df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                     df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
                     
+                    # 2. Cargar archivo de Zonas Círculos y estandarizar columnas de forma flexible
                     df_zonas_user = pd.read_excel(f_zonas)
-                    df_zonas_user.columns = df_zonas_user.columns.str.upper().str.strip()
+                    df_zonas_user.columns = df_zonas_user.columns.str.strip()
                     
-                    # 2. Cargar mapas GeoJSON requeridos
+                    mapa_columnas = {}
+                    for col in df_zonas_user.columns:
+                        col_upper = col.upper()
+                        if col_upper in ['NOMBRE', 'LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']:
+                            mapa_columnas[col] = col_upper
+                    
+                    df_zonas_user = df_zonas_user.rename(columns=mapa_columnas)
+                    
+                    # 3. Cargar mapas GeoJSON requeridos
                     estados_a_cargar = estados_disponibles if edo_sel == "Todos" else [edo_sel]
                     gdfs_estados = []
                     for edo in estados_a_cargar:
-                        path_geo = f"mapas/{edo}.geojson"
+                        path_geo = os.path.join("mapas", f"{edo}.geojson")
                         if os.path.exists(path_geo):
                             gdf_e = gpd.read_file(path_geo)
-                            gdf_e['ESTADO_ORIGEN'] = edo
-                            gdfs_estados.append(gdf_e)
+                            if not gdf_e.empty:
+                                gdf_e['ESTADO_ORIGEN'] = edo
+                                gdfs_estados.append(gdf_e)
                     
                     if not gdfs_estados:
                         st.error("No se pudieron cargar mapas base GeoJSON.")
@@ -83,7 +93,7 @@ if st.session_state["authentication_status"]:
                         
                     gdf_base_completo = pd.concat(gdfs_estados, ignore_index=True)
                     
-                    # Identificar la columna CP en el GeoJSON base
+                    # Identificar de forma segura la columna CP en el GeoJSON base (Extrayendo el valor string de la lista)
                     posibles_cp = ['d_cp', 'CP', 'CODIGOPOSTAL', 'cp']
                     cp_col_geojson = next((c for c in posibles_cp if c in gdf_base_completo.columns), gdf_base_completo.columns[0])
                     gdf_base_completo[cp_col_geojson] = gdf_base_completo[cp_col_geojson].astype(str).apply(normalizar_cp)
@@ -101,14 +111,22 @@ if st.session_state["authentication_status"]:
                     else:
                         gdf_cobertura = gdf_cobertura.to_crs("EPSG:4326")
                         
-                    # 3. Crear Zonas circulares (A partir de coordenadas WGS84)
-                    puntos_geometria = []
-                    for _, r in df_zonas_user.iterrows():
-                        puntos_geometria.append(Point(r['Latitud'], r['Longitud']))
+                    # 4. Limpiar y estructurar coordenadas para las Zonas circulares
+                    df_zonas_user['LATITUD'] = pd.to_numeric(df_zonas_user['LATITUD'], errors='coerce')
+                    df_zonas_user['LONGITUD'] = pd.to_numeric(df_zonas_user['LONGITUD'], errors='coerce')
+                    df_zonas_user['RADIO'] = pd.to_numeric(df_zonas_user['RADIO'], errors='coerce')
+                    df_zonas_user['VOLUMEN'] = pd.to_numeric(df_zonas_user['VOLUMEN'], errors='coerce')
                     
+                    df_zonas_user = df_zonas_user.dropna(subset=['LATITUD', 'LONGITUD', 'RADIO'])
+                    
+                    if df_zonas_user.empty:
+                        st.error("❌ El archivo de Zonas Círculos no contiene coordenadas válidas o las columnas difieren del estándar.")
+                        st.stop()
+                        
+                    puntos_geometria = [Point(xy) for xy in zip(df_zonas_user['LONGITUD'], df_zonas_user['LATITUD'])]
                     gdf_circles = gpd.GeoDataFrame(df_zonas_user, geometry=puntos_geometria, crs="EPSG:4326")
                     
-                    # 4. Cambiar a proyección métrica local (EPSG:6362 - UTM 14N para México) para cálculo de áreas m²
+                    # 5. Cambiar a proyección métrica local (EPSG:6362 - UTM 14N para México) para cálculo de áreas m²
                     gdf_cobertura_m = gdf_cobertura.to_crs("EPSG:6362")
                     gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
                     
@@ -149,7 +167,7 @@ if st.session_state["authentication_status"]:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
             
-            # Obtener punto central para enfocar el mapa folium
+            # Obtener punto central para enfocar el mapa folium de manera correcta (X=Long, Y=Lat)
             centro_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
             centro_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
             
@@ -184,7 +202,6 @@ if st.session_state["authentication_status"]:
             st.markdown("### 🖥️ Consola de Control de Territorios")
             st.markdown(f"**Estado Correspondiente:** `{res['estado_nombre']}`")
             st.markdown(f"**Cantidad de Territorio Ocupado:** `{res['area_ocupada']:.2f} m²`")
-
             st.markdown(f"**Cantidad de Territorio Libre:** `{res['area_libre']:.2f} m²`")
             st.write("---")
             
