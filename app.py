@@ -96,16 +96,19 @@ if st.session_state["authentication_status"]:
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 # =========================================================================
-                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (RESTRUCTURADO CORRECTAMENTE)
+                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (CORRECCIÓN DE PROYECCIÓN DE CPs)
                 # =========================================================================
                 reporte_cp_por_zona = []
                 reporte_cp_por_estado = []
                 
-                # Unión global de todas las zonas para evaluar el estatus general por estado
-                union_zonas_global = unary_union(gdf_circles_m['geometry'])
+                # Pasamos temporalmente a WGS84 (Grados) para asegurar que el cruce espacial no falle por escala métrica
+                gdf_cobertura_w84 = gdf_cobertura_m.to_crs("EPSG:4326")
+                gdf_circles_w84 = gdf_circles_m.to_crs("EPSG:4326")
+                
+                union_zonas_global = unary_union(gdf_circles_w84['geometry'])
                 
                 for est in estados_con_cobertura_real:
-                    sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
+                    sub_cob = gdf_cobertura_w84[gdf_cobertura_w84['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
                         
                         # 1. Análisis en General por Estado (Exactamente 2 renglones por estado)
@@ -132,14 +135,13 @@ if st.session_state["authentication_status"]:
                         })
                         
                         # 2. Análisis Específico por cada Zona (Solo CPs que ocupa / intersecta)
-                        for _, zona_row in gdf_circles_m.iterrows():
+                        for _, zona_row in gdf_circles_w84.iterrows():
                             cps_cubiertos_en_zona = []
                             
                             for _, cp_row in sub_cob.iterrows():
                                 if zona_row['geometry'].intersects(cp_row['geometry']):
                                     cps_cubiertos_en_zona.append(cp_row['CP'])
                             
-                            # Solo añadimos si la zona pertenece al procesamiento actual
                             reporte_cp_por_zona.append({
                                 "Zona": zona_row['NOMBRE'],
                                 "Estado": est,
