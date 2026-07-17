@@ -48,6 +48,10 @@ if st.session_state["authentication_status"]:
         
         # Parámetro deslizable para controlar la densidad del muestreo estadístico
         n_simulaciones = st.slider("🎯 Puntos de Muestreo Montecarlo:", 2000, 20000, 10000, 2000)
+
+         # 🔘 NUEVO: Control para alternar la visibilidad de las capas de factibilidad en el mapa
+        mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
+        st.session_state['mostrar_anillos'] = mostrar_factibilidad
         
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
             with st.spinner("Ejecutando simulación estadística sobre la cobertura..."):
@@ -241,8 +245,9 @@ if st.session_state["authentication_status"]:
             c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
             m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 11, tiles="CartoDB Voyager")
             
-            # 1. CAPA INFERIOR: Anillos concéntricos globales punteados (estos se mantienen al fondo con mouse libre)
-            if 'anillos_por_estado' in res:
+            # 1. CAPA INFERIOR CONDICIONAL: Pintamos el centroide y anillos SOLO si la casilla del panel derecho está activada
+            # Recuperamos el valor guardado en el estado de sesión o asumimos True por defecto
+            if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
                 for est_key, anillos in res['anillos_por_estado'].items():
                     folium.Marker(
                         location=[anillos['centro_lat'], anillos['centro_lon']],
@@ -250,11 +255,14 @@ if st.session_state["authentication_status"]:
                         tooltip=f"Centroide Acumulación: {est_key}"
                     ).add_to(m)
                     
+                    # Anillo 1: 5 KM - Verde Punteado
                     folium.GeoJson(anillos['r5'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"Radio Factibilidad 5 KM ({est_key})").add_to(m)
+                    # Anillo 2: 10 KM - Amarillo Punteado
                     folium.GeoJson(anillos['r10'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"Radio Factibilidad 10 KM ({est_key})").add_to(m)
+                    # Anillo 3: 15 KM - Rojo Punteado
                     folium.GeoJson(anillos['r15'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"Radio Factibilidad 15 KM ({est_key})").add_to(m)
 
-            # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales (Visibles y activos en zonas descubiertas)
+            # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales
             for _, r in res['gdf_cobertura_wgs84'].iterrows():
                 tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
                 folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
@@ -263,7 +271,6 @@ if st.session_state["authentication_status"]:
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
                 
-                # Buscamos de forma dinámica qué CPs de la cobertura intersectan o están dentro de este círculo
                 geom_circulo = r['geometry']
                 cps_bajo_circulo = []
                 for _, cp_row in res['gdf_cobertura_wgs84'].iterrows():
@@ -272,7 +279,6 @@ if st.session_state["authentication_status"]:
                 
                 txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
                 
-                # Construimos el Tooltip Combinado (Muestra datos de la zona + los CPs que tiene abajo de ella)
                 tt_c = f"""
                 <b>Zona Operativa: {r['NOMBRE']}</b><br>
                 Rango: {r_txt}<br>
