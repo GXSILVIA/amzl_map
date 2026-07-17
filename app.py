@@ -96,27 +96,25 @@ if st.session_state["authentication_status"]:
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 # =========================================================================
-                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (CORRECCIÓN DE PROYECCIÓN DE CPs)
+                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (ANÁLISIS POR CENTROIDE)
                 # =========================================================================
                 reporte_cp_por_zona = []
                 reporte_cp_por_estado = []
                 
-                # Pasamos temporalmente a WGS84 (Grados) para asegurar que el cruce espacial no falle por escala métrica
-                gdf_cobertura_w84 = gdf_cobertura_m.to_crs("EPSG:4326")
-                gdf_circles_w84 = gdf_circles_m.to_crs("EPSG:4326")
-                
-                union_zonas_global = unary_union(gdf_circles_w84['geometry'])
+                # Unión global de todas las geometrías de zonas círculos (Métrica)
+                union_zonas_global = unary_union(gdf_circles_m['geometry'])
                 
                 for est in estados_con_cobertura_real:
-                    sub_cob = gdf_cobertura_w84[gdf_cobertura_w84['ESTADO_PERTENECE'] == est]
+                    sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
                         
-                        # 1. Análisis en General por Estado (Exactamente 2 renglones por estado)
+                        # 1. Análisis en General por Estado (Exactamente 2 renglones fijando el orden Estado -> Estatus -> CP)
                         cps_cubiertos_estado = []
                         cps_faltantes_estado = []
                         
                         for _, cp_row in sub_cob.iterrows():
-                            if union_zonas_global.intersects(cp_row['geometry']):
+                            # Validamos usando el centroide del código postal para asegurar la colisión geométrica exacta
+                            if union_zonas_global.contains(cp_row['geometry'].centroid) or union_zonas_global.intersects(cp_row['geometry']):
                                 cps_cubiertos_estado.append(cp_row['CP'])
                             else:
                                 cps_faltantes_estado.append(cp_row['CP'])
@@ -134,12 +132,12 @@ if st.session_state["authentication_status"]:
                             "CP": ", ".join(sorted(cps_faltantes_estado)) if cps_faltantes_estado else "Ninguno"
                         })
                         
-                        # 2. Análisis Específico por cada Zona (Solo CPs que ocupa / intersecta)
-                        for _, zona_row in gdf_circles_w84.iterrows():
+                        # 2. Análisis Específico por cada Zona (Únicamente CPs ocupados sin mostrar faltantes)
+                        for _, zona_row in gdf_circles_m.iterrows():
                             cps_cubiertos_en_zona = []
                             
                             for _, cp_row in sub_cob.iterrows():
-                                if zona_row['geometry'].intersects(cp_row['geometry']):
+                                if zona_row['geometry'].contains(cp_row['geometry'].centroid) or zona_row['geometry'].intersects(cp_row['geometry']):
                                     cps_cubiertos_en_zona.append(cp_row['CP'])
                             
                             reporte_cp_por_zona.append({
@@ -150,6 +148,10 @@ if st.session_state["authentication_status"]:
                 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
                 df_cp_por_zona = pd.DataFrame(reporte_cp_por_zona)
+                
+                # Forzamos explícitamente el orden de columnas solicitado para el reporte general por estado
+                if not df_cp_por_estado.empty:
+                    df_cp_por_estado = df_cp_por_estado[["Estado", "Estatus", "CP"]]
                 # =========================================================================
 
                 
