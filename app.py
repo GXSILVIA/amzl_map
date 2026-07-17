@@ -92,31 +92,69 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
                 gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda r: r['geometry'].buffer(r['RADIO']), axis=1)
                 
-                gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
+                                gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
+                
+                # =========================================================================
+                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (CUBRE EXACTAMENTE LO SOLICITADO)
+                # =========================================================================
+                reporte_cp_por_zona = []
+                reporte_cp_por_estado = []
+                
+                # Unión global de todas las zonas del mapa para evaluar cobertura del estado
+                union_zonas_global = unary_union(gdf_circles_m['geometry'])
+                
+                for est in estados_con_cobertura_real:
+                    sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
+                    if not sub_cob.empty:
+                        # 1. Análisis en General por Estado
+                        for _, cp_row in sub_cob.iterrows():
+                            # Se evalúa si la geometría del CP es tocada por algún círculo de zona
+                            cubierto_global = union_zonas_global.intersects(cp_row['geometry'])
+                            reporte_cp_por_estado.append({
+                                "Estado": est,
+                                "CP": cp_row['CP'],
+                                "Estatus Cobertura": "Cubierto" if cubierto_global else "Falta por Cubrir"
+                            })
+                        
+                        # 2. Análisis Específico por cada Zona
+                        for _, zona_row in gdf_circles_m.iterrows():
+                            cps_cubiertos_en_zona = []
+                            cps_faltantes_en_zona = []
+                            
+                            for _, cp_row in sub_cob.iterrows():
+                                if zona_row['geometry'].intersects(cp_row['geometry']):
+                                    cps_cubiertos_en_zona.append(cp_row['CP'])
+                                else:
+                                    cps_faltantes_en_zona.append(cp_row['CP'])
+                            
+                            reporte_cp_por_zona.append({
+                                "Zona": zona_row['NOMBRE'],
+                                "Estado": est,
+                                "CPs Cubiertos": ", ".join(sorted(cps_cubiertos_en_zona)) if cps_cubiertos_en_zona else "Ninguno",
+                                "CPs Faltantes por Cubrir": ", ".join(sorted(cps_faltantes_en_zona)) if cps_faltantes_en_zona else "Ninguno"
+                            })
+                
+                df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
+                df_cp_por_zona = pd.DataFrame(reporte_cp_por_zona)
+                # =========================================================================
                 
                 desglose_estados = []
                 for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
-                        # Fusionamos los códigos postales del estado para tener el polígono unificado de la cobertura
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
                         
-                        # --- ALGORITMO MONTECARLO ORIENTADO A COBERTURA ---
-                        # Delimitamos la simulación estrictamente a la caja que encierra tus polígonos de códigos postales
                         minx, miny, maxx, maxy = g_cob_est.bounds
                         area_caja_cobertura = (maxx - minx) * (maxy - miny)
                         
-                        # Disparamos las coordenadas aleatorias dentro del territorio delimitado por los CPs
                         x_rand = np.random.uniform(minx, maxx, n_simulaciones)
                         y_rand = np.random.uniform(miny, maxy, n_simulaciones)
                         puntos_simulados = [Point(x, y) for x, y in zip(x_rand, y_rand)]
                         
-                        # Contamos cuántos aciertos estadísticos caen dentro de la figura azul de cobertura
                         puntos_en_cobertura = sum(1 for p in puntos_simulados if g_cob_est.contains(p))
                         puntos_en_ocupacion = sum(1 for p in puntos_simulados if g_cob_est.contains(p) and geom_cir_total.contains(p))
                         
-                        # Proyección matemática proporcional en kilómetros cuadrados (km²)
                         cob_km2 = (puntos_en_cobertura / n_simulaciones) * (area_caja_cobertura / 1000000.0)
                         ocu_km2 = (puntos_en_ocupacion / n_simulaciones) * (area_caja_cobertura / 1000000.0)
                         lib_km2 = max(0.0, cob_km2 - ocu_km2)
@@ -143,7 +181,9 @@ if st.session_state["authentication_status"]:
                     'df_desglose': df_desglose,
                     'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
                     'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
-                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2']].copy()
+                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2']].copy(),
+                    'df_cp_por_estado': df_cp_por_estado,  # Integrado sin romper estructura
+                    'df_cp_por_zona': df_cp_por_zona      # Integrado sin romper estructura
                 }
                 st.session_state.procesado = True
 
@@ -159,7 +199,6 @@ if st.session_state["authentication_status"]:
                 folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
                 
             for _, r in res['gdf_circles_wgs84'].iterrows():
-                c_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
                 color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
                 tt_c = f"<b>Zona: {r['NOMBRE']}</b><br>Rango: {r_txt}<br>Volumen: {r['VOLUMEN']}<br>Radio: {r['RADIO']}m"
                 folium.GeoJson(
@@ -175,6 +214,13 @@ if st.session_state["authentication_status"]:
             st.markdown("### 🖥️ Consola de Control de Territorios (Muestreo de Cobertura Montecarlo)")
             st.markdown(f"**Filtro de Consulta Activo:** `{res['estado_nombre']}`")
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
+            
+            # Despliegue de los listados solicitados abajo de la consola Montecarlo
+            st.markdown("### 📍 Cobertura de Códigos Postales en General por Estado")
+            st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
+            
+            st.markdown("### ⭕ Cobertura de Códigos Postales Detallada por cada Zona")
+            st.dataframe(res['df_cp_por_zona'], use_container_width=True, hide_index=True)
             st.write("---")
             
             c1, c2 = st.columns(2)
@@ -191,6 +237,11 @@ if st.session_state["authentication_status"]:
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
                     res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
+                    
+                    # Inserción de los datos correspondientes en el Excel sin alterar las hojas previas
+                    res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
+                    res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
+                    
                 st.download_button(
                     label="📊 Descargar Reporte Excel",
                     data=buf.getvalue(),
@@ -198,6 +249,7 @@ if st.session_state["authentication_status"]:
                     mime="application/vnd.ms-excel",
                     use_container_width=True
                 )
+
 
 elif st.session_state["authentication_status"] is False:
     st.error("Error de acceso: Usuario o contraseña incorrectos.")
