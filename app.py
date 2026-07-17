@@ -92,7 +92,7 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
                 gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda r: r['geometry'].buffer(r['RADIO']), axis=1)
                 
-                                gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
+                gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 # =========================================================================
