@@ -248,9 +248,9 @@ if st.session_state["authentication_status"]:
                     'df_cp_por_estado': df_cp_por_estado,  # Integrado sin romper estructura
                     'df_cp_por_zona': df_cp_por_zona      # Integrado sin romper estructura
                 }
-                st.session_state.procesado = True
+                st.session_state.procesado = True 
 
-        with col_m:
+    with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
             c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
@@ -272,9 +272,8 @@ if st.session_state["authentication_status"]:
                     tooltip=tt_c
                 ).add_to(m)
 
-                # 🗺️ NUEVO EN EL MAPA: Dibujamos visualmente el radio de Factibilidad Extendida (15 km) a la redonda de cada zona
-                # Pasamos la geometría métrica + 15km a WGS84 para Folium
-                geom_factible_w84 = gpd.GeoSeries([r['geometry']], crs="EPSG:4326").to_crs("EPSG:6362").buffer(15000).to_crs("EPSG:4326").iloc[0]
+                # 🗺️ Dibujamos el radio de Factibilidad Extendida (15 km) a la redonda de cada zona
+                geom_factible_w84 = gpd.GeoSeries([r['geometry']], crs="EPSG:4326").to_crs("EPSG:6362").buffer(15000).to_crs("EPSG:4326").iloc
                 folium.GeoJson(
                     geom_factible_w84,
                     style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 1.5, 'dashArray': '6, 6'},
@@ -310,8 +309,6 @@ if st.session_state["authentication_status"]:
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
                     res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
-                    
-                    # 📊 VISIBLE EN EL EXCEL: Hojas actualizadas con las nuevas columnas y clasificaciones por distancia
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
                     
@@ -325,3 +322,4 @@ if st.session_state["authentication_status"]:
 
 elif st.session_state["authentication_status"] is False:
     st.error("Error de acceso: Usuario o contraseña incorrectos.")
+                
