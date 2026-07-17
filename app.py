@@ -241,20 +241,7 @@ if st.session_state["authentication_status"]:
             c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
             m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 11, tiles="CartoDB Voyager")
             
-            for _, r in res['gdf_cobertura_wgs84'].iterrows():
-                tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
-                folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
-                
-            for _, r in res['gdf_circles_wgs84'].iterrows():
-                color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
-                tt_c = f"<b>Zona Operativa: {r['NOMBRE']}</b><br>Rango: {r_txt}<br>Volumen: {r['VOLUMEN']}<br>Radio Ope: {r['RADIO']}m"
-                folium.GeoJson(
-                    r['geometry'], 
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55}, 
-                    tooltip=tt_c
-                ).add_to(m)
-
-            # Pintamos dinámicamente el marcador y las 3 líneas concéntricas por cada estado procesado
+            # 1. CAPA INFERIOR: Anillos concéntricos globales punteados (estos se mantienen al fondo con mouse libre)
             if 'anillos_por_estado' in res:
                 for est_key, anillos in res['anillos_por_estado'].items():
                     folium.Marker(
@@ -263,12 +250,43 @@ if st.session_state["authentication_status"]:
                         tooltip=f"Centroide Acumulación: {est_key}"
                     ).add_to(m)
                     
-                    # Anillo 1: 5 KM - Verde Punteado
-                    folium.GeoJson(anillos['r5'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5'}, tooltip=f"Radio Factibilidad 5 KM ({est_key})").add_to(m)
-                    # Anillo 2: 10 KM - Amarillo Punteado
-                    folium.GeoJson(anillos['r10'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5'}, tooltip=f"Radio Factibilidad 10 KM ({est_key})").add_to(m)
-                    # Anillo 3: 15 KM - Rojo Punteado
-                    folium.GeoJson(anillos['r15'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5'}, tooltip=f"Radio Factibilidad 15 KM ({est_key})").add_to(m)
+                    folium.GeoJson(anillos['r5'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"Radio Factibilidad 5 KM ({est_key})").add_to(m)
+                    folium.GeoJson(anillos['r10'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"Radio Factibilidad 10 KM ({est_key})").add_to(m)
+                    folium.GeoJson(anillos['r15'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"Radio Factibilidad 15 KM ({est_key})").add_to(m)
+
+            # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales (Visibles y activos en zonas descubiertas)
+            for _, r in res['gdf_cobertura_wgs84'].iterrows():
+                tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
+                folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
+                
+            # 3. CAPA SUPERIOR: Círculos operativos actuales con Tooltip Combinado Inteligente
+            for _, r in res['gdf_circles_wgs84'].iterrows():
+                color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
+                
+                # Buscamos de forma dinámica qué CPs de la cobertura intersectan o están dentro de este círculo
+                geom_circulo = r['geometry']
+                cps_bajo_circulo = []
+                for _, cp_row in res['gdf_cobertura_wgs84'].iterrows():
+                    if geom_circulo.intersects(cp_row['geometry']):
+                        cps_bajo_circulo.append(cp_row['CP'])
+                
+                txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
+                
+                # Construimos el Tooltip Combinado (Muestra datos de la zona + los CPs que tiene abajo de ella)
+                tt_c = f"""
+                <b>Zona Operativa: {r['NOMBRE']}</b><br>
+                Rango: {r_txt}<br>
+                Volumen: {r['VOLUMEN']}<br>
+                Radio Ope: {r['RADIO']}m<br>
+                -------------------------<br>
+                <b>CPs Ocupados Abajo:</b> {txt_cps_atrapados}
+                """
+                
+                folium.GeoJson(
+                    r['geometry'], 
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55}, 
+                    tooltip=tt_c
+                ).add_to(m)
             
             m_html = m._repr_html_()
             components.html(m_html, height=600)
@@ -292,8 +310,11 @@ if st.session_state["authentication_status"]:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalladas')
+                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
-                
+                    
                 st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
+
+elif st.session_state["authentication_status"] is False:
+    st.error("Error de acceso: Usuario o contraseña incorrectos.")
