@@ -250,7 +250,7 @@ if st.session_state["authentication_status"]:
                 }
                 st.session_state.procesado = True 
 
-    with col_m:
+       with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
             c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
@@ -272,10 +272,10 @@ if st.session_state["authentication_status"]:
                     tooltip=tt_c
                 ).add_to(m)
 
-                # 🗺️ Dibujamos el radio de Factibilidad Extendida (15 km) a la redonda de cada zona
-                geom_factible_w84 = gpd.GeoSeries([r['geometry']], crs="EPSG:4326").to_crs("EPSG:6362").buffer(15000).to_crs("EPSG:4326").iloc
+                # 🗺️ CORRECCIÓN: Convertimos el buffer extendido de Shapely a un GeoJSON estructurado nativo mapeable por Folium
+                geom_factible_w84 = gpd.GeoSeries([r['geometry']], crs="EPSG:4326").to_crs("EPSG:6362").buffer(15000).to_crs("EPSG:4326").iloc[0]
                 folium.GeoJson(
-                    geom_factible_w84,
+                    geom_factible_w84.__geo_interface__,
                     style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 1.5, 'dashArray': '6, 6'},
                     tooltip=f"<b>Límite Factible Extendida (15km)</b><br>Zona: {r['NOMBRE']}"
                 ).add_to(m)
@@ -322,4 +322,3 @@ if st.session_state["authentication_status"]:
 
 elif st.session_state["authentication_status"] is False:
     st.error("Error de acceso: Usuario o contraseña incorrectos.")
-                
