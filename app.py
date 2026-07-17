@@ -96,109 +96,92 @@ if st.session_state["authentication_status"]:
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 # =========================================================================
-                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FACTIBILIDAD AMPLIADA POR DISTANCIA
+                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FACTIBILIDAD DESDE UN PUNTO MEDIO ÚNICO
                 # =========================================================================
                 reporte_cp_por_zona = []
                 reporte_cp_por_estado = []
                 
-                # Clonamos para el análisis espacial
                 gdf_circles_m_corr = gdf_circles_m.copy()
-                
                 for idx, row in gdf_circles_m_corr.iterrows():
                     if row['RADIO'] < 100:
                         base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs("EPSG:6362").iloc
                         gdf_circles_m_corr.at[idx, 'geometry'] = base_geom.buffer(row['RADIO'] * 1000)
                 
+                # 🎯 NUEVO: Calculamos el punto medio (centroide) de toda la concentración de zonas
+                lat_centro = df_zonas_user['LATITUD'].mean()
+                lon_centro = df_zonas_user['LONGITUD'].mean()
+                punto_medio_gps = Point(lon_centro, lat_centro)
+                
+                # Pasamos el punto medio a metros para cálculos de distancia exactos
+                punto_medio_m = gpd.GeoSeries([punto_medio_gps], crs="EPSG:4326").to_crs("EPSG:6362").iloc[0]
+                
+                # Creamos los 3 anillos concéntricos globales desde el punto medio único
+                buffer_5km = punto_medio_m.buffer(5000)   # Verde
+                buffer_10km = punto_medio_m.buffer(10000) # Amarilla
+                buffer_15km = punto_medio_m.buffer(15000) # Roja
+                
+                union_zonas_global = unary_union(gdf_circles_m_corr['geometry'])
+                
                 for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
-                        zonas_del_estado = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(g_cob_est)]
                         
                         cps_cubiertos_estado = set()
-                        cps_factibles_inmediatos = set()
-                        cps_factibles_moderados = set()
-                        cps_complejos = set()
+                        cps_factibles_5km = set()
+                        cps_factibles_10km = set()
+                        cps_factibles_15km = set()
                         cps_totalmente_faltantes = set()
                         
-                        if not zonas_del_estado.empty:
-                            union_zonas_est = unary_union(zonas_del_estado['geometry'])
+                        for _, cp_row in sub_cob.iterrows():
+                            geom_cp = cp_row['geometry']
+                            centroide_cp = geom_cp.centroid
                             
-                            # Creamos los anillos de expansión/distancia a la redonda (en metros)
-                            buffer_inmediato = union_zonas_est.buffer(5000)   # +5 KM
-                            buffer_moderado = union_zonas_est.buffer(15000)  # +15 KM
-                            buffer_complejo = union_zonas_est.buffer(30000)  # +30 KM
-                            
-                            for _, cp_row in sub_cob.iterrows():
-                                geom_cp = cp_row['geometry']
-                                centroide_cp = geom_cp.centroid
-                                
-                                # Evaluar nivel de cobertura/proximidad
-                                if union_zonas_est.intersects(geom_cp) or union_zonas_est.contains(centroide_cp):
-                                    cps_cubiertos_estado.add(cp_row['CP'])
-                                elif buffer_inmediato.contains(centroide_cp):
-                                    cps_factibles_inmediatos.add(cp_row['CP'])
-                                elif buffer_moderado.contains(centroide_cp):
-                                    cps_factibles_moderados.add(cp_row['CP'])
-                                elif buffer_complejo.contains(centroide_cp):
-                                    cps_complejos.add(cp_row['CP'])
-                                else:
-                                    cps_totalmente_faltantes.add(cp_row['CP'])
-                        else:
-                            # Si no hay ninguna zona en este estado, todos los CPs están totalmente fuera
-                            cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
+                            # Evaluamos cobertura real vs proximidad al punto medio concéntrico
+                            if union_zonas_global.intersects(geom_cp) or union_zonas_global.contains(centroide_cp):
+                                cps_cubiertos_estado.add(cp_row['CP'])
+                            elif buffer_5km.contains(centroide_cp):
+                                cps_factibles_5km.add(cp_row['CP'])
+                            elif buffer_10km.contains(centroide_cp):
+                                cps_factibles_10km.add(cp_row['CP'])
+                            elif buffer_15km.contains(centroide_cp):
+                                cps_factibles_15km.add(cp_row['CP'])
+                            else:
+                                cps_totalmente_faltantes.add(cp_row['CP'])
                         
-                        # 1. Análisis General por Estado (4 Renglones con orden estricto de columnas)
-                        reporte_cp_por_estado.append({
-                            "Estado": est, "Estatus": "Cubierto",
-                            "CP": ", ".join(sorted(list(cps_cubiertos_estado))) if cps_cubiertos_estado else "Ninguno"
-                        })
-                        reporte_cp_por_estado.append({
-                            "Estado": est, "Estatus": "Factible Inmediato (<5km)",
-                            "CP": ", ".join(sorted(list(cps_factibles_inmediatos))) if cps_factibles_inmediatos else "Ninguno"
-                        })
-                        reporte_cp_por_estado.append({
-                            "Estado": est, "Estatus": "Factible Moderado (5-15km)",
-                            "CP": ", ".join(sorted(list(cps_factibles_moderados))) if cps_factibles_moderados else "Ninguno"
-                        })
-                        reporte_cp_por_estado.append({
-                            "Estado": est, "Estatus": "Falta por Cubrir (>15km)",
-                            "CP": ", ".join(sorted(list(cps_complejos.union(cps_totalmente_faltantes)))) if (cps_complejos or cps_totalmente_faltantes) else "Ninguno"
-                        })
+                        # Reporte por Estado consolidado (4 renglones estrictos)
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto", "CP": ", ".join(sorted(list(cps_cubiertos_estado))) if cps_cubiertos_estado else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Inmediato (<5km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_5km))) if cps_factibles_5km else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Moderado (5-10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_10km))) if cps_factibles_10km else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Falta por Cubrir (>10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))) if (cps_factibles_15km or cps_totalmente_faltantes) else "Ninguno"})
                         
-                        # 2. Análisis Específico por cada Zona (Muestra los CPs actuales + los factibles a la redonda < 15km)
+                        # Reporte por Zona (Muestra los CPs actuales ocupados por su círculo)
                         for _, zona_row in gdf_circles_m_corr.iterrows():
                             if zona_row['geometry'].intersects(g_cob_est):
                                 cps_actuales_zona = []
-                                cps_potenciales_zona = []
-                                
-                                # Buffer individual de expansión de factibilidad (15 KM a la redonda de la zona)
-                                area_factible_zona = zona_row['geometry'].buffer(15000)
-                                
                                 for _, cp_row in sub_cob.iterrows():
-                                    geom_cp = cp_row['geometry']
-                                    centroide_cp = geom_cp.centroid
-                                    
-                                    if zona_row['geometry'].intersects(geom_cp) or zona_row['geometry'].contains(centroide_cp):
+                                    if zona_row['geometry'].intersects(cp_row['geometry']) or zona_row['geometry'].contains(cp_row['geometry'].centroid):
                                         cps_actuales_zona.append(cp_row['CP'])
-                                    elif area_factible_zona.contains(centroide_cp):
-                                        cps_potenciales_zona.append(cp_row['CP'])
-                                
-                                txt_actuales = ", ".join(sorted(list(set(cps_actuales_zona)))) if cps_actuales_zona else "Ninguno"
-                                txt_potenciales = ", ".join(sorted(list(set(cps_potenciales_zona)))) if cps_potenciales_zona else "Ninguno"
                                 
                                 reporte_cp_por_zona.append({
                                     "Zona": zona_row['NOMBRE'],
                                     "Estado": est,
-                                    "CPs Cubiertos": txt_actuales,
-                                    "CPs Factibles Ext. (<15km)": txt_potenciales
+                                    "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona)))) if cps_actuales_zona else "Ninguno"
                                 })
                 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
                 df_cp_por_zona = pd.DataFrame(reporte_cp_por_zona)
-                
                 if not df_cp_por_estado.empty:
                     df_cp_por_estado = df_cp_por_estado[["Estado", "Estatus", "CP"]]
+                
+                # Guardamos las geometrías de los anillos concéntricos para el mapa final
+                st.session_state['anillos_globales'] = {
+                    'centro_lat': lat_centro,
+                    'centro_lon': lon_centro,
+                    'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                    'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                    'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
+                }
                 # =========================================================================
 
                 
@@ -255,14 +238,14 @@ if st.session_state["authentication_status"]:
             res = st.session_state.resultados
             c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
             c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
-            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="CartoDB Voyager")
+            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 11, tiles="CartoDB Voyager")
             
             # 1. Dibujamos los polígonos de los Códigos Postales
             for _, r in res['gdf_cobertura_wgs84'].iterrows():
                 tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
                 folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
                 
-            # 2. Dibujamos los círculos operativos actuales
+            # 2. Dibujamos los círculos operativos actuales (sin anillos de expansión individuales)
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
                 tt_c = f"<b>Zona Operativa: {r['NOMBRE']}</b><br>Rango: {r_txt}<br>Volumen: {r['VOLUMEN']}<br>Radio Ope: {r['RADIO']}m"
@@ -272,13 +255,23 @@ if st.session_state["authentication_status"]:
                     tooltip=tt_c
                 ).add_to(m)
 
-                # 🗺️ CORRECCIÓN: Convertimos el buffer extendido de Shapely a un GeoJSON estructurado nativo mapeable por Folium
-                geom_factible_w84 = gpd.GeoSeries([r['geometry']], crs="EPSG:4326").to_crs("EPSG:6362").buffer(15000).to_crs("EPSG:4326").iloc[0]
-                folium.GeoJson(
-                    geom_factible_w84.__geo_interface__,
-                    style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 1.5, 'dashArray': '6, 6'},
-                    tooltip=f"<b>Límite Factible Extendida (15km)</b><br>Zona: {r['NOMBRE']}"
+            # 🗺️ NUEVO: Dibujamos en el mapa únicamente los 3 anillos concéntricos globales desde el punto medio
+            if 'anillos_globales' in st.session_state:
+                anillos = st.session_state['anillos_globales']
+                
+                # Marcador visual en el punto medio del territorio
+                folium.Marker(
+                    location=[anillos['centro_lat'], anillos['centro_lon']],
+                    icon=folium.Icon(color='purple', icon='crosshairs', prefix='fa'),
+                    tooltip="Centroide de Concentración AMZL"
                 ).add_to(m)
+                
+                # Anillo 1: 5 KM - Verde
+                folium.GeoJson(anillos['r5'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5'}, tooltip="Radio Factibilidad 5 KM").add_to(m)
+                # Anillo 2: 10 KM - Amarillo
+                folium.GeoJson(anillos['r10'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5'}, tooltip="Radio Factibilidad 10 KM").add_to(m)
+                # Anillo 3: 15 KM - Rojo
+                folium.GeoJson(anillos['r15'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5'}, tooltip="Radio Factibilidad 15 KM").add_to(m)
             
             m_html = m._repr_html_()
             components.html(m_html, height=600)
@@ -291,19 +284,13 @@ if st.session_state["authentication_status"]:
             st.markdown("### 📍 Cobertura y Proximidad de Códigos Postales por Estado")
             st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
             
-            st.markdown("### ⭕ Cobertura y Factibilidad Detallada por cada Zona")
+            st.markdown("### ⭕ Cobertura Detallada por cada Zona")
             st.dataframe(res['df_cp_por_zona'], use_container_width=True, hide_index=True)
             st.write("---")
             
             c1, c2 = st.columns(2)
             with c1:
-                st.download_button(
-                    label="💾 Descargar Mapa HTML",
-                    data=m_html,
-                    file_name=f"Mapa_{res['estado_nombre']}.html",
-                    mime="text/html",
-                    use_container_width=True
-                )
+                st.download_button(label="💾 Descargar Mapa HTML", data=m_html, file_name=f"Mapa_{res['estado_nombre']}.html", mime="text/html", use_container_width=True)
             with c2:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
@@ -312,13 +299,7 @@ if st.session_state["authentication_status"]:
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
                     
-                st.download_button(
-                    label="📊 Descargar Reporte Excel",
-                    data=buf.getvalue(),
-                    file_name=f"Reporte_{res['estado_nombre']}.xlsx",
-                    mime="application/vnd.ms-excel",
-                    use_container_width=True
-                )
+                st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
 
 elif st.session_state["authentication_status"] is False:
     st.error("Error de acceso: Usuario o contraseña incorrectos.")
