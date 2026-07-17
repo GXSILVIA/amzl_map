@@ -105,7 +105,7 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m_corr = gdf_circles_m.copy()
                 for idx, row in gdf_circles_m_corr.iterrows():
                     if row['RADIO'] < 100:
-                        base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs("EPSG:6362").iloc
+                        base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs("EPSG:6362").iloc[0]
                         gdf_circles_m_corr.at[idx, 'geometry'] = base_geom.buffer(row['RADIO'] * 1000)
                 
                 for est in estados_con_cobertura_real:
@@ -128,7 +128,7 @@ if st.session_state["authentication_status"]:
                             lon_centro = df_zonas_filtrado['LONGITUD'].mean()
                             punto_medio_gps = Point(lon_centro, lat_centro)
                             
-                            punto_medio_m = gpd.GeoSeries([punto_medio_gps], crs="EPSG:4326").to_crs("EPSG:6362").iloc
+                            punto_medio_m = gpd.GeoSeries([punto_medio_gps], crs="EPSG:4326").to_crs("EPSG:6362").iloc[0]
                             
                             buffer_5km = punto_medio_m.buffer(5000)
                             buffer_10km = punto_medio_m.buffer(10000)
@@ -137,9 +137,9 @@ if st.session_state["authentication_status"]:
                             anillos_por_estado[est] = {
                                 'centro_lat': lat_centro,
                                 'centro_lon': lon_centro,
-                                'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__,
-                                'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__,
-                                'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__
+                                'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                                'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                                'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
                             }
                             
                             union_zonas_est = unary_union(zonas_del_estado['geometry'])
@@ -160,11 +160,11 @@ if st.session_state["authentication_status"]:
                                     cps_totalmente_faltantes.add(cp_row['CP'])
                         else:
                             cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
-				                reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto", "CP": ", ".join(sorted(list(cps_cubiertos_estado))) if cps_cubiertos_estado else "Ninguno"})
-                         	    reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Inmediato (<5km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_5km))) if cps_factibles_5km else "Ninguno"})
-	                            reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Moderado (5-10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_10km))) if cps_factibles_10km else "Ninguno"})
-                                reporte_cp_por_estado.append({"Estado": est, "Estatus": "Falta por Cubrir (>10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))) if (cps_factibles_15km or cps_totalmente_faltantes) 
-                                 else "Ninguno"})
+                        
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto", "CP": ", ".join(sorted(list(cps_cubiertos_estado))) if cps_cubiertos_estado else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Inmediato (<5km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_5km))) if cps_factibles_5km else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Moderado (5-10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_10km))) if cps_factibles_10km else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Falta por Cubrir (>10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))) if cps_factibles_15km.union(cps_totalmente_faltantes) else "Ninguno"})
                         
                         for _, zona_row in gdf_circles_m_corr.iterrows():
                             if zona_row['geometry'].intersects(g_cob_est):
@@ -217,7 +217,7 @@ if st.session_state["authentication_status"]:
                 
                 df_desglose = pd.DataFrame(desglose_estados)
                 if df_desglose.empty:
-                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)",      		    "Eficiencia de Ocupación"])
+                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
                 
                 estados_validos = df_desglose['Estado'].unique().tolist()
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
@@ -243,7 +243,7 @@ if st.session_state["authentication_status"]:
             
             for _, r in res['gdf_cobertura_wgs84'].iterrows():
                 tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
-                folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, 			tooltip=tt).add_to(m)
+                folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
                 
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
@@ -292,10 +292,8 @@ if st.session_state["authentication_status"]:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Ocupación por Zona')
+                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalladas')
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
-
-st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)elif st.session_state["authentication_status"] is False:st.error("Error de acceso: Usuario o contraseña incorrectos.")
-                    
-
+                
+                st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
