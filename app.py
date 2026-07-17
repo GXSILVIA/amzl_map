@@ -96,48 +96,60 @@ if st.session_state["authentication_status"]:
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
                 
                 # =========================================================================
-                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (CUBRE EXACTAMENTE LO SOLICITADO)
+                # 📊 AUDITORÍA DE CPS CUBIERTOS Y FALTANTES (RESTRUCTURADO CORRECTAMENTE)
                 # =========================================================================
                 reporte_cp_por_zona = []
                 reporte_cp_por_estado = []
                 
-                # Unión global de todas las zonas del mapa para evaluar cobertura del estado
+                # Unión global de todas las zonas para evaluar el estatus general por estado
                 union_zonas_global = unary_union(gdf_circles_m['geometry'])
                 
                 for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
-                        # 1. Análisis en General por Estado
-                        for _, cp_row in sub_cob.iterrows():
-                            # Se evalúa si la geometría del CP es tocada por algún círculo de zona
-                            cubierto_global = union_zonas_global.intersects(cp_row['geometry'])
-                            reporte_cp_por_estado.append({
-                                "Estado": est,
-                                "CP": cp_row['CP'],
-                                "Estatus Cobertura": "Cubierto" if cubierto_global else "Falta por Cubrir"
-                            })
                         
-                        # 2. Análisis Específico por cada Zona
+                        # 1. Análisis en General por Estado (Exactamente 2 renglones por estado)
+                        cps_cubiertos_estado = []
+                        cps_faltantes_estado = []
+                        
+                        for _, cp_row in sub_cob.iterrows():
+                            if union_zonas_global.intersects(cp_row['geometry']):
+                                cps_cubiertos_estado.append(cp_row['CP'])
+                            else:
+                                cps_faltantes_estado.append(cp_row['CP'])
+                        
+                        # Renglón 1: Cubiertos
+                        reporte_cp_por_estado.append({
+                            "Estado": est,
+                            "Estatus": "Cubierto",
+                            "CP": ", ".join(sorted(cps_cubiertos_estado)) if cps_cubiertos_estado else "Ninguno"
+                        })
+                        # Renglón 2: Falta por Cubrir
+                        reporte_cp_por_estado.append({
+                            "Estado": est,
+                            "Estatus": "Falta por Cubrir",
+                            "CP": ", ".join(sorted(cps_faltantes_estado)) if cps_faltantes_estado else "Ninguno"
+                        })
+                        
+                        # 2. Análisis Específico por cada Zona (Solo CPs que ocupa / intersecta)
                         for _, zona_row in gdf_circles_m.iterrows():
                             cps_cubiertos_en_zona = []
-                            cps_faltantes_en_zona = []
                             
                             for _, cp_row in sub_cob.iterrows():
                                 if zona_row['geometry'].intersects(cp_row['geometry']):
                                     cps_cubiertos_en_zona.append(cp_row['CP'])
-                                else:
-                                    cps_faltantes_en_zona.append(cp_row['CP'])
                             
+                            # Solo añadimos si la zona pertenece al procesamiento actual
                             reporte_cp_por_zona.append({
                                 "Zona": zona_row['NOMBRE'],
                                 "Estado": est,
-                                "CPs Cubiertos": ", ".join(sorted(cps_cubiertos_en_zona)) if cps_cubiertos_en_zona else "Ninguno",
-                                "CPs Faltantes por Cubrir": ", ".join(sorted(cps_faltantes_en_zona)) if cps_faltantes_en_zona else "Ninguno"
+                                "CPs Cubiertos": ", ".join(sorted(cps_cubiertos_en_zona)) if cps_cubiertos_en_zona else "Ninguno"
                             })
                 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
                 df_cp_por_zona = pd.DataFrame(reporte_cp_por_zona)
                 # =========================================================================
+
                 
                 desglose_estados = []
                 for est in estados_con_cobertura_real:
