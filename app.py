@@ -250,7 +250,7 @@ if st.session_state["authentication_status"]:
                 }
                 st.session_state.procesado = True 
 
-       with col_m:
+    with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
             c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
