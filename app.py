@@ -184,15 +184,15 @@ if st.session_state["authentication_status"]:
                                     area_interseccion = geom_cp.intersection(union_zonas_est).area
                                     porcentaje_cobertura = (area_interseccion / geom_cp.area) * 100
 
-                                if porcentaje_cobertura >= 95:
-                                    cps_cubiertos_100.add(cp_str)
-                                else:
+                                    if porcentaje_cobertura >= 95:
+                                       cps_cubiertos_100.add(cp_str)
+                                    else:
                                     # Registra el porcentaje que SÍ está cubierto
-                                    cps_cubiertos_parcial.add(f"{cp_str} ({round(porcentaje_cobertura, 0)}%)")
+                                        cps_cubiertos_parcial.add(f"{cp_str} ({round(porcentaje_cobertura, 0)}%)")
 
                                     # Muestra solo el porcentaje de área que quedó fuera
-                                    porcentaje_faltante = 100 - porcentaje_cobertura
-                                    cps_parciales_faltantes_porc.add(f"{cp_str} ({round(porcentaje_faltante, 0)}%)")
+                                        porcentaje_faltante = 100 - porcentaje_cobertura
+                                        cps_parciales_faltantes_porc.add(f"{cp_str} ({round(porcentaje_faltante, 0)}%)")
 
                                 elif buffer_5km.contains(centroide_cp):
                                     cps_factibles_5km.add(cp_str)
