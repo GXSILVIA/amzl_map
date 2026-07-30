@@ -146,10 +146,11 @@ if st.session_state["authentication_status"]:
                             anillos_por_estado[est] = {
                                 'centro_lat': lat_centro,
                                 'centro_lon': lon_centro,
-                                'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__,
-                                'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__,
-                                'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__
+                                'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                                'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                                'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
                             }
+
                             
                             union_zonas_est = unary_union(zonas_del_estado['geometry'])
                             
