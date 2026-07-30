@@ -118,7 +118,9 @@ if st.session_state["authentication_status"]:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
                         zonas_del_estado = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(g_cob_est)]
                         
-                        cps_cubiertos_estado = set()
+                        cps_cubiertos_100 = set()
+                        cps_cubiertos_parcial = set()
+                        cps_parciales_faltantes_porc = set() 
                         cps_factibles_5km = set()
                         cps_factibles_10km = set()
                         cps_factibles_15km = set()
@@ -127,12 +129,15 @@ if st.session_state["authentication_status"]:
                         if not zonas_del_estado.empty:
                             idx_zonas_est = zonas_del_estado.index
                             df_zonas_filtrado = gdf_circles.loc[idx_zonas_est]
-                            
-                            lat_centro = df_zonas_filtrado['LATITUD'].mean()
-                            lon_centro = df_zonas_filtrado['LONGITUD'].mean()
-                            punto_medio_gps = Point(lon_centro, lat_centro)
-                            
-                            punto_medio_m = gpd.GeoSeries([punto_medio_gps], crs="EPSG:4326").to_crs("EPSG:6362").iloc[0]
+    
+    # NUEVO: Une físicamente la masa de círculos y extrae su verdadero centro de gravedad
+                            geometria_acumulada_m = unary_union(zonas_del_estado['geometry'])
+                            punto_medio_m = geometria_acumulada_m.centroid
+    
+    # Convertimos el punto a coordenadas GPS para que Folium lo pueda pintar
+                            punto_medio_gps = gpd.GeoSeries([punto_medio_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc
+                            lat_centro = punto_medio_gps.y
+                            lon_centro = punto_medio_gps.x
                             
                             buffer_5km = punto_medio_m.buffer(5000)
                             buffer_10km = punto_medio_m.buffer(10000)
@@ -141,9 +146,9 @@ if st.session_state["authentication_status"]:
                             anillos_por_estado[est] = {
                                 'centro_lat': lat_centro,
                                 'centro_lon': lon_centro,
-                                'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                                'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                                'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
+                                'r5': gpd.GeoSeries([buffer_5km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__,
+                                'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__,
+                                'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc.__geo_interface__
                             }
                             
                             union_zonas_est = unary_union(zonas_del_estado['geometry'])
@@ -151,24 +156,42 @@ if st.session_state["authentication_status"]:
                             for _, cp_row in sub_cob.iterrows():
                                 geom_cp = cp_row['geometry']
                                 centroide_cp = geom_cp.centroid
+                                cp_str = cp_row['CP']
                                 
-                                if union_zonas_est.intersects(geom_cp) or union_zonas_est.contains(centroide_cp):
-                                    cps_cubiertos_estado.add(cp_row['CP'])
-                                elif buffer_5km.contains(centroide_cp):
-                                    cps_factibles_5km.add(cp_row['CP'])
-                                elif buffer_10km.contains(centroide_cp):
-                                    cps_factibles_10km.add(cp_row['CP'])
-                                elif buffer_15km.contains(centroide_cp):
-                                    cps_factibles_15km.add(cp_row['CP'])
+                                if union_zonas_est.intersects(geom_cp):
+                                    area_interseccion = geom_cp.intersection(union_zonas_est).area
+                                    porcentaje_cobertura = (area_interseccion / geom_cp.area) * 100
+                                    
+                                if porcentaje_cobertura >= 95:
+                                   cps_cubiertos_100.add(cp_str)
                                 else:
-                                    cps_totalmente_faltantes.add(cp_row['CP'])
+                                        # Registra el porcentaje que SÍ está cubierto
+                                     cps_cubiertos_parcial.add(f"{cp_str} ({round(porcentaje_cobertura, 0)}%)")
+                                        
+                                        # Muestra solo el porcentaje de área que quedó fuera
+                                     porcentaje_faltante = 100 - porcentaje_cobertura
+                                     cps_parciales_faltantes_porc.add(f"{cp_str} ({round(porcentaje_faltante, 0)}%)")
+                                
+                                elif buffer_5km.contains(centroide_cp):
+                                    cps_factibles_5km.add(cp_str)
+                                elif buffer_10km.contains(centroide_cp):
+                                    cps_factibles_10km.add(cp_str)
+                                elif buffer_15km.contains(centroide_cp):
+                                    cps_factibles_15km.add(cp_str)
+                                else:
+                                    cps_totalmente_faltantes.add(cp_str)
                         else:
                             cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
                         
-                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto", "CP": ", ".join(sorted(list(cps_cubiertos_estado))) if cps_cubiertos_estado else "Ninguno"})
+                                                # 2. Unión de listas para la categoría de faltantes
+                        lista_final_faltantes = sorted(list(cps_parciales_faltantes_porc)) + sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))
+                        texto_final_faltantes = ", ".join(lista_final_faltantes) if lista_final_faltantes else "Ninguno"
+
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Inmediato (<5km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_5km))) if cps_factibles_5km else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Moderado (5-10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_10km))) if cps_factibles_10km else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Falta por Cubrir (>10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))) if cps_factibles_15km.union(cps_totalmente_faltantes) else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Falta por Cubrir (>10km del Centro / Parciales)", "CP": texto_final_faltantes})
                         
                         for _, zona_row in gdf_circles_m_corr.iterrows():
                             if zona_row['geometry'].intersects(g_cob_est):
