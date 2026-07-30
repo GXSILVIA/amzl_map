@@ -157,7 +157,7 @@ if st.session_state["authentication_status"]:
                             punto_medio_m = geometria_acumulada_m.centroid
 
                             # Convertimos el punto a coordenadas GPS para que Folium lo pueda pintar
-                            punto_medio_gps = gpd.GeoSeries([punto_medio_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc
+                            punto_medio_gps = gpd.GeoSeries([punto_medio_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0]
                             lat_centro = punto_medio_gps.y
                             lon_centro = punto_medio_gps.x
 
@@ -210,9 +210,9 @@ if st.session_state["authentication_status"]:
                         texto_final_faltantes = ", ".join(lista_final_faltantes) if lista_final_faltantes else "Ninguno"
 
                         reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"}[...])
-                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Inmediato (<5km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_5km))) if cps_factibles_5km else "Ning[...])
-                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Moderado (5-10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_10km))) if cps_factibles_10km else "N[...])
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Inmediato (<5km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_5km))) if cps_factibles_5km else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est, "Estatus": "Factible Moderado (5-10km del Centro)", "CP": ", ".join(sorted(list(cps_factibles_10km))) if cps_factibles_10km else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est, "Estatus": "Falta por Cubrir (>10km del Centro / Parciales)", "CP": texto_final_faltantes})
 
                         for _, zona_row in gdf_circles_m_corr.iterrows():
@@ -301,11 +301,23 @@ if st.session_state["authentication_status"]:
                     ).add_to(m)
 
                     # Anillo 1: 5 KM - Verde Punteado
-                    folium.GeoJson(anillos['r5'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"R[...]")
+                    folium.GeoJson(
+                        anillos['r5'],
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'},
+                        tooltip="Anillo 5 km (factibilidad inmediata)"
+                    ).add_to(m)
                     # Anillo 2: 10 KM - Amarillo Punteado
-                    folium.GeoJson(anillos['r10'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"[...]")
+                    folium.GeoJson(
+                        anillos['r10'],
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'},
+                        tooltip="Anillo 10 km (factibilidad moderada)"
+                    ).add_to(m)
                     # Anillo 3: 15 KM - Rojo Punteado
-                    folium.GeoJson(anillos['r15'], style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, tooltip=f"[...]")
+                    folium.GeoJson(
+                        anillos['r15'],
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'},
+                        tooltip="Anillo 15 km (factibilidad lejana)"
+                    ).add_to(m)
 
             # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales
             for _, r in res['gdf_cobertura_wgs84'].iterrows():
@@ -324,18 +336,18 @@ if st.session_state["authentication_status"]:
 
                 txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
 
-                tt_c = f"""
-                <b>Zona Operativa: {r['NOMBRE']}</b><br>
-                Rango: {r_txt}<br>
-                Volumen: {r['VOLUMEN']}<br>
-                Radio Ope: {r['RADIO']}m<br>
-                -------------------------<br>
-                <b>CPs Ocupados Abajo:</b> {txt_cps_atrapados}
-                """
+                tt_c = (
+                    f"<b>Zona Operativa: {r['NOMBRE']}</b><br>"
+                    f"Rango: {r_txt}<br>"
+                    f"Volumen: {r['VOLUMEN']}<br>"
+                    f"Radio Ope: {r['RADIO']}m<br>"
+                    f"-------------------------<br>"
+                    f"<b>CPs Ocupados Abajo:</b> {txt_cps_atrapados}"
+                )
 
                 folium.GeoJson(
-                    r['geometry'], 
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55}, 
+                    r['geometry'],
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55},
                     tooltip=tt_c
                 ).add_to(m)
 
@@ -361,7 +373,7 @@ if st.session_state["authentication_status"]:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).[...]
+                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalles')
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
 
