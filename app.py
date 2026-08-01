@@ -126,7 +126,12 @@ if st.session_state["authentication_status"]:
                     if row['RADIO'] < 100:
                         base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs("EPSG:6362").iloc[0]
                         gdf_circles_m_corr.at[idx, 'geometry'] = base_geom.buffer(row['RADIO'] * 1000)
-                 # =========================================================================
+                
+                reporte_cp_por_zona = []
+                reporte_cp_por_estado = []
+                anillos_por_estado = {}
+
+                # =========================================================================
                 # 📊 LÓGICA UNIFICADA: CENTROIDE POR NODO OPERATIVO Y PERÍMETROS DE COBERTURA
                 # =========================================================================
                 for est in estados_con_cobertura_real:
