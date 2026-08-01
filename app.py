@@ -177,9 +177,7 @@ if st.session_state["authentication_status"]:
                                 # 🎯 REPARACIÓN AUTOMÁTICA: Aplicamos .buffer(0) para limpiar geometrías inválidas
                                 geom_cp = cp_row['geometry'].buffer(0)
                                 centroide_cp = geom_cp.centroid
-                                cp_str = cp_row['CP']
-                                
-                                # Aseguramos que la unión de las zonas también esté limpia topográficamente
+                                cp_str = cp_row['CP']                                # Aseguramos que la unión de las zonas también esté limpia topográficamente
                                 union_zonas_est_clean = union_zonas_est.buffer(0)
                                 
                                 if union_zonas_est_clean.intersects(geom_cp):
