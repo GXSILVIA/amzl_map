@@ -121,7 +121,12 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
 
-                                # =========================================================================
+                gdf_circles_m_corr = gdf_circles_m.copy()
+                for idx, row in gdf_circles_m_corr.iterrows():
+                    if row['RADIO'] < 100:
+                        base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs("EPSG:6362").iloc[0]
+                        gdf_circles_m_corr.at[idx, 'geometry'] = base_geom.buffer(row['RADIO'] * 1000)
+                 # =========================================================================
                 # 📊 LÓGICA UNIFICADA: CENTROIDE POR NODO OPERATIVO Y PERÍMETROS DE COBERTURA
                 # =========================================================================
                 for est in estados_con_cobertura_real:
