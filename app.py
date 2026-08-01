@@ -172,7 +172,8 @@ if st.session_state["authentication_status"]:
                                 'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
                                 'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
                             }
-                            
+                            union_zonas_est = unary_union(zonas_del_estado['geometry'])
+
                             for _, cp_row in sub_cob.iterrows():
                                 # 🎯 REPARACIÓN AUTOMÁTICA: Aplicamos .buffer(0) para limpiar geometrías inválidas
                                 geom_cp = cp_row['geometry'].buffer(0)
