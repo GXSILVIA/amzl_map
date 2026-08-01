@@ -291,12 +291,19 @@ if st.session_state["authentication_status"]:
                 }
                 st.session_state.procesado = True
 
-    with col_m:
-        if st.session_state.procesado and st.session_state.resultados is not None:
+        with col_m:
+            if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
-            c_lat = res['gdf_circles_wgs84']['LATITUD'].mean() if not res['gdf_circles_wgs84'].empty else 23.6345
-            c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean() if not res['gdf_circles_wgs84'].empty else -102.5528
-            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 11, tiles="CartoDB Voyager")
+            
+            # 🎯 ENFOQUE EN INFRAESTRUCTURA: La cámara del mapa se centra en el promedio de las zonas físicas subidas por el usuario
+            if not res['gdf_circles_wgs84'].empty:
+                c_lat = res['gdf_circles_wgs84']['LATITUD'].mean()
+                c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean()
+            else:
+                c_lat = 23.6345
+                c_lon = -102.5528
+                
+            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="CartoDB Voyager")
 
             # 1. CAPA INFERIOR CONDICIONAL: Pintamos el centroide y anillos SOLO si la casilla del panel derecho está activada
             # Recuperamos el valor guardado en el estado de sesión o asumimos True por defecto
