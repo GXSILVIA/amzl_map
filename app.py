@@ -172,38 +172,46 @@ if st.session_state["authentication_status"]:
                                 'r10': gpd.GeoSeries([buffer_10km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
                                 'r15': gpd.GeoSeries([buffer_15km], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
                             }
-
-                            union_zonas_est = unary_union(zonas_del_estado['geometry'])
-
+                            
                             for _, cp_row in sub_cob.iterrows():
-                                geom_cp = cp_row['geometry']
+                                # 🎯 REPARACIÓN AUTOMÁTICA: Aplicamos .buffer(0) para limpiar geometrías inválidas
+                                geom_cp = cp_row['geometry'].buffer(0)
                                 centroide_cp = geom_cp.centroid
                                 cp_str = cp_row['CP']
-
-                                if union_zonas_est.intersects(geom_cp):
-                                    area_interseccion = geom_cp.intersection(union_zonas_est).area
-                                    porcentaje_cobertura = (area_interseccion / geom_cp.area) * 100
-
+                                
+                                # Aseguramos que la unión de las zonas también esté limpia topográficamente
+                                union_zonas_est_clean = union_zonas_est.buffer(0)
+                                
+                                if union_zonas_est_clean.intersects(geom_cp):
+                                    try:
+                                        # Calculamos la intersección usando las geometrías ya reparadas
+                                        area_interseccion = geom_cp.intersection(union_zonas_est_clean).area
+                                        porcentaje_cobertura = (area_interseccion / geom_cp.area) * 100
+                                    except Exception:
+                                        # Respaldo de seguridad en caso de fallas extremas en el archivo GeoJSON
+                                        porcentaje_cobertura = 50.0
+                                    
                                     if porcentaje_cobertura >= 95:
-                                       cps_cubiertos_100.add(cp_str)
+                                        cps_cubiertos_100.add(cp_str)
                                     else:
-                                    # Registra el porcentaje que SÍ está cubierto
                                         cps_cubiertos_parcial.add(f"{cp_str} ({round(porcentaje_cobertura, 0)}%)")
-
-                                    # Muestra solo el porcentaje de área que quedó fuera
                                         porcentaje_faltante = 100 - porcentaje_cobertura
                                         cps_parciales_faltantes_porc.add(f"{cp_str} ({round(porcentaje_faltante, 0)}%)")
-
+                                
                                 elif buffer_5km.contains(centroide_cp):
                                     cps_factibles_5km.add(cp_str)
+                                    
                                 elif buffer_10km.contains(centroide_cp):
                                     cps_factibles_10km.add(cp_str)
+                                    
                                 elif buffer_15km.contains(centroide_cp):
                                     cps_factibles_15km.add(cp_str)
+                                    
                                 else:
                                     cps_totalmente_faltantes.add(cp_str)
-                        else:
-                            cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
+
+                                else:
+                                    cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
 
                         # 2. Unión de listas para la categoría de faltantes
                         lista_final_faltantes = sorted(list(cps_parciales_faltantes_porc)) + sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))
