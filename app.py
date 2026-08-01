@@ -274,12 +274,12 @@ if st.session_state["authentication_status"]:
 
                 df_desglose = pd.DataFrame(desglose_estados)
                 if df_desglose.empty:
-                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
+                   df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
 
                 estados_validos = df_desglose['Estado'].unique().tolist()
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
 
-                 st.session_state.resultados = {
+                st.session_state.resultados = {
                     'estado_nombre': edo_sel,
                     'df_desglose': df_desglose,
                     'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
