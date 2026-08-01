@@ -210,8 +210,8 @@ if st.session_state["authentication_status"]:
                                 else:
                                     cps_totalmente_faltantes.add(cp_str)
 
-                                else:
-                                    cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
+                            else:
+                                cps_totalmente_faltantes = set(sub_cob['CP'].tolist())
 
                         # 2. Unión de listas para la categoría de faltantes
                         lista_final_faltantes = sorted(list(cps_parciales_faltantes_porc)) + sorted(list(cps_factibles_15km.union(cps_totalmente_faltantes)))
