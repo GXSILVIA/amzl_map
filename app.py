@@ -279,11 +279,12 @@ if st.session_state["authentication_status"]:
                 estados_validos = df_desglose['Estado'].unique().tolist()
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
 
-                st.session_state.resultados = {
+                 st.session_state.resultados = {
                     'estado_nombre': edo_sel,
                     'df_desglose': df_desglose,
                     'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
-                    'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326"),
+                    # 🎯 SOLUCIÓN: Guardamos la tabla completa con sus columnas de LATITUD y LONGITUD originales
+                    'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326").assign(LATITUD=gdf_circles['LATITUD'], LONGITUD=gdf_circles['LONGITUD']),
                     'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2']].copy(),
                     'df_cp_por_estado': df_cp_por_estado,
                     'df_cp_por_zona': df_cp_por_zona,
