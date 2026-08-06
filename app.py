@@ -121,6 +121,20 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
 
+             # 🎯 EXTRACCIÓN DEL MES: Tomamos el nombre base del archivo subido (ej: "JUNIO.xlsx" -> "JUNIO")
+                import os
+                nombre_archivo_zonas = f_zonas.name if hasattr(f_zonas, 'name') else "JUNIO.xlsx"
+                mes_extraido = os.path.splitext(nombre_archivo_zonas)[0].upper()
+                gdf_circles_m['Territorio MES'] = mes_extraido
+                
+                # 🎯 IDENTIFICACIÓN DEL ESTADO: Cruzamos espacialmente cada círculo contra los estados cartográficos
+                if 'geometry' in gdf_circles_m.columns and not gdf_cobertura.empty:
+                    circles_gps = gdf_circles_m.to_crs(gdf_cobertura.crs)
+                    joined = gpd.sjoin(circles_gps, gdf_cobertura[['geometry', 'ESTADO_PERTENECE']], how='left', predicate='intersects')
+                    gdf_circles_m['ESTADO'] = joined.groupby(joined.index)['ESTADO_PERTENECE'].first().fillna('DESCONOCIDO').str.upper()
+                else:
+                    gdf_circles_m['ESTADO'] = 'DESCONOCIDO'
+
                 gdf_circles_m_corr = gdf_circles_m.copy()
                 for idx, row in gdf_circles_m_corr.iterrows():
                     if row['RADIO'] < 100:
@@ -310,7 +324,12 @@ if st.session_state["authentication_status"]:
                     'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
                     # 🎯 SOLUCIÓN: Guardamos la tabla completa con sus columnas de LATITUD y LONGITUD originales
                     'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326").assign(LATITUD=gdf_circles['LATITUD'], LONGITUD=gdf_circles['LONGITUD']),
-                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2']].copy(),
+                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy().rename(columns={
+                        'NOMBRE': 'Nombre de la Zona',
+                        'RADIO': 'Radio (m)',
+                        'AREA_KM2': 'Territorio'
+                    }),
+
                     'df_cp_por_estado': df_cp_por_estado,
                     'df_cp_por_zona': df_cp_por_zona,
                     'anillos_por_estado': anillos_por_estado
