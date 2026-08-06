@@ -193,6 +193,7 @@ if st.session_state["authentication_status"]:
                         cps_perimetro_gt10km = set()
                         
                         for _, cp_row in sub_cob.iterrows():
+                            # 🎯 CONGELAR TAMAÑO REAL: Alineado perfectamente con 24 espacios a la izquierda
                             area_real_cp_fija = cp_row['geometry'].area
                             if area_real_cp_fija <= 0:
                                 continue
@@ -202,17 +203,18 @@ if st.session_state["authentication_status"]:
                             cp_str = cp_row['CP']
                             zona_lbl = cp_row.get('ZONA', 'S/N')
                             
-                            # 📦 BLOQUE A: EVALUACIÓN DE COBERTURA GEOMÉTRICA CON ÁREA CONGELADA
+                            # 📦 BLOQUE A: EVALUACIÓN DE COBERTURA GEOMÉTRICA CON ÁREA CONGELADA (28 espacios)
                             if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
-                            try:
-                                area_interseccion = geom_cp.intersection(union_total_partners_m).area
-                                porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
-                            except Exception:
-                                porcentaje_cobertura = 50.0
-                            
-                            porcentaje_cobertura = min(100.0, porcentaje_cobertura)
-                            
-                            if porcentaje_cobertura >= 95:
+                                try:
+                                    area_interseccion = geom_cp.intersection(union_total_partners_m).area
+                                    porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
+                                except Exception:
+                                    porcentaje_cobertura = 50.0
+                                
+                                porcentaje_cobertura = min(100.0, porcentaje_cobertura)
+                                
+                                if porcentaje_cobertura >= 95:
+
                                 cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
                             else:
                                 cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
