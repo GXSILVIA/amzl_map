@@ -204,21 +204,19 @@ if st.session_state["authentication_status"]:
                             
                             # 📦 BLOQUE A: EVALUACIÓN DE COBERTURA GEOMÉTRICA CON ÁREA CONGELADA
                             if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
-                                try:
-                                    area_interseccion = geom_cp.intersection(union_total_partners_m).area
-                                    porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
-                                tuning = min(100.0, porcentaje_cobertura)
-                                except Exception:
-                                    porcentaje_cobertura = 50.0
-                                
-                                porcentaje_cobertura = min(100.0, porcentaje_cobertura)
-                                
-                                if porcentaje_cobertura >= 95:
-                                    cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
-                                else:
-                                    cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
-                                    porcentaje_faltante = 100 - porcentaje_cobertura
-                                    cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
+                            try:
+                                area_interseccion = geom_cp.intersection(union_total_partners_m).area
+                                porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
+                            except Exception:
+                                porcentaje_cobertura = 50.0
+                            
+                            porcentaje_cobertura = min(100.0, porcentaje_cobertura)
+                            
+                            if porcentaje_cobertura >= 95:
+                                cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
+                            else:
+                                cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
+
                             
                             # 🎯 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
                             if centroides_nodos_globales:
