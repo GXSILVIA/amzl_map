@@ -274,6 +274,8 @@ if st.session_state["authentication_status"]:
 
                         minx, miny, maxx, maxy = g_cob_est.bounds
                         area_caja_cobertura = (maxx - minx) * (maxy - miny)
+                        
+                        np.random.seed(42)
 
                         x_rand = np.random.uniform(minx, maxx, n_simulaciones)
                         y_rand = np.random.uniform(miny, maxy, n_simulaciones)
