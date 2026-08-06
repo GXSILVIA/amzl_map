@@ -303,13 +303,14 @@ if st.session_state["authentication_status"]:
                         else:
                             eficiencia = 0.0
 
-                            desglose_estados.append({
-                                "Estado": est,
-                                "Territorio Cobertura Total (km²)": round(cob_km2, 4),
-                                "Territorio Ocupado Total (km²)": round(ocu_km2, 4),
-                                "Territorio Libre Total (km²)": round(lib_km2, 4),
-                                "Eficiencia de Ocupación": f"{round(eficiencia, 2)}%"
-                            })
+                # 🎯 CORRECCIÓN: Nombres de columnas idénticos a los de tu interfaz web
+                        desglose_estados.append({
+                            "Estado": est.upper(),
+                            "Territorio Cobertura Total (km²)": round(cob_km2, 2),
+                            "Territorio Ocupado Total (km²)": round(ocu_km2, 2),
+                            "Territorio Libre Total (km²)": round(lib_km2, 2),
+                            "Eficiencia de Ocupación": f"{round(eficiencia, 2)}%"
+                        })
 
                 df_desglose = pd.DataFrame(desglose_estados)
                 if df_desglose.empty:
