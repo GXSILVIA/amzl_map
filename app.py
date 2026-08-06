@@ -245,17 +245,20 @@ if st.session_state["authentication_status"]:
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro >10km", "CP": texto_final_faltantes})
 
                         for _, zona_row in gdf_circles_m_corr.iterrows():
-                            if zona_row['geometry'].intersects(g_cob_est):
+                            # Verificamos si la zona interactúa con la cobertura utilizando una variable que sí existe en la memoria
+                            if union_total_partners_m is not None and zona_row['geometry'].intersects(union_total_partners_m):
                                 cps_actuales_zona = []
                                 for _, cp_row in sub_cob.iterrows():
-                                    if zona_row['geometry'].intersects(cp_row['geometry']) or zona_row['geometry'].contains(cp_row['geometry'].centroid):
+                                    geom_cp = cp_row['geometry'].buffer(0)
+                                    if zona_row['geometry'].intersects(geom_cp) or zona_row['geometry'].contains(geom_cp.centroid):
                                         cps_actuales_zona.append(cp_row['CP'])
-
-                                reporte_cp_por_zona.append({
-                                    "Zona": zona_row['NOMBRE'],
-                                    "Estado": est,
-                                    "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona)))) if cps_actuales_zona else "Ninguno"
-                                })
+                                
+                                if cps_actuales_zona:
+                                    reporte_cp_por_zona.append({
+                                        "Zona": zona_row['NOMBRE'],
+                                        "Estado": est.upper(),
+                                        "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona))))
+                                    })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
                 df_cp_por_zona = pd.DataFrame(reporte_cp_por_zona)
