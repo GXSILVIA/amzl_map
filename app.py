@@ -131,18 +131,60 @@ if st.session_state["authentication_status"]:
                 reporte_cp_por_estado = []
                 anillos_por_estado = {}
 
-                                # =========================================================================
-                # 📊 LÓGICA UNIFICADA: CENTROIDE POR ACUMULACIÓN DE PARTNERS DE CADA NODO
                 # =========================================================================
+                # 📊 LÓGICA LOGÍSTICA METROPOLITANA: CENTROIDE ÚNICO POR NODO (CRUZA ESTADOS)
+                # =========================================================================
+                # 🎯 PASO 1: Identificamos y precalculamos los centroides basados estrictamente en cada NODO
+                nodos_unicos_maestro = gdf_cobertura['ZONA'].dropna().unique().tolist()
+                centroides_nodos_globales = []
+                
+                for nodo in nodos_unicos_maestro:
+                    # Filtramos la cobertura completa de este nodo a nivel nacional (cruza fronteras)
+                    cob_nodo_completa = gdf_cobertura[gdf_cobertura['ZONA'] == nodo]
+                    if cob_nodo_completa.empty or gdf_circles_m_corr.empty:
+                        continue
+                        
+                    g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs("EPSG:6362").buffer(0))
+                    
+                    # ASOCIACIÓN METROPOLITANA: Encontramos TODOS los partners que operan en este nodo (Coahuila + Durango + etc)
+                    partners_del_nodo = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(g_cob_nodo_global)]
+                    
+                    if partners_del_nodo.empty:
+                        centroide_temp_cob = g_cob_nodo_global.centroid
+                        distancias_a_partners = gdf_circles_m_corr['geometry'].distance(centroide_temp_cob)
+                        partners_del_nodo = gdf_circles_m_corr.loc[[distancias_a_partners.idxmin()]]
+                    
+                    # CALCULO DE MASA: Un solo centroide para la acumulación total de partners del nodo
+                    masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
+                    centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
+                    
+                    # Guardamos el centroide en la lista global para la evaluación de distancias radiales
+                    centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
+                    
+                    # Proyectamos a GPS para Folium
+                    pt_gps = gpd.GeoSeries([centroide_acumulacion_nodo_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0]
+                    
+                    # Generamos los radios de perímetro estables concéntricos
+                    b5 = centroide_acumulacion_nodo_m.buffer(5000)
+                    b10 = centroide_acumulacion_nodo_m.buffer(10000)
+                    b15 = centroide_acumulacion_nodo_m.buffer(15000)
+                    
+                    # Almacenamos en el diccionario usando como clave únicamente el nombre del Nodo
+                    anillos_por_estado[nodo] = {
+                        'centro_lat': pt_gps.y,
+                        'centro_lon': pt_gps.x,
+                        'r5': gpd.GeoSeries([b5], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                        'r10': gpd.GeoSeries([b10], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                        'r15': gpd.GeoSeries([b15], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
+                    }
+
+                # 🎯 PASO 2: Clasificamos y segmentamos los reportes de salida manteniendo la división por Estado
+                union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
+
                 for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
-                        g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
                         
-                        # Filtramos toda la infraestructura física de partners en este estado
-                        zonas_del_estado = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(g_cob_est)]
-                        
-                        # Definición unificada de conjuntos para los perímetros y coberturas
                         cps_cubiertos_100 = set()
                         cps_cubiertos_parcial = set()
                         cps_parciales_faltantes_porc = set()
@@ -150,107 +192,52 @@ if st.session_state["authentication_status"]:
                         cps_perimetro_5_10km = set()
                         cps_perimetro_gt10km = set()
                         
-                        if not sub_cob.empty:
-                            # Identificamos los nodos únicos oficiales que vienen en el primer archivo (Columna ZONA)
-                            nodos_unicos_maestro = sub_cob['ZONA'].dropna().unique().tolist()
-                            centroides_nodos_est = []
+                        for _, cp_row in sub_cob.iterrows():
+                            area_real_cp_fija = cp_row['geometry'].area
+                            if area_real_cp_fija <= 0:
+                                continue
+                                
+                            geom_cp = cp_row['geometry'].buffer(0)
+                            centroide_cp = geom_cp.centroid
+                            cp_str = cp_row['CP']
+                            zona_lbl = cp_row.get('ZONA', 'S/N')
                             
-                            # Procesamos la infraestructura física agrupada por cada nodo maestro
-                            for nodo in nodos_unicos_maestro:
-                                # Filtramos la cobertura geográfica específica de este nodo
-                                cob_nodo_especifico = sub_cob[sub_cob['ZONA'] == nodo]
-                                if cob_nodo_especifico.empty or zonas_del_estado.empty:
-                                    continue
-                                    
-                                g_cob_nodo = unary_union(cob_nodo_especifico['geometry'].buffer(0))
+                            # 📦 BLOQUE A: EVALUACIÓN DE COBERTURA GEOMÉTRICA CON ÁREA CONGELADA
+                            if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
+                                try:
+                                    area_interseccion = geom_cp.intersection(union_total_partners_m).area
+                                    porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
+                                tuning = min(100.0, porcentaje_cobertura)
+                                except Exception:
+                                    porcentaje_cobertura = 50.0
                                 
-                                # 🎯 ASOCIACIÓN: Encontramos el conjunto de partners/círculos que operan dentro de este nodo
-                                partners_del_nodo = zonas_del_estado[zonas_del_estado['geometry'].intersects(g_cob_nodo)]
+                                porcentaje_cobertura = min(100.0, porcentaje_cobertura)
                                 
-                                # Si no hay partners pisando la geometría, usamos los círculos más cercanos a ese nodo
-                                if partners_del_nodo.empty:
-                                    centroide_temp_cob = g_cob_nodo.centroid
-                                    distancias_a_partners = zonas_del_estado['geometry'].distance(centroide_temp_cob)
-                                    partners_del_nodo = zonas_del_estado.loc[[distancias_a_partners.idxmin()]]
-                                
-                                # 🎯 EL CENTROIDE ES LA ACUMULACIÓN DEL CONJUNTO DE PARTNERS QUE INTEGRAN EL NODO
-                                masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
-                                centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
-                                
-                                # Almacenamos el punto medio para la evaluación de distancias absolutas de abajo
-                                centroides_nodos_est.append(centroide_acumulacion_nodo_m)
-                                
-                                # Proyectamos a GPS para renderizar el pin en Folium
-                                pt_gps = gpd.GeoSeries([centroide_acumulacion_nodo_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0]
-                                
-                                # Generamos los radios concéntricos estables de cobertura perimetral
-                                b5 = centroide_acumulacion_nodo_m.buffer(5000)
-                                b10 = centroide_acumulacion_nodo_m.buffer(10000)
-                                b15 = centroide_acumulacion_nodo_m.buffer(15000)
-                                
-                                # Guardamos los anillos en la sesión vinculados por Estado y Nodo Maestro
-                                clave_mapa = f"{est}_{nodo}"
-                                anillos_por_estado[clave_mapa] = {
-                                    'centro_lat': pt_gps.y,
-                                    'centro_lon': pt_gps.x,
-                                    'r5': gpd.GeoSeries([b5], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                                    'r10': gpd.GeoSeries([b10], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                                    'r15': gpd.GeoSeries([b15], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
-                                }
+                                if porcentaje_cobertura >= 95:
+                                    cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
+                                else:
+                                    cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
+                                    porcentaje_faltante = 100 - porcentaje_cobertura
+                                    cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
                             
-                            # Unión global de la red de partners para calcular intersecciones de área
-                            union_total_partners_m = unary_union(zonas_del_estado['geometry']).buffer(0) if not zonas_del_estado.empty else None
-                            
-                            # Iteramos sobre los CPs del estado para clasificar coberturas y perímetros radiales absolutos
-                            for _, cp_row in sub_cob.iterrows():
-                                area_real_cp_fija = cp_row['geometry'].area
-                                if area_real_cp_fija <= 0:
-                                    continue
-                                    
-                                geom_cp = cp_row['geometry'].buffer(0)
-                                centroide_cp = geom_cp.centroid
-                                cp_str = cp_row['CP']
-                                zona_lbl = cp_row.get('ZONA', 'S/N')
+                            # 🎯 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
+                            if centroides_nodos_globales:
+                                distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
                                 
-                                # 📦 BLOQUE A: EVALUACIÓN DE COBERTURA GEOMÉTRICA CON ÁREA FIJA
-                                if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
-                                    try:
-                                        area_interseccion = geom_cp.intersection(union_total_partners_m).area
-                                        porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
-                                    except Exception:
-                                        porcentaje_cobertura = 50.0
-                                    
-                                    porcentaje_cobertura = min(100.0, porcentaje_cobertura)
-                                    
-                                    if porcentaje_cobertura >= 95:
-                                        cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
-                                    else:
-                                        cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
-                                        porcentaje_faltante = 100 - porcentaje_cobertura
-                                        cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
-                                
-                                # 🎯 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA DESDE EL CENTRO DE GRAVEDAD DEL NODO
-                                if centroides_nodos_est:
-                                    distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_est])
-                                    
-                                    if distancia_al_centroide <= 5000:
-                                        cps_perimetro_5km.add(f"{zona_lbl}: {cp_str}")
-                                    elif distancia_al_centroide <= 10000:
-                                        cps_perimetro_5_10km.add(f"{zona_lbl}: {cp_str}")
-                                    else:
-                                        cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
+                                if distancia_al_centroide <= 5000:
+                                    cps_perimetro_5km.add(f"{zona_lbl}: {cp_str}")
+                                elif distancia_al_centroide <= 10000:
+                                    cps_perimetro_5_10km.add(f"{zona_lbl}: {cp_str}")
                                 else:
                                     cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
-                                            
-                        else:
-                            for _, cp_row in sub_cob.iterrows():
-                                cps_perimetro_gt10km.add(f"{cp_row.get('ZONA', 'S/N')}: {cp_row['CP']}")
+                            else:
+                                cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
                         
-                        # Consolidamos los remanentes lejanos junto con los porcentajes faltantes de la cobertura parcial
+                        # Consolidamos remanentes lejanos y porcentajes faltantes para el estatus final por estado
                         lista_final_faltantes = sorted(list(cps_parciales_faltantes_porc)) + sorted(list(cps_perimetro_gt10km))
                         texto_final_faltantes = ", ".join(lista_final_faltantes) if lista_final_faltantes else "Ninguno"
 
-                        # Inyección con nomenclatura de perímetros limpios solicitada
+                        # Inyección limpia con nomenclatura de perímetros exacta y división de renglones por Estado
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro <5 km", "CP": ", ".join(sorted(list(cps_perimetro_5km))) if cps_perimetro_5km else "Ninguno"})
@@ -340,30 +327,32 @@ if st.session_state["authentication_status"]:
             m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="CartoDB Voyager")
             
             if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
-                for est_key, anillos in res['anillos_por_estado'].items():
+                for nodo_key, anillos in res['anillos_por_estado'].items():
                     folium.Marker(
                         location=[anillos['centro_lat'], anillos['centro_lon']],
                         icon=folium.Icon(color='purple', icon='crosshairs', prefix='fa'),
-                        tooltip=f"Centroide Acumulación: {est_key}"
+                        tooltip=f"Centroide Nodo: {str(nodo_key).upper()}"
                     ).add_to(m)
-
-                    # Anillo 1: 5 KM - Verde Punteado
+                    
+                    # Anillo 1: <5 km - Verde Punteado
                     folium.GeoJson(
-                        anillos['r5'],
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'},
-                        tooltip="Anillo 5 km (factibilidad inmediata)"
+                        anillos['r5'], 
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
+                        tooltip=f"perimetro <5 km ({nodo_key})"
                     ).add_to(m)
-                    # Anillo 2: 10 KM - Amarillo Punteado
+                    
+                    # Anillo 2: 5-10 km - Amarillo Punteado
                     folium.GeoJson(
-                        anillos['r10'],
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'},
-                        tooltip="Anillo 10 km (factibilidad moderada)"
+                        anillos['r10'], 
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
+                        tooltip=f"perimetro 5-10km ({nodo_key})"
                     ).add_to(m)
-                    # Anillo 3: 15 KM - Rojo Punteado
+                    
+                    # Anillo 3: >10 km - Rojo Punteado
                     folium.GeoJson(
-                        anillos['r15'],
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'},
-                        tooltip="Anillo 15 km (factibilidad lejana)"
+                        anillos['r15'], 
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
+                        tooltip=f"perimetro >10km ({nodo_key})"
                     ).add_to(m)
 
             # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales
