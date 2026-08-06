@@ -272,24 +272,23 @@ if st.session_state["authentication_status"]:
                     if not sub_cob.empty:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
 
-                        minx, miny, maxx, maxy = g_cob_est.bounds
-                        area_caja_cobertura = (maxx - minx) * (maxy - miny)
+                                               # 🎯 CÁLCULO GEOMÉTRICO DIRECTO Y EXACTO (Reemplaza a Montecarlo)
+                        cob_km2 = g_cob_est.area / 1000000.0
                         
-                        np.random.seed(42)
-
-                        x_rand = np.random.uniform(minx, maxx, n_simulaciones)
-                        y_rand = np.random.uniform(miny, maxy, n_simulaciones)
-                        puntos_simulados = [Point(x, y) for x, y in zip(x_rand, y_rand)]
-
-                        puntos_en_cobertura = sum(1 for p in puntos_simulados if g_cob_est.contains(p))
-                        puntos_en_ocupacion = sum(1 for p in puntos_simulados if g_cob_est.contains(p) and geom_cir_total.contains(p))
-
-                        cob_km2 = (puntos_en_cobertura / n_simulaciones) * (area_caja_cobertura / 1000000.0)
-                        ocu_km2 = (puntos_en_ocupacion / n_simulaciones) * (area_caja_cobertura / 1000000.0)
+                        if union_total_partners_m is not None:
+                            union_total_partners_clean = union_total_partners_m.buffer(0)
+                            interseccion_ocupada = g_cob_est.intersection(union_total_partners_clean)
+                            ocu_km2 = interseccion_ocupada.area / 1000000.0
+                        else:
+                            ocu_km2 = 0.0
+                            
                         lib_km2 = max(0.0, cob_km2 - ocu_km2)
+                        
+                        if cob_km2 > 0:
+                            eficiencia = (ocu_km2 / cob_km2) * 100.0
+                        else:
+                            eficiencia = 0.0
 
-                        if ocu_km2 > 0:
-                            eficiencia = (ocu_km2 / cob_km2 * 100) if cob_km2 > 0 else 0.0
                             desglose_estados.append({
                                 "Estado": est,
                                 "Territorio Cobertura Total (km²)": round(cob_km2, 4),
@@ -300,7 +299,7 @@ if st.session_state["authentication_status"]:
 
                 df_desglose = pd.DataFrame(desglose_estados)
                 if df_desglose.empty:
-                   df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
+                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
 
                 estados_validos = df_desglose['Estado'].unique().tolist()
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
