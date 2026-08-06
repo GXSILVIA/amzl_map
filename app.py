@@ -211,13 +211,13 @@ if st.session_state["authentication_status"]:
                                 except Exception:
                                     porcentaje_cobertura = 50.0
                                 
-                                porcentaje_cobertura = min(100.0, porcentaje_cobertura)
+                                    porcentaje_cobertura = min(100.0, porcentaje_cobertura)
                                 
                                 if porcentaje_cobertura >= 95:
 
-                                cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
-                            else:
-                                cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
+                                    cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
+                                else:
+                                    cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
 
                             
                             # 🎯 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
