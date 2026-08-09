@@ -425,7 +425,7 @@ if st.session_state["authentication_status"]:
                 ).add_to(m)
         
             # 3. CAPA SUPERIOR: Círculos operativos actuales con Tooltip Combinado Inteligente
-            for _, r in res['gdf_circles_m_corr'].iterrows():
+            for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango(r['VOLUMEN'])
             
                 geom_circulo = r['geometry']
