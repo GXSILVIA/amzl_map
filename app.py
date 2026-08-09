@@ -433,8 +433,8 @@ if st.session_state["authentication_status"]:
             
             # 🚀 SOLUCIÓN GLOBAL: Intersectamos contra la base cartográfica nacional viva sin importar el estado
                 for _, cp_row in gdf_cobertura.iterrows():
-                if geom_circulo.intersects(cp_row['geometry']):
-                    cps_bajo_circulo.append(str(cp_row['CP']))
+                    if geom_circulo.intersects(cp_row['geometry']):
+                        cps_bajo_circulo.append(str(cp_row['CP']))
 
                 txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
 
