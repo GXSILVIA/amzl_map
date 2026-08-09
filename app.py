@@ -440,7 +440,7 @@ if st.session_state["authentication_status"]:
 
                 tt_c = (
                     f"<b>Zona Operativa: {r['NOMBRE']}</b><br>"
-                    f"Rango: {r_txt}<br>"
+                    f"Rango: {r_text}<br>"
                     f"Volumen: {r['VOLUMEN']}<br>"
                     f"Radio Ope: {r['RADIO']}m<br>"
                     f"-------------------------<br>"
@@ -448,7 +448,7 @@ if st.session_state["authentication_status"]:
                 )
 
                 folium.GeoJson(
-                    r['geometry'],
+                    geom_circulo,
                     style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55},
                     tooltip=tt_c
                 ).add_to(m)
