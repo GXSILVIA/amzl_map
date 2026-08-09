@@ -395,11 +395,30 @@ if st.session_state["authentication_status"]:
                         tooltip=f"perimetro >10km ({nodo_key})"
                     ).add_to(m)
 
-            # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales
-            for _, r in res['gdf_cobertura_wgs84'].iterrows():
-                tt = f"<b>Estado: {r.get('ESTADO_PERTENECE','S/N')}</b><br>ZONA: {r.get('ZONA','S/N')}<br>CP: {r['CP']}<br>Volumen: {r.get('VOLUMEN', 0)}"
-                folium.GeoJson(r['geometry'], style_function=lambda x: {'fillColor': '#3186cc', 'color': '#1d4f78', 'weight': 1.5, 'fillOpacity': 0.35}, tooltip=tt).add_to(m)
-
+                    # # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales Elegibles Reales
+                    # Filtramos la cartografía base cruzando directamente contra la lista de CPs de tu primer archivo
+                    cps_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
+                    gdf_mapa_azul = gdf_cobertura[gdf_cobertura['CP'].astype(str).isin(cps_primer_archivo)].copy()
+        
+                    # Convertimos las coordenadas espaciales a formato GPS estándar para que Folium lo lea sin distorsión
+                    gdf_mapa_azul_wgs84 = gdf_mapa_azul.to_crs("EPSG:4326")
+        
+                    # Inyectamos la capa de polígonos fijos de un solo golpe (Mil veces más rápido que un ciclo for)
+                    folium.GeoJson(
+                        gdf_mapa_azul_wgs84.to_json(),
+                        style_function=lambda x: {
+                            'fillColor': '#1e3a8a',  # 🔵 AZUL REY BRILLANTE oficial para tus CPs elegibles del primer archivo
+                            'color': '#ffffff',      # Borde blanco de división limpio entre CPs
+                            'weight': 1.5,
+                            'fillOpacity': 0.4       # Opacidad perfecta para ver las calles y los círculos de fondo
+                    },
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=['CP', 'ESTADO_PERTENECE'],
+                        aliases=['Código Postal:', 'Estado:'],
+                        localize=True
+                    )
+                ).add_to(m)
+        
             # 3. CAPA SUPERIOR: Círculos operativos actuales con Tooltip Combinado Inteligente
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
