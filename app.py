@@ -253,20 +253,23 @@ if st.session_state["authentication_status"]:
                             else:
                                 cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
                         # 🎯 SEPARACIÓN EN LISTAS DE CONTROL OPERATIVO
-                        # Filtramos los CPs para aislar los que se marcaron como LIBRE de los que tienen proximidad real
-                        cps_solo_libres = [cp for cp in (list(cps_perimetro_5km) + list(cps_perimetro_5_10km) + list(cps_perimetro_gt10km)) if "LIBRE" in cp]
+                                               # 🎯 CORRECCIÓN: Filtramos basándonos ÚNICAMENTE en los CPs reales del primer archivo
+                        cps_reales_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
                         
-                        # Removemos la etiqueta interna "LIBRE - " para que en la celda se vea el Nodo y CP limpio
+                        cps_solo_libres = [cp for cp in (list(cps_perimetro_5km) + list(cps_perimetro_5_10km) + list(cps_perimetro_gt10km)) if "LIBRE" in cp]
                         cps_solo_libres_clean = [cp.replace("LIBRE - ", "") for cp in cps_solo_libres]
+                        
+                        # Guardamos en 'libre' solo si el CP realmente existía en la base del primer archivo
+                        cps_libres_filtrados = [cp for cp in cps_solo_libres_clean if cp.split(": ")[-1] in cps_reales_primer_archivo]
                         
                         cps_p5_limpios = [cp for cp in cps_perimetro_5km if "LIBRE" not in cp]
                         cps_p10_limpios = [cp for cp in cps_perimetro_5_10km if "LIBRE" not in cp]
                         cps_p15_limpios = [cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp]
                         
-                        # Inyección limpia con tus 6 renglones oficiales y la nomenclatura exacta solicitada
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO TOTAL (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "LIBRE", "CP": ", ".join(sorted(cps_solo_libres_clean)) if cps_solo_libres_clean else "Ninguno"})
+                        # 🚀 INYECCIÓN CON MANDATORIOS DE MAPA (Mayúsculas Iniciales Exactas para revivir el color azul)
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "libre", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 5km", "CP": ", ".join(sorted(cps_p5_limpios)) if cps_p5_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 5-10km", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 10-15km", "CP": ", ".join(sorted(cps_p15_limpios)) if cps_p15_limpios else "Ninguno"})
