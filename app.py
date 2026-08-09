@@ -426,13 +426,13 @@ if st.session_state["authentication_status"]:
         
             # 3. CAPA SUPERIOR: Círculos operativos actuales con Tooltip Combinado Inteligente
             for _, r in res['gdf_circles_m_corr'].iterrows():
-            color_hex, r_text = obtener_color_rango(r['VOLUMEN'])
+                color_hex, r_text = obtener_color_rango(r['VOLUMEN'])
             
-            geom_circulo = r['geometry']
-            cps_bajo_circulo = []
+                geom_circulo = r['geometry']
+                cps_bajo_circulo = []
             
             # 🚀 SOLUCIÓN GLOBAL: Intersectamos contra la base cartográfica nacional viva sin importar el estado
-            for _, cp_row in gdf_cobertura.iterrows():
+                for _, cp_row in gdf_cobertura.iterrows():
                 if geom_circulo.intersects(cp_row['geometry']):
                     cps_bajo_circulo.append(str(cp_row['CP']))
 
