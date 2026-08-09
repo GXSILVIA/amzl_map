@@ -218,7 +218,7 @@ if st.session_state["authentication_status"]:
                             zona_lbl = cp_row.get('ZONA', 'S/N')
                             
                             # 📦 BLOQUE A: EVALUACIÓN DE COBERTURA GEOMÉTRICA CON ÁREA CONGELADA (28 espacios)
-                            if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
+                        if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
                                 try:
                                     area_interseccion = geom_cp.intersection(union_total_partners_m).area
                                     porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
@@ -228,15 +228,21 @@ if st.session_state["authentication_status"]:
                                     porcentaje_cobertura = min(100.0, porcentaje_cobertura)
                                 
                                 if porcentaje_cobertura >= 95:
-
                                     cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
                                 else:
                                     cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
-
-                            
+                                    porcentaje_faltante = 100 - porcentaje_cobertura
+                                    cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
+                                
+                                # Si el porcentaje es nulo o menor a 0.01 se marca como libre
+                                if porcentaje_cobertura < 0.01:
+                                    cp_str = f"LIBRE - {cp_str}"
+                        else:
+                            # Si ni siquiera intersecta la mancha de partners, entra directo como LIBRE
+                            cp_str = f"LIBRE - {cp_str}"
                             # 🎯 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
                             if centroides_nodos_globales:
-                                distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
+                                distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in                   centroides_nodos_globales])
                                 
                                 if distancia_al_centroide <= 5000:
                                     cps_perimetro_5km.add(f"{zona_lbl}: {cp_str}")
