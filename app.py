@@ -86,20 +86,29 @@ if st.session_state["authentication_status"]:
                 mapa_cols = {c: c.upper() for c in df_zonas_user.columns if c.upper() in ['NOMBRE', 'LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']}
                 df_zonas_user = df_zonas_user.rename(columns=mapa_cols)
 
-                estados_a_cargar = estados_disponibles if edo_sel == "Todos" else [edo_sel]
-                gdfs = []
-                for e in estados_a_cargar:
-                    p = os.path.join("mapas", f"{e}.geojson")
-                    if os.path.exists(p):
-                        g = gpd.read_file(p)
-                        g['ESTADO_PERTENECE'] = e
-                        gdfs.append(g)
+                @st.cache_data
+                def generar_mapa_base_cached(edo_sel, estados_disponibles, df_poly_user):
+                    estados_a_cargar = estados_disponibles if edo_sel == "Todos" else [edo_sel]
+                    gdfs = []
+                    for e in estados_a_cargar:
+                        p = os.path.join("mapas", f"{e}.geojson")
+                        if os.path.exists(p):
+                            g = gpd.read_file(p)
+                            g['ESTADO_PERTENECE'] = e
+                            gdfs.append(g)
+            
+                    if not gdfs:
+                        return gpd.GeoDataFrame()
+        
+                    gdf_base = pd.concat(gdfs, ignore_index=True)
+                    cp_col = next((c for c in ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
+                    gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
+    
+                    gdf_cob = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
+                    return gdf_cob
 
-                gdf_base = pd.concat(gdfs, ignore_index=True)
-                cp_col = next((c for c in ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns)
-                gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
-
-                gdf_cobertura = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
+                # 🚀 EJECUCIÓN INMEDIATA: Llamamos a la función con memoria persistente
+                gdf_cobertura = generar_mapa_base_cached(edo_sel, estados_disponibles, df_poly_user)
 
                 if gdf_cobertura.empty:
                     st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
