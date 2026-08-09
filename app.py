@@ -264,9 +264,9 @@ if st.session_state["authentication_status"]:
                         cps_p15_limpios = [cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp]
                         
                         # Inyección limpia con tus 6 renglones oficiales y la nomenclatura exacta solicitada
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "cubierto total", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "cubierto parcial", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "libre", "CP": ", ".join(sorted(cps_solo_libres_clean)) if cps_solo_libres_clean else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO TOTAL (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "LIBRE", "CP": ", ".join(sorted(cps_solo_libres_clean)) if cps_solo_libres_clean else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 5km", "CP": ", ".join(sorted(cps_p5_limpios)) if cps_p5_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 5-10km", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 10-15km", "CP": ", ".join(sorted(cps_p15_limpios)) if cps_p15_limpios else "Ninguno"})
