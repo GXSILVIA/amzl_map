@@ -397,8 +397,13 @@ if st.session_state["authentication_status"]:
 
                     # # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales Elegibles Reales
                     # Filtramos la cartografía base cruzando directamente contra la lista de CPs de tu primer archivo
-                    cps_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
-                    gdf_mapa_azul = gdf_cobertura[gdf_cobertura['CP'].astype(str).isin(cps_primer_archivo)].copy()
+                if edo_sel == "Todos":
+                   cps_primer_archivo = set(gdf_cobertura['CP'].astype(str).tolist())
+                else:
+                   cps_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
+            
+                   gdf_mapa_azul = gdf_cobertura[gdf_cobertura['CP'].astype(str).isin(cps_primer_archivo)].copy()
+
         
                     # Convertimos las coordenadas espaciales a formato GPS estándar para que Folium lo lea sin distorsión
                     gdf_mapa_azul_wgs84 = gdf_mapa_azul.to_crs("EPSG:4326")
