@@ -425,14 +425,16 @@ if st.session_state["authentication_status"]:
                 ).add_to(m)
         
             # 3. CAPA SUPERIOR: Círculos operativos actuales con Tooltip Combinado Inteligente
-            for _, r in res['gdf_circles_wgs84'].iterrows():
-                color_hex, r_txt = obtener_color_rango(r['VOLUMEN'])
-
-                geom_circulo = r['geometry']
-                cps_bajo_circulo = []
-                for _, cp_row in res['gdf_cobertura_wgs84'].iterrows():
-                    if geom_circulo.intersects(cp_row['geometry']):
-                        cps_bajo_circulo.append(cp_row['CP'])
+            for _, r in res['gdf_circles_m_corr'].iterrows():
+            color_hex, r_text = obtener_color_rango(r['VOLUMEN'])
+            
+            geom_circulo = r['geometry']
+            cps_bajo_circulo = []
+            
+            # 🚀 SOLUCIÓN GLOBAL: Intersectamos contra la base cartográfica nacional viva sin importar el estado
+            for _, cp_row in gdf_cobertura.iterrows():
+                if geom_circulo.intersects(cp_row['geometry']):
+                    cps_bajo_circulo.append(str(cp_row['CP']))
 
                 txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
 
