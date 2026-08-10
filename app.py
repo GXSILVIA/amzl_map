@@ -272,7 +272,7 @@ if st.session_state["authentication_status"]:
                         
                         # 🎯 FILTRO INTELIGENTE: Limpiamos la cobertura parcial quitando el porcentaje antes de validar
                         cps_parciales_limpios = []
-                        for cp_puro = parte_cp.split(" (")[0].strip()
+                        cp_puro = parte_cp.split(" (")[0].strip()
                             try:
                                 parte_cp = cp_item.split(": ")[-1]
                                 cp_puro = parte_cp.split(" (")[0].strip()
