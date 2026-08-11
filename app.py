@@ -286,7 +286,7 @@ if st.session_state["authentication_status"]:
                                     cp_puro = match.group(0)
                                     if cp_puro in cps_reales_primer_archivo:
                                         filtrados.append(cp_item)
-                        return filtrados
+                            return filtrados
 
             # Aplicamos el filtro inteligente a coberturas
                         cps_totales_limpios = filtrar_manteniendo_texto(cps_cubiertos_100)
