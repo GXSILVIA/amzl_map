@@ -519,7 +519,7 @@ if st.session_state["authentication_status"]:
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
 
-                st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_widt[...]
+                st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
 
 
 elif st.session_state["authentication_status"] is False:
