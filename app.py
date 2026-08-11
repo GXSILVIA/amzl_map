@@ -238,25 +238,30 @@ if st.session_state["authentication_status"]:
                                 except Exception:
                                     porcentaje_cobertura = 50.0
                                 
-                                porcentaje_cobertura = min(100.0, porcentaje_cobertura)
-                                
-                                if porcentaje_cobertura >= 95:
+                                            # Forzar límites lógicos estrictos entre 0 y 100
+                                porcentaje_cobertura = max(0.0, min(100.0, porcentaje_cobertura))
+            
+            # Redondeamos a entero para evaluar tus reglas estrictas (100% / 1-99% / 0%)
+                                porcentaje_entero = int(round(porcentaje_cobertura, 0))
+
+            # =========================================================================
+            # 🎯 CLASIFICACIÓN EXACTA SEGÚN REGLAS DE NEGOCIO (100% / 1-99% / 0%)
+            # =========================================================================
+                                if porcentaje_entero == 100:
+                # REGLA: Cubierto Total es única y exclusivamente al 100%
                                     cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
+                
+                                elif 1 <= porcentaje_entero <= 99:
+                # REGLA: Cubierto Parcial abarca estrictamente del 1% al 99%
+                                    cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({porcentaje_entero}%)")
+                                    porcentaje_faltante = 100 - porcentaje_entero
+                                    cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({porcentaje_faltante}%)")
+                
                                 else:
-                                # 🎯 CORREGIDO: Usamos comillas simples (') por dentro para evitar errores de sintaxis
-                                    cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
-                                    porcentaje_faltante = 100 - porcentaje_cobertura
-                                    cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
-
-                                
-                                # Si el porcentaje es nulo o menor a 0.01 se marca como libre
-                                if porcentaje_cobertura < 0.01:
+                # REGLA: Si es 0%, no toca la mancha, entra como LIBRE para clasificar su perímetro radial
                                     cp_str = f"LIBRE - {cp_str}"
-                            else:
-                                # Si ni siquiera intersecta la mancha de partners, entra directo como LIBRE
-                                cp_str = f"LIBRE - {cp_str}"
-
-                            # 📦 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
+                                    
+                         # 📦 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
                             if centroides_nodos_globales:
                                 distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
                                 
