@@ -515,7 +515,7 @@ if st.session_state["authentication_status"]:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²[...]")
+                    st.dataframe(res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}), use_container_width=True)
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
 
