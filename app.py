@@ -271,43 +271,43 @@ if st.session_state["authentication_status"]:
                         cps_reales_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
                         
                         # 🎯 FILTRO INTELIGENTE: Limpiamos la cobertura parcial quitando el porcentaje antes de validar
-                        cps_parciales_limpios = []
-                        for cp_item in cps_cubiertos_parcial:
-                            try:
-                                parte_cp = cp_item.split(": ")[-1]
-                                cp_puro = parte_cp.split(" (")[0].strip()
-                                if cp_puro in cps_reales_primer_archivo:
-                                    cps_parciales_limpios.append(cp_item)
-                            except Exception:
-                                pass
+                        cps_reales_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
 
-                        # Filtro para Cobertura Total
-                        cps_totales_limpios = []
-                        for cp_item in cps_cubiertos_100:
-                            try:
-                                cp_puro = cp_item.split(": ")[-1].strip()
-                                if cp_puro in cps_reales_primer_archivo:
-                                    cps_totales_limpios.append(cp_item)
-                            except Exception:
-                                pass
-                        
-                        # Filtro para Zonas Libres desatendidas
+                        # =========================================================================
+                        # 🎯 FILTRADO CON CONSERVACIÓN DE PORCENTAJES Y ESTATUS EN MAYÚSCULAS
+                        # =========================================================================
+                        import re
+
+                        def filtrar_manteniendo_texto(lista_cps):
+                            filtrados = []
+                            for cp_item in lista_cps:
+                                match = re.search(r'\b\d{5}\b', str(cp_item))
+                                if match:
+                                    cp_puro = match.group(0)
+                                    if cp_puro in cps_reales_primer_archivo:
+                                        filtrados.append(cp_item)
+                        return filtrados
+
+            # Aplicamos el filtro inteligente a coberturas
+                        cps_totales_limpios = filtrar_manteniendo_texto(cps_cubiertos_100)
+                        cps_parciales_limpios = filtrar_manteniendo_texto(cps_cubiertos_parcial)
+
+            # Filtro para Zonas Libres
                         cps_solo_libres = [cp for cp in (list(cps_perimetro_5km) + list(cps_perimetro_5_10km) + list(cps_perimetro_gt10km)) if "LIBRE" in cp]
-                        cps_solo_libres_clean = [cp.replace("LIBRE - ", "") for cp in cps_solo_libres]
-                        cps_libres_filtrados = [cp for cp in cps_solo_libres_clean if cp.split(": ")[-1] in cps_reales_primer_archivo]
-                        
-                        # Filtro para los Perímetros de distancia radial
-                        cps_p5_limpios = [cp for cp in cps_perimetro_5km if "LIBRE" not in cp and cp.split(": ")[-1] in cps_reales_primer_archivo]
-                        cps_p10_limpios = [cp for cp in cps_perimetro_5_10km if "LIBRE" not in cp and cp.split(": ")[-1] in cps_reales_primer_archivo]
-                        cps_p15_limpios = [cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp and cp.split(": ")[-1] in cps_reales_primer_archivo]
-                        
-                        # 🚀 INYECCIÓN AL REPORTE CON FORMATO PREMIUM
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(cps_totales_limpios)) if cps_totales_limpios else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(cps_parciales_limpios)) if cps_parciales_limpios else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "libre", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 5km", "CP": ", ".join(sorted(cps_p5_limpios)) if cps_p5_limpios else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 5-10km", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 10-15km", "CP": ", ".join(sorted(cps_p15_limpios)) if cps_p15_limpios else "Ninguno"})
+                        cps_libres_filtrados = [cp.replace("LIBRE - ", "") for cp in cps_solo_libres if re.search(r'\b\d{5}\b', str(cp))]
+
+            # Filtro para Perímetros radiales
+                        cps_p5_limpios = filtrar_manteniendo_texto([cp for cp in cps_perimetro_5km if "LIBRE" not in cp])
+                        cps_p10_limpios = filtrar_manteniendo_texto([cp for cp in cps_perimetro_5_10km if "LIBRE" not in cp])
+                        cps_p15_limpios = filtrar_manteniendo_texto([cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp])
+
+            # 🚀 INYECCIÓN AL REPORTE CON FORMATO PREMIUM UNIFICADO
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO TOTAL", "CP": ", ".join(sorted(cps_totales_limpios)) if cps_totales_limpios else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL", "CP": ", ".join(sorted(cps_parciales_limpios)) if cps_parciales_limpios else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "LIBRE", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 5KM", "CP": ", ".join(sorted(cps_p5_limpios)) if cps_p5_limpios else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 5-10KM", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 10-15KM", "CP": ", ".join(sorted(cps_p15_limpios)) if cps_p15_limpios else "Ninguno"})
 
                         for _, zona_row in gdf_circles_m_corr.iterrows():
                             # Verificamos si la zona interactúa con la cobertura utilizando una variable que sí existe en la memoria
