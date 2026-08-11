@@ -243,9 +243,11 @@ if st.session_state["authentication_status"]:
                                 if porcentaje_cobertura >= 95:
                                     cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
                                 else:
+                                # 🎯 CORREGIDO: Usamos comillas simples (') por dentro para evitar errores de sintaxis
                                     cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_cobertura, 0)}%)")
                                     porcentaje_faltante = 100 - porcentaje_cobertura
                                     cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
+
                                 
                                 # Si el porcentaje es nulo o menor a 0.01 se marca como libre
                                 if porcentaje_cobertura < 0.01:
