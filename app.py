@@ -228,13 +228,8 @@ if st.session_state["authentication_status"]:
                             
                             if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
                                 try:
-                                    proj_albers = "+proj=aea +lat_1=14.5 +lat_2=32.5 +lat_0=24 +lon_0=-102 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
-                                    geom_cp_albers = gpd.GeoSeries([geom_cp], crs="EPSG:4326").to_crs(proj_albers).geometry.iloc[0]
-                                    partners_albers = gpd.GeoSeries([union_total_partners_m], crs="EPSG:6362").to_crs(proj_albers).geometry.iloc[0]
-                                    area_interseccion = geom_cp_albers.intersection(partners_albers).area
-                                    area_real_cp_albers = geom_cp_albers.area
-                                    porcentaje_cobertura = (area_interseccion / area_real_cp_albers) * 100
-
+                                    area_interseccion = geom_cp.intersection(union_total_partners_m).area
+                                    porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
                                 except Exception:
                                     porcentaje_cobertura = 50.0
                                 
