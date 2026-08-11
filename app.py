@@ -260,17 +260,17 @@ if st.session_state["authentication_status"]:
                                         cp_str = f"LIBRE - {cp_str}"
                                         
                          # 📦 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
-                            if centroides_nodos_globales:
-                                distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
+                                     if centroides_nodos_globales:
+                                        distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
                                 
-                                if distancia_al_centroide <= 5000:
-                                    cps_perimetro_5km.add(f"{zona_lbl}: {cp_str}")
-                                elif distancia_al_centroide <= 10000:
-                                    cps_perimetro_5_10km.add(f"{zona_lbl}: {cp_str}")
-                                else:
-                                    cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
-                            else:
-                                cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
+                                        if distancia_al_centroide <= 5000:
+                                            cps_perimetro_5km.add(f"{zona_lbl}: {cp_str}")
+                                        elif distancia_al_centroide <= 10000:
+                                            cps_perimetro_5_10km.add(f"{zona_lbl}: {cp_str}")
+                                        else:
+                                            cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
+                                     else:
+                                         cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
                         # 🎯 SEPARACIÓN EN LISTAS DE CONTROL OPERATIVO
                         # 🎯 CORRECCIÓN: Filtramos basándonos ÚNICAMENTE en los CPs reales del primer archivo
                         cps_reales_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
