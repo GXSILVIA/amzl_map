@@ -65,7 +65,7 @@ if st.session_state["authentication_status"]:
         estados_disponibles = [f.replace('.geojson', '') for f in archs_geo]
         edo_sel = st.selectbox("📍 Seleccionar Estado:", ["Todos"] + estados_disponibles)
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
-        f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
+        f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"]) 
 
         # Parámetro deslizable para controlar la densidad del muestreo estadístico
         n_simulaciones = st.slider("🎯 Puntos de Muestreo Montecarlo:", 2000, 20000, 10000, 2000)
@@ -99,7 +99,7 @@ if st.session_state["authentication_status"]:
             
                     if not gdfs:
                         return gpd.GeoDataFrame()
-        
+            
                     gdf_base = pd.concat(gdfs, ignore_index=True)
                     cp_col = next((c for c in ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
                     gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
@@ -237,30 +237,28 @@ if st.session_state["authentication_status"]:
 
                                 except Exception:
                                     porcentaje_cobertura = 50.0
-                                
-                                            # Forzar límites lógicos estrictos entre 0 y 100
-                                porcentaje_cobertura = max(0.0, min(100.0, porcentaje_cobertura))
-            
-            # Redondeamos a entero para evaluar tus reglas estrictas (100% / 1-99% / 0%)
-                                porcentaje_entero = int(round(porcentaje_cobertura, 0))
-
-            # =========================================================================
-            # 🎯 CLASIFICACIÓN EXACTA SEGÚN REGLAS DE NEGOCIO (100% / 1-99% / 0%)
-            # =========================================================================
-                                if porcentaje_entero == 100:
-                # REGLA: Cubierto Total es única y exclusivamente al 100%
-                                    cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
-                
-                                elif 1 <= porcentaje_entero <= 99:
-                # REGLA: Cubierto Parcial abarca estrictamente del 1% al 99%
-                                    cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({porcentaje_entero}%)")
-                                    porcentaje_faltante = 100 - porcentaje_entero
-                                    cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({porcentaje_faltante}%)")
-                
-                                else:
-                # REGLA: Si es 0%, no toca la mancha, entra como LIBRE para clasificar su perímetro radial
-                                    cp_str = f"LIBRE - {cp_str}"
                                     
+                                    # Forzar límites lógicos estrictos entre 0 y 100
+                                    porcentaje_cobertura = max(0.0, min(100.0, porcentaje_cobertura))
+
+                                    # Redondeamos a entero para evaluar tus reglas estrictas (100% / 1-99% / 0%)
+                                    porcentaje_entero = int(round(porcentaje_cobertura, 0))
+
+                                    # =========================================================================
+                                    # 🎯 CLASIFICACIÓN EXACTA SEGÚN REGLAS DE NEGOCIO (100% / 1-99% / 0%)
+                                    # =========================================================================
+                                    if porcentaje_entero == 100:
+                                        # REGLA: Cubierto Total es única y exclusivamente al 100%
+                                        cps_cubiertos_100.add(f"{zona_lbl}: {cp_str}")
+                                    elif 1 <= porcentaje_entero <= 99:
+                                        # REGLA: Cubierto Parcial abarca estrictamente del 1% al 99%
+                                        cps_cubiertos_parcial.add(f"{zona_lbl}: {cp_str} ({porcentaje_entero}%)")
+                                        porcentaje_faltante = 100 - porcentaje_entero
+                                        cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({porcentaje_faltante}%)")
+                                    else:
+                                        # REGLA: Si es 0%, no toca la mancha, entra como LIBRE para clasificar su perímetro radial
+                                        cp_str = f"LIBRE - {cp_str}"
+                                        
                          # 📦 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
                             if centroides_nodos_globales:
                                 distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
@@ -310,7 +308,7 @@ if st.session_state["authentication_status"]:
 
             # 🚀 INYECCIÓN AL REPORTE CON FORMATO PREMIUM UNIFICADO
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO TOTAL", "CP": ", ".join(sorted(cps_totales_limpios)) if cps_totales_limpios else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL", "CP": ", ".join(sorted(cps_parciales_limpios)) if cps_parciales_limpios else "Ninguno"})
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL", "CP": ", ".join(sorted(cps_parciales_limpios)) if cps_parciales_limpios else "Ninguno"}[...])
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "LIBRE", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 5KM", "CP": ", ".join(sorted(cps_p5_limpios)) if cps_p5_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 5-10KM", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
@@ -372,7 +370,7 @@ if st.session_state["authentication_status"]:
 
                 df_desglose = pd.DataFrame(desglose_estados)
                 if df_desglose.empty:
-                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
+                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupació[...]")
 
                 estados_validos = df_desglose['Estado'].unique().tolist()
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
@@ -517,11 +515,11 @@ if st.session_state["authentication_status"]:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
-                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalles')
+                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²[...]")
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
 
-                st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
+                st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_widt[...]
 
 
 elif st.session_state["authentication_status"] is False:
