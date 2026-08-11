@@ -307,8 +307,9 @@ if st.session_state["authentication_status"]:
                         cps_p15_limpios = filtrar_manteniendo_texto([cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp])
 
             # 🚀 INYECCIÓN AL REPORTE CON FORMATO PREMIUM UNIFICADO
+                                    # 🚀 INYECCIÓN AL REPORTE CON FORMATO PREMIUM UNIFICADO (Líneas 310-315)
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO TOTAL", "CP": ", ".join(sorted(cps_totales_limpios)) if cps_totales_limpios else "Ninguno"})
-                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL", "CP": ", ".join(sorted(cps_parciales_limpios)) if cps_parciales_limpios else "Ninguno"}[...])
+                        reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "CUBIERTO PARCIAL", "CP": ", ".join(sorted(cps_parciales_limpios)) if cps_parciales_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "LIBRE", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 5KM", "CP": ", ".join(sorted(cps_p5_limpios)) if cps_p5_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "PERIMETRO 5-10KM", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
