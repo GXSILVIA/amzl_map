@@ -504,20 +504,37 @@ if st.session_state["authentication_status"]:
                         icon=folium.Icon(color='purple', icon='crosshairs', prefix='fa'),
                         tooltip=f"Centroide Nodo: {str(nodo_key).upper()}"
                     ).add_to(m)
+                    c_lat = anillos['centro_lat']
+                    c_lon = anillos['centro_lon']
+
                     folium.GeoJson(
                         anillos['r15'], 
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"15 km ({nodo_key})"
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5'},
+                        interactive=False
                     ).add_to(m)
+                    folium.Marker(
+                        location=[c_lat + 0.135, c_lon],
+                        icon=folium.DivIcon(html='<div style="font-size:11px;font-weight:bold;color:#e74c3c;white-space:nowrap;pointer-events:none;">15 km</div>', icon_size=(50, 15), icon_anchor=(25, 7))
+                    ).add_to(m)
+
                     folium.GeoJson(
                         anillos['r10'], 
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"10 km ({nodo_key})"
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5'},
+                        interactive=False
                     ).add_to(m)
+                    folium.Marker(
+                        location=[c_lat + 0.090, c_lon],
+                        icon=folium.DivIcon(html='<div style="font-size:11px;font-weight:bold;color:#d4ac0d;white-space:nowrap;pointer-events:none;">10 km</div>', icon_size=(50, 15), icon_anchor=(25, 7))
+                    ).add_to(m)
+
                     folium.GeoJson(
                         anillos['r5'], 
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"5 km ({nodo_key})"
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5'},
+                        interactive=False
+                    ).add_to(m)
+                    folium.Marker(
+                        location=[c_lat + 0.045, c_lon],
+                        icon=folium.DivIcon(html='<div style="font-size:11px;font-weight:bold;color:#2ecc71;white-space:nowrap;pointer-events:none;">5 km</div>', icon_size=(50, 15), icon_anchor=(25, 7))
                     ).add_to(m)
 
             m_html = m._repr_html_()
