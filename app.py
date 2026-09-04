@@ -19,10 +19,17 @@ def normalizar_cp(v):
         return str(v).strip().zfill(5)
 
 
-def obtener_color_rango(v):
+# ═══════════════════════════════════════════════════════════════════════
+# 🎨 FUNCIONES DE COLOR: Rangos separados para CÍRCULOS y POLÍGONOS CP
+# ═══════════════════════════════════════════════════════════════════════
+
+def obtener_color_rango_circulo(v):
+    """Color para CÍRCULOS/ZONAS operativas (volúmenes bajos por zona)."""
     try:
         vol = float(v)
-        if vol <= 15:
+        if vol == 0:
+            return "gray", "⚪ R0"
+        elif vol <= 15:
             return "yellow", "🟡 R1-15"
         elif vol <= 20:
             return "orange", "🟠 R16-20"
@@ -34,6 +41,27 @@ def obtener_color_rango(v):
             return "brown", "🟤 R41+"
     except:
         return "gray", "⚪ Desconocido"
+
+
+def obtener_color_rango_cp(v):
+    """Color para POLÍGONOS de Códigos Postales (volúmenes acumulados por CP)."""
+    try:
+        vol = float(v)
+        if vol == 0:
+            return "#9e9e9e", "⚪ R0"          # Gris
+        elif vol <= 100:
+            return "#f1c40f", "🟡 R1-100"      # Amarillo
+        elif vol <= 200:
+            return "#e67e22", "🟠 R101-200"     # Naranja
+        elif vol <= 300:
+            return "#e74c3c", "🔴 R201-300"     # Rojo
+        elif vol <= 400:
+            return "#8e44ad", "🟣 R301-400"     # Púrpura
+        else:
+            return "#6d4c41", "🟤 R401+"        # Café
+    except:
+        return "#9e9e9e", "⚪ Desconocido"
+
 
 with open('config.yaml') as f:
     config = yaml.load(f, SafeLoader)
@@ -67,10 +95,8 @@ if st.session_state["authentication_status"]:
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
 
-        # Parámetro deslizable para controlar la densidad del muestreo estadístico
         n_simulaciones = st.slider("🎯 Puntos de Muestreo Montecarlo:", 2000, 20000, 10000, 2000)
 
-        # 🔘 NUEVO: Control para alternar la visibilidad de las capas de factibilidad en el mapa
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
@@ -107,7 +133,6 @@ if st.session_state["authentication_status"]:
                     gdf_cob = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
                     return gdf_cob
 
-                # 🚀 EJECUCIÓN INMEDIATA: Llamamos a la función con memoria persistente
                 gdf_cobertura = generar_mapa_base_cached(edo_sel, estados_disponibles, df_poly_user)
 
                 if gdf_cobertura.empty:
@@ -130,13 +155,10 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
                 geom_cir_total = unary_union(gdf_circles_m['geometry'].buffer(0))
 
-             # 🎯 EXTRACCIÓN DEL MES: Tomamos el nombre base del archivo subido (ej: "JUNIO.xlsx" -> "JUNIO")
-                import os
                 nombre_archivo_zonas = f_zonas.name if hasattr(f_zonas, 'name') else "JUNIO.xlsx"
                 mes_extraido = os.path.splitext(nombre_archivo_zonas)[0].upper()
                 gdf_circles_m['Territorio MES'] = mes_extraido
                 
-                # 🎯 IDENTIFICACIÓN DEL ESTADO: Cruzamos espacialmente cada círculo contra los estados cartográficos
                 if 'geometry' in gdf_circles_m.columns and not gdf_cobertura.empty:
                     circles_gps = gdf_circles_m.to_crs(gdf_cobertura.crs)
                     joined = gpd.sjoin(circles_gps, gdf_cobertura[['geometry', 'ESTADO_PERTENECE']], how='left', predicate='intersects')
@@ -154,22 +176,16 @@ if st.session_state["authentication_status"]:
                 reporte_cp_por_estado = []
                 anillos_por_estado = {}
 
-                # =========================================================================
-                # 📊 LÓGICA LOGÍSTICA METROPOLITANA: CENTROIDE ÚNICO POR NODO (CRUZA ESTADOS)
-                # =========================================================================
-                # 🎯 PASO 1: Identificamos y precalculamos los centroides basados estrictamente en cada NODO
                 nodos_unicos_maestro = gdf_cobertura['ZONA'].dropna().unique().tolist()
                 centroides_nodos_globales = []
                 
                 for nodo in nodos_unicos_maestro:
-                    # Filtramos la cobertura completa de este nodo a nivel nacional (cruza fronteras)
                     cob_nodo_completa = gdf_cobertura[gdf_cobertura['ZONA'] == nodo]
                     if cob_nodo_completa.empty or gdf_circles_m_corr.empty:
                         continue
                         
                     g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs("EPSG:6362").buffer(0))
                     
-                    # ASOCIACIÓN METROPOLITANA: Encontramos TODOS los partners que operan en este nodo (Coahuila + Durango + etc)
                     partners_del_nodo = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(g_cob_nodo_global)]
                     
                     if partners_del_nodo.empty:
@@ -177,22 +193,17 @@ if st.session_state["authentication_status"]:
                         distancias_a_partners = gdf_circles_m_corr['geometry'].distance(centroide_temp_cob)
                         partners_del_nodo = gdf_circles_m_corr.loc[[distancias_a_partners.idxmin()]]
                     
-                    # CALCULO DE MASA: Un solo centroide para la acumulación total de partners del nodo
                     masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
                     centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
                     
-                    # Guardamos el centroide en la lista global para la evaluación de distancias radiales
                     centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
                     
-                    # Proyectamos a GPS para Folium
                     pt_gps = gpd.GeoSeries([centroide_acumulacion_nodo_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0]
                     
-                    # Generamos los radios de perímetro estables concéntricos
                     b5 = centroide_acumulacion_nodo_m.buffer(5000)
                     b10 = centroide_acumulacion_nodo_m.buffer(10000)
                     b15 = centroide_acumulacion_nodo_m.buffer(15000)
                     
-                    # Almacenamos en el diccionario usando como clave únicamente el nombre del Nodo
                     anillos_por_estado[nodo] = {
                         'centro_lat': pt_gps.y,
                         'centro_lon': pt_gps.x,
@@ -201,7 +212,6 @@ if st.session_state["authentication_status"]:
                         'r15': gpd.GeoSeries([b15], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
                     }
 
-                # 🎯 PASO 2: Clasificamos y segmentamos los reportes de salida manteniendo la división por Estado
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
                 for est in estados_con_cobertura_real:
@@ -216,7 +226,6 @@ if st.session_state["authentication_status"]:
                         cps_perimetro_gt10km = set()
                         
                         for _, cp_row in sub_cob.iterrows():
-                            # 🎯 CONGELAR TAMAÑO REAL: Alineado perfectamente con 24 espacios a la izquierda
                             area_real_cp_fija = cp_row['geometry'].area
                             if area_real_cp_fija <= 0:
                                 continue
@@ -242,14 +251,11 @@ if st.session_state["authentication_status"]:
                                     porcentaje_faltante = 100 - porcentaje_cobertura
                                     cps_parciales_faltantes_porc.add(f"{zona_lbl}: {cp_str} ({round(porcentaje_faltante, 0)}%)")
                                 
-                                # Si el porcentaje es nulo o menor a 0.01 se marca como libre
                                 if porcentaje_cobertura < 0.01:
                                     cp_str = f"LIBRE - {cp_str}"
                             else:
-                                # Si ni siquiera intersecta la mancha de partners, entra directo como LIBRE
                                 cp_str = f"LIBRE - {cp_str}"
 
-                            # 📦 BLOQUE B: CLASIFICACIÓN RADIAL ABSOLUTA RESPECTO AL CENTROIDE GLOBAL DEL NODO
                             if centroides_nodos_globales:
                                 distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
                                 
@@ -261,21 +267,18 @@ if st.session_state["authentication_status"]:
                                     cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
                             else:
                                 cps_perimetro_gt10km.add(f"{zona_lbl}: {cp_str}")
-                        # 🎯 SEPARACIÓN EN LISTAS DE CONTROL OPERATIVO
-                                               # 🎯 CORRECCIÓN: Filtramos basándonos ÚNICAMENTE en los CPs reales del primer archivo
+
                         cps_reales_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
                         
                         cps_solo_libres = [cp for cp in (list(cps_perimetro_5km) + list(cps_perimetro_5_10km) + list(cps_perimetro_gt10km)) if "LIBRE" in cp]
                         cps_solo_libres_clean = [cp.replace("LIBRE - ", "") for cp in cps_solo_libres]
                         
-                        # Guardamos en 'libre' solo si el CP realmente existía en la base del primer archivo
                         cps_libres_filtrados = [cp for cp in cps_solo_libres_clean if cp.split(": ")[-1] in cps_reales_primer_archivo]
                         
                         cps_p5_limpios = [cp for cp in cps_perimetro_5km if "LIBRE" not in cp]
                         cps_p10_limpios = [cp for cp in cps_perimetro_5_10km if "LIBRE" not in cp]
                         cps_p15_limpios = [cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp]
                         
-                        # 🚀 INYECCIÓN CON MANDATORIOS DE MAPA (Mayúsculas Iniciales Exactas para revivir el color azul)
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "libre", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
@@ -284,7 +287,6 @@ if st.session_state["authentication_status"]:
                         reporte_cp_por_estado.append({"Estado": est.upper(), "Estatus": "perimetro 10-15km", "CP": ", ".join(sorted(cps_p15_limpios)) if cps_p15_limpios else "Ninguno"})
 
                         for _, zona_row in gdf_circles_m_corr.iterrows():
-                            # Verificamos si la zona interactúa con la cobertura utilizando una variable que sí existe en la memoria
                             if union_total_partners_m is not None and zona_row['geometry'].intersects(union_total_partners_m):
                                 cps_actuales_zona = []
                                 for _, cp_row in sub_cob.iterrows():
@@ -303,7 +305,6 @@ if st.session_state["authentication_status"]:
                 df_cp_por_zona = pd.DataFrame(reporte_cp_por_zona)
                 if not df_cp_por_estado.empty:
                     df_cp_por_estado = df_cp_por_estado[["Estado", "Estatus", "CP"]]
-                # =========================================================================
 
                 desglose_estados = []
                 for est in estados_con_cobertura_real:
@@ -311,7 +312,6 @@ if st.session_state["authentication_status"]:
                     if not sub_cob.empty:
                         g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
 
-                                               # 🎯 CÁLCULO GEOMÉTRICO DIRECTO Y EXACTO (Reemplaza a Montecarlo)
                         cob_km2 = g_cob_est.area / 1000000.0
                         
                         if union_total_partners_m is not None:
@@ -328,7 +328,6 @@ if st.session_state["authentication_status"]:
                         else:
                             eficiencia = 0.0
 
-                # 🎯 CORRECCIÓN: Nombres de columnas idénticos a los de tu interfaz web
                         desglose_estados.append({
                             "Estado": est.upper(),
                             "Territorio Cobertura Total (km²)": round(cob_km2, 2),
@@ -344,18 +343,23 @@ if st.session_state["authentication_status"]:
                 estados_validos = df_desglose['Estado'].unique().tolist()
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🔧 FIX: Guardar gdf_cobertura en session_state para que el
+                #    bloque de renderizado del mapa lo tenga disponible en
+                #    reruns posteriores (al descargar mapa/reporte).
+                # ═══════════════════════════════════════════════════════════════
+                st.session_state['gdf_cobertura_global'] = gdf_cobertura
+
                 st.session_state.resultados = {
                     'estado_nombre': edo_sel,
                     'df_desglose': df_desglose,
                     'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
-                    # 🎯 SOLUCIÓN: Guardamos la tabla completa con sus columnas de LATITUD y LONGITUD originales
                     'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326").assign(LATITUD=gdf_circles['LATITUD'], LONGITUD=gdf_circles['LONGITUD']),
                     'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy().rename(columns={
                         'NOMBRE': 'Nombre de la Zona',
                         'RADIO': 'Radio (m)',
                         'AREA_KM2': 'Territorio'
                     }),
-
                     'df_cp_por_estado': df_cp_por_estado,
                     'df_cp_por_zona': df_cp_por_zona,
                     'anillos_por_estado': anillos_por_estado
@@ -365,6 +369,15 @@ if st.session_state["authentication_status"]:
     with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
+
+            # ═══════════════════════════════════════════════════════════════
+            # 🔧 FIX: Recuperar gdf_cobertura desde session_state
+            #    para que esté disponible en reruns (descarga, etc.)
+            # ═══════════════════════════════════════════════════════════════
+            gdf_cobertura = st.session_state.get('gdf_cobertura_global', None)
+            if gdf_cobertura is None:
+                st.warning("⚠️ Datos de cobertura no disponibles. Por favor, procesa la información nuevamente.")
+                st.stop()
             
             if not res['gdf_circles_wgs84'].empty:
                 c_lat = res['gdf_circles_wgs84']['LATITUD'].mean()
@@ -383,64 +396,65 @@ if st.session_state["authentication_status"]:
                         tooltip=f"Centroide Nodo: {str(nodo_key).upper()}"
                     ).add_to(m)
                     
-                    # Anillo 1: <5 km - Verde Punteado
                     folium.GeoJson(
                         anillos['r5'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
                         tooltip=f"perimetro <5 km ({nodo_key})"
                     ).add_to(m)
                     
-                    # Anillo 2: 5-10 km - Amarillo Punteado
                     folium.GeoJson(
                         anillos['r10'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
                         tooltip=f"perimetro 5-10km ({nodo_key})"
                     ).add_to(m)
                     
-                    # Anillo 3: >10 km - Rojo Punteado
                     folium.GeoJson(
                         anillos['r15'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
                         tooltip=f"perimetro >10km ({nodo_key})"
                     ).add_to(m)
 
-                    # # 2. CAPA INTERMEDIA: Polígonos de los Códigos Postales Elegibles Reales
-                    # Filtramos la cartografía base cruzando directamente contra la lista de CPs de tu primer archivo
-                if edo_sel == "Todos":
-                    cps_primer_archivo = set(gdf_cobertura['CP'].astype(str).tolist())
-                else:
-                    cps_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
-            
-                gdf_mapa_azul = gdf_cobertura[gdf_cobertura['CP'].astype(str).isin(cps_primer_archivo)].copy()
+            # ═══════════════════════════════════════════════════════════════
+            # 🎨 CAPA CP COLOREADA POR VOLUMEN (reemplaza el azul fijo)
+            # ═══════════════════════════════════════════════════════════════
+            gdf_mapa_cp = gdf_cobertura.copy()
+            gdf_mapa_cp_wgs84 = gdf_mapa_cp.to_crs("EPSG:4326") if gdf_mapa_cp.crs != "EPSG:4326" else gdf_mapa_cp
 
+            # Asegurar que la columna VOLUMEN existe y es numérica
+            if 'VOLUMEN' not in gdf_mapa_cp_wgs84.columns:
+                gdf_mapa_cp_wgs84['VOLUMEN'] = 0
+            gdf_mapa_cp_wgs84['VOLUMEN'] = pd.to_numeric(gdf_mapa_cp_wgs84['VOLUMEN'], errors='coerce').fillna(0)
+
+            # Precalcular el color y el rango para cada CP
+            gdf_mapa_cp_wgs84['_color_hex'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[0])
+            gdf_mapa_cp_wgs84['_rango_txt'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[1])
+
+            # Inyectar como GeoJson con style_function que lee el color de las properties
+            folium.GeoJson(
+                gdf_mapa_cp_wgs84.to_json(),
+                style_function=lambda feature: {
+                    'fillColor': feature['properties'].get('_color_hex', '#9e9e9e'),
+                    'color': '#ffffff',
+                    'weight': 1.5,
+                    'fillOpacity': 0.5
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_rango_txt'],
+                    aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Rango:'],
+                    localize=True
+                )
+            ).add_to(m)
         
-                    # Convertimos las coordenadas espaciales a formato GPS estándar para que Folium lo lea sin distorsión
-                gdf_mapa_azul_wgs84 = gdf_mapa_azul.to_crs("EPSG:4326")
-        
-                    # Inyectamos la capa de polígonos fijos de un solo golpe (Mil veces más rápido que un ciclo for)
-                folium.GeoJson(
-                    gdf_mapa_azul_wgs84.to_json(),
-                    style_function=lambda x: {
-                        'fillColor': '#1e3a8a',  # 🔵 AZUL REY BRILLANTE oficial para tus CPs elegibles del primer archivo
-                        'color': '#ffffff',      # Borde blanco de división limpio entre CPs
-                        'weight': 1.5,
-                        'fillOpacity': 0.4       # Opacidad perfecta para ver las calles y los círculos de fondo
-                    },
-                    tooltip=folium.GeoJsonTooltip(
-                        fields=['CP', 'ESTADO_PERTENECE'],
-                        aliases=['Código Postal:', 'Estado:'],
-                        localize=True
-                    )
-                ).add_to(m)
-        
-            # 3. CAPA SUPERIOR: Círculos operativos actuales con Tooltip Combinado Inteligente
+            # ═══════════════════════════════════════════════════════════════
+            # 🔵 CAPA CÍRCULOS: Coloreados con rangos de zona
+            # ═══════════════════════════════════════════════════════════════
             for _, r in res['gdf_circles_wgs84'].iterrows():
-                color_hex, r_text = obtener_color_rango(r['VOLUMEN'])
+                color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
             
                 geom_circulo = r['geometry']
                 cps_bajo_circulo = []
             
-            # 🚀 SOLUCIÓN GLOBAL: Intersectamos contra la base cartográfica nacional viva sin importar el estado
+                # 🔧 FIX: Usar gdf_cobertura desde session_state (ya recuperado arriba)
                 for _, cp_row in gdf_cobertura.iterrows():
                     if geom_circulo.intersects(cp_row['geometry']):
                         cps_bajo_circulo.append(str(cp_row['CP']))
