@@ -430,8 +430,8 @@ if st.session_state["authentication_status"]:
             m = folium.Map(
                 location=[c_lat, c_lon],
                 zoom_start=6 if res['estado_nombre'] == "Todos" else 10,
-                tiles="https://tile.opentopomap.org/{z}/{x}/{y}.png",
-                attr='&copy; <a href="https://opentopomap.org">OpenTopoMap</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+                tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
+                attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             )
             
             if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
