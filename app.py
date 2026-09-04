@@ -331,7 +331,9 @@ if st.session_state["authentication_status"]:
                                                 pct = 0.0
                                         else:
                                             pct = 0.0
-                                        cps_actuales_zona_con_pct.append(f"{cp_row['CP']} ({round(pct)}%)")
+                                        # Solo incluir CPs con cobertura real (>= 1%)
+                                        if round(pct) >= 1:
+                                            cps_actuales_zona_con_pct.append(f"{cp_row['CP']} ({round(pct)}%)")
                                 
                                 if cps_actuales_zona_con_pct:
                                     reporte_cp_por_zona.append({
@@ -428,8 +430,8 @@ if st.session_state["authentication_status"]:
             m = folium.Map(
                 location=[c_lat, c_lon],
                 zoom_start=6 if res['estado_nombre'] == "Todos" else 10,
-                tiles="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
-                attr='&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+                tiles="https://tile.opentopomap.org/{z}/{x}/{y}.png",
+                attr='&copy; <a href="https://opentopomap.org">OpenTopoMap</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
             )
             
             if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
