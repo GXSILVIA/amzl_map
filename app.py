@@ -98,38 +98,6 @@ if st.session_state["authentication_status"]:
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🎛️ FILTROS POR RANGO en el panel (solo si hay datos procesados)
-        # ═══════════════════════════════════════════════════════════════
-        if st.session_state.procesado and st.session_state.resultados is not None:
-            st.markdown("---")
-            st.markdown("**🎨 Zonas (Círculos)**")
-            rangos_z = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
-            filtro_zonas = []
-            for fila in range(0, len(rangos_z), 3):
-                cols_z = st.columns(3)
-                for j, col in enumerate(cols_z):
-                    idx = fila + j
-                    if idx < len(rangos_z):
-                        with col:
-                            if st.checkbox(rangos_z[idx], value=True, key=f"fz_{idx}"):
-                                filtro_zonas.append(rangos_z[idx])
-            st.session_state['filtro_zonas_activo'] = filtro_zonas
-
-            st.markdown("**🗺️ CPs (Polígonos)**")
-            rangos_c = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
-            filtro_cps = []
-            for fila in range(0, len(rangos_c), 3):
-                cols_c = st.columns(3)
-                for j, col in enumerate(cols_c):
-                    idx = fila + j
-                    if idx < len(rangos_c):
-                        with col:
-                            if st.checkbox(rangos_c[idx], value=True, key=f"fc_{idx}"):
-                                filtro_cps.append(rangos_c[idx])
-            st.session_state['filtro_cps_activo'] = filtro_cps
-            st.markdown("---")
-
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
             with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
                 # Limpiar caché para garantizar datos frescos en cada procesamiento
@@ -438,6 +406,38 @@ if st.session_state["authentication_status"]:
                     'anillos_por_estado': anillos_por_estado
                 }
                 st.session_state.procesado = True
+
+        # ═══════════════════════════════════════════════════════════════
+        # 🎛️ FILTROS POR RANGO (aparecen después de procesar)
+        # Están FUERA del if st.button() pero DENTRO de col_p
+        # ═══════════════════════════════════════════════════════════════
+        if st.session_state.procesado:
+            st.markdown("---")
+            st.markdown("**🎨 Zonas (Círculos)**")
+            rangos_z = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
+            filtro_zonas = []
+            for fila in range(0, len(rangos_z), 3):
+                cols_z = st.columns(3)
+                for j, col in enumerate(cols_z):
+                    idx = fila + j
+                    if idx < len(rangos_z):
+                        with col:
+                            if st.checkbox(rangos_z[idx], value=True, key=f"fz_{idx}"):
+                                filtro_zonas.append(rangos_z[idx])
+            st.session_state['filtro_zonas_activo'] = filtro_zonas
+
+            st.markdown("**🗺️ CPs (Polígonos)**")
+            rangos_c = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
+            filtro_cps = []
+            for fila in range(0, len(rangos_c), 3):
+                cols_c = st.columns(3)
+                for j, col in enumerate(cols_c):
+                    idx = fila + j
+                    if idx < len(rangos_c):
+                        with col:
+                            if st.checkbox(rangos_c[idx], value=True, key=f"fc_{idx}"):
+                                filtro_cps.append(rangos_c[idx])
+            st.session_state['filtro_cps_activo'] = filtro_cps
 
     with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
