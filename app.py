@@ -98,32 +98,6 @@ if st.session_state["authentication_status"]:
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🎛️ FILTROS POR RANGO: Solo visibles cuando hay archivos cargados
-        # ═══════════════════════════════════════════════════════════════
-        if f_poligonos and f_zonas:
-            st.markdown("---")
-            st.markdown("**🎨 Filtros de Zonas (Círculos)**")
-            rangos_zonas_opciones = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
-            filtro_zonas = st.multiselect(
-                "Rangos visibles:",
-                rangos_zonas_opciones,
-                default=rangos_zonas_opciones,
-                key="filtro_rangos_zonas"
-            )
-            st.session_state['filtro_zonas_activo'] = filtro_zonas
-
-            st.markdown("**🗺️ Filtros de CPs (Polígonos)**")
-            rangos_cp_opciones = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
-            filtro_cps = st.multiselect(
-                "Rangos visibles:",
-                rangos_cp_opciones,
-                default=rangos_cp_opciones,
-                key="filtro_rangos_cps"
-            )
-            st.session_state['filtro_cps_activo'] = filtro_cps
-            st.markdown("---")
-
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
             with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
                 # Limpiar caché para garantizar datos frescos en cada procesamiento
@@ -460,94 +434,79 @@ if st.session_state["authentication_status"]:
                 attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             )
             
-            if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
+            # ═══════════════════════════════════════════════════════════════
+            # 🎛️ CAPAS CON FeatureGroup + LayerControl (filtros SIN rerun)
+            # ═══════════════════════════════════════════════════════════════
+
+            # --- Capa de anillos de factibilidad ---
+            if 'anillos_por_estado' in res:
+                fg_anillos = folium.FeatureGroup(name="📍 Radios Factibilidad", show=st.session_state.get('mostrar_anillos', True))
                 for nodo_key, anillos in res['anillos_por_estado'].items():
                     folium.Marker(
                         location=[anillos['centro_lat'], anillos['centro_lon']],
                         icon=folium.Icon(color='purple', icon='crosshairs', prefix='fa'),
                         tooltip=f"Centroide Nodo: {str(nodo_key).upper()}"
-                    ).add_to(m)
-                    
-                    # Orden: primero el grande (15km), luego mediano (10km), al final el chico (5km)
-                    # Así el de 5km queda encima y su tooltip se muestra al pasar el mouse
+                    ).add_to(fg_anillos)
                     folium.GeoJson(
                         anillos['r15'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
                         tooltip=f"15 km ({nodo_key})"
-                    ).add_to(m)
-                    
+                    ).add_to(fg_anillos)
                     folium.GeoJson(
                         anillos['r10'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
                         tooltip=f"10 km ({nodo_key})"
-                    ).add_to(m)
-                    
+                    ).add_to(fg_anillos)
                     folium.GeoJson(
                         anillos['r5'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
                         tooltip=f"5 km ({nodo_key})"
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
+                fg_anillos.add_to(m)
 
-            # ═══════════════════════════════════════════════════════════════
-            # 🎨 CAPA CP COLOREADA POR VOLUMEN (reemplaza el azul fijo)
-            # ═══════════════════════════════════════════════════════════════
+            # --- Capas de CPs por rango de volumen ---
             gdf_mapa_cp = gdf_cobertura.copy()
             gdf_mapa_cp_wgs84 = gdf_mapa_cp.to_crs("EPSG:4326") if gdf_mapa_cp.crs != "EPSG:4326" else gdf_mapa_cp
-
-            # Asegurar que la columna VOLUMEN existe y es numérica
             if 'VOLUMEN' not in gdf_mapa_cp_wgs84.columns:
                 gdf_mapa_cp_wgs84['VOLUMEN'] = 0
             gdf_mapa_cp_wgs84['VOLUMEN'] = pd.to_numeric(gdf_mapa_cp_wgs84['VOLUMEN'], errors='coerce').fillna(0)
-
-            # Precalcular el color y el rango para cada CP
             gdf_mapa_cp_wgs84['_color_hex'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[0])
             gdf_mapa_cp_wgs84['_rango_txt'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[1])
 
-            # 🎛️ FILTRAR CPs por rangos seleccionados
-            filtro_cps_activo = st.session_state.get('filtro_cps_activo', [])
-            if filtro_cps_activo:
-                gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_rango_txt'].isin(filtro_cps_activo)]
-            else:
-                gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84  # Sin filtro = mostrar todo
-
-            if not gdf_mapa_cp_filtrado.empty:
+            rangos_cp_lista = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
+            for rango_cp in rangos_cp_lista:
+                sub_cp = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_rango_txt'] == rango_cp]
+                if sub_cp.empty:
+                    continue
+                fg_cp = folium.FeatureGroup(name=f"CP {rango_cp}", show=True)
                 folium.GeoJson(
-                gdf_mapa_cp_filtrado.to_json(),
-                style_function=lambda feature: {
-                    'fillColor': feature['properties'].get('_color_hex', '#9e9e9e'),
-                    'color': '#ffffff',
-                    'weight': 1.5,
-                    'fillOpacity': 0.45
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_rango_txt'],
-                    aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Rango:'],
-                    localize=True
-                )
-                ).add_to(m)
-        
-            # ═══════════════════════════════════════════════════════════════
-            # 🔵 CAPA CÍRCULOS: Coloreados con rangos de zona
-            # ═══════════════════════════════════════════════════════════════
-            filtro_zonas_activo = st.session_state.get('filtro_zonas_activo', [])
+                    sub_cp.to_json(),
+                    style_function=lambda feature: {
+                        'fillColor': feature['properties'].get('_color_hex', '#9e9e9e'),
+                        'color': '#ffffff',
+                        'weight': 1.5,
+                        'fillOpacity': 0.45
+                    },
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_rango_txt'],
+                        aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Rango:'],
+                        localize=True
+                    )
+                ).add_to(fg_cp)
+                fg_cp.add_to(m)
+
+            # --- Capas de Zonas/Círculos por rango de volumen ---
+            rangos_zona_lista = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
+            zonas_por_rango = {rng: [] for rng in rangos_zona_lista}
 
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
-            
-                # 🎛️ FILTRAR: Si el rango de esta zona no está seleccionado, saltarla
-                if filtro_zonas_activo and r_text not in filtro_zonas_activo:
-                    continue
-
                 geom_circulo = r['geometry']
                 cps_bajo_circulo = []
-            
-                # 🔧 FIX: Usar gdf_cobertura desde session_state (ya recuperado arriba)
                 for _, cp_row in gdf_cobertura.iterrows():
                     if geom_circulo.intersects(cp_row['geometry']):
                         cps_bajo_circulo.append(str(cp_row['CP']))
-
                 txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
-
                 tt_c = (
                     f"<b>Zona Operativa: {r['NOMBRE']}</b><br>"
                     f"Rango: {r_text}<br>"
@@ -556,12 +515,23 @@ if st.session_state["authentication_status"]:
                     f"-------------------------<br>"
                     f"<b>CPs Ocupados Abajo:</b> {txt_cps_atrapados}"
                 )
+                if r_text in zonas_por_rango:
+                    zonas_por_rango[r_text].append((geom_circulo, color_hex, tt_c))
 
-                folium.GeoJson(
-                    geom_circulo,
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
-                    tooltip=tt_c
-                ).add_to(m)
+            for rango_z, items in zonas_por_rango.items():
+                if not items:
+                    continue
+                fg_z = folium.FeatureGroup(name=f"Zona {rango_z}", show=True)
+                for geom_circulo, color_hex, tt_c in items:
+                    folium.GeoJson(
+                        geom_circulo,
+                        style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
+                        tooltip=tt_c
+                    ).add_to(fg_z)
+                fg_z.add_to(m)
+
+            # Control de capas (checkboxes dentro del mapa)
+            folium.LayerControl(collapsed=False).add_to(m)
 
             m_html = m._repr_html_()
             components.html(m_html, height=600)
