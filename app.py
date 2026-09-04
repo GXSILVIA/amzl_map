@@ -84,7 +84,7 @@ if st.session_state["authentication_status"]:
     col_m, col_p = st.columns([3, 1.2])
 
     with col_p:
-        st.title("🛡️ Panel AMZL")
+        st.title("🛡️ Panel Cobertura")
         auth.logout('Cerrar Sesión', 'sidebar')
         if not os.path.exists('mapas'):
             st.error("Falta carpeta mapas")
@@ -317,17 +317,27 @@ if st.session_state["authentication_status"]:
 
                         for _, zona_row in gdf_circles_m_corr.iterrows():
                             if union_total_partners_m is not None and zona_row['geometry'].intersects(union_total_partners_m):
-                                cps_actuales_zona = []
+                                cps_actuales_zona_con_pct = []
                                 for _, cp_row in sub_cob.iterrows():
                                     geom_cp = cp_row['geometry'].buffer(0)
                                     if zona_row['geometry'].intersects(geom_cp) or zona_row['geometry'].contains(geom_cp.centroid):
-                                        cps_actuales_zona.append(cp_row['CP'])
+                                        # Calcular % de cobertura del CP dentro de esta zona
+                                        area_cp = geom_cp.area
+                                        if area_cp > 0:
+                                            try:
+                                                area_inter = geom_cp.intersection(zona_row['geometry']).area
+                                                pct = min(100.0, (area_inter / area_cp) * 100)
+                                            except Exception:
+                                                pct = 0.0
+                                        else:
+                                            pct = 0.0
+                                        cps_actuales_zona_con_pct.append(f"{cp_row['CP']} ({round(pct)}%)")
                                 
-                                if cps_actuales_zona:
+                                if cps_actuales_zona_con_pct:
                                     reporte_cp_por_zona.append({
                                         "Zona": zona_row['NOMBRE'],
                                         "Estado": est.upper(),
-                                        "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona))))
+                                        "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona_con_pct))))
                                     })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
@@ -425,10 +435,12 @@ if st.session_state["authentication_status"]:
                         tooltip=f"Centroide Nodo: {str(nodo_key).upper()}"
                     ).add_to(m)
                     
+                    # Orden: primero el grande (15km), luego mediano (10km), al final el chico (5km)
+                    # Así el de 5km queda encima y su tooltip se muestra al pasar el mouse
                     folium.GeoJson(
-                        anillos['r5'], 
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"5 km ({nodo_key})"
+                        anillos['r15'], 
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
+                        tooltip=f"15 km ({nodo_key})"
                     ).add_to(m)
                     
                     folium.GeoJson(
@@ -438,9 +450,9 @@ if st.session_state["authentication_status"]:
                     ).add_to(m)
                     
                     folium.GeoJson(
-                        anillos['r15'], 
-                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"15 km ({nodo_key})"
+                        anillos['r5'], 
+                        style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
+                        tooltip=f"5 km ({nodo_key})"
                     ).add_to(m)
 
             # ═══════════════════════════════════════════════════════════════
@@ -465,7 +477,7 @@ if st.session_state["authentication_status"]:
                     'fillColor': feature['properties'].get('_color_hex', '#9e9e9e'),
                     'color': '#ffffff',
                     'weight': 1.5,
-                    'fillOpacity': 0.5
+                    'fillOpacity': 0.3
                 },
                 tooltip=folium.GeoJsonTooltip(
                     fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_rango_txt'],
@@ -501,7 +513,7 @@ if st.session_state["authentication_status"]:
 
                 folium.GeoJson(
                     geom_circulo,
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.55},
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.3},
                     tooltip=tt_c
                 ).add_to(m)
 
@@ -509,7 +521,7 @@ if st.session_state["authentication_status"]:
             components.html(m_html, height=600)
 
             st.write("---")
-            st.markdown("### 🖥️ Consola de Control de Territorios (Albers Equal-Area + Lambert Conformal)")
+            st.markdown("### 🖥️ Control de Cobertura (Albers Equal-Area + Lambert Conformal)")
             st.markdown(f"**Filtro de Consulta Activo:** `{res['estado_nombre']}`")
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
 
