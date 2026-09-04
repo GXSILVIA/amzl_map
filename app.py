@@ -406,38 +406,7 @@ if st.session_state["authentication_status"]:
                     'anillos_por_estado': anillos_por_estado
                 }
                 st.session_state.procesado = True
-
-        # ═══════════════════════════════════════════════════════════════
-        # 🎛️ FILTROS POR RANGO (aparecen después de procesar)
-        # Están FUERA del if st.button() pero DENTRO de col_p
-        # ═══════════════════════════════════════════════════════════════
-        if st.session_state.procesado:
-            st.markdown("---")
-            st.markdown("**🎨 Zonas (Círculos)**")
-            rangos_z = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
-            filtro_zonas = []
-            for fila in range(0, len(rangos_z), 3):
-                cols_z = st.columns(3)
-                for j, col in enumerate(cols_z):
-                    idx = fila + j
-                    if idx < len(rangos_z):
-                        with col:
-                            if st.checkbox(rangos_z[idx], value=True, key=f"fz_{idx}"):
-                                filtro_zonas.append(rangos_z[idx])
-            st.session_state['filtro_zonas_activo'] = filtro_zonas
-
-            st.markdown("**🗺️ CPs (Polígonos)**")
-            rangos_c = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
-            filtro_cps = []
-            for fila in range(0, len(rangos_c), 3):
-                cols_c = st.columns(3)
-                for j, col in enumerate(cols_c):
-                    idx = fila + j
-                    if idx < len(rangos_c):
-                        with col:
-                            if st.checkbox(rangos_c[idx], value=True, key=f"fc_{idx}"):
-                                filtro_cps.append(rangos_c[idx])
-            st.session_state['filtro_cps_activo'] = filtro_cps
+                st.session_state['_mapa_recien_procesado'] = True
 
     with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
@@ -552,7 +521,44 @@ if st.session_state["authentication_status"]:
                     ).add_to(m)
 
             m_html = m._repr_html_()
+            # Guardar mapa completo (todas las capas) para descarga
+            if 'mapa_descarga_html' not in st.session_state or st.session_state.get('_mapa_recien_procesado', False):
+                st.session_state['mapa_descarga_html'] = m_html
+                st.session_state['_mapa_recien_procesado'] = False
             components.html(m_html, height=600)
+
+            # ═══════════════════════════════════════════════════════════════
+            # 🎛️ FILTROS DEBAJO DEL MAPA (en col_m)
+            # ═══════════════════════════════════════════════════════════════
+            st.markdown("#### 🎛️ Filtros de Visualización")
+            fcol1, fcol2 = st.columns(2)
+            with fcol1:
+                st.markdown("**🎨 Zonas (Círculos)**")
+                rangos_z = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
+                filtro_zonas = []
+                for fila in range(0, len(rangos_z), 3):
+                    cz = st.columns(3)
+                    for j, col in enumerate(cz):
+                        idx = fila + j
+                        if idx < len(rangos_z):
+                            with col:
+                                if st.checkbox(rangos_z[idx], value=True, key=f"fz_{idx}"):
+                                    filtro_zonas.append(rangos_z[idx])
+                st.session_state['filtro_zonas_activo'] = filtro_zonas
+
+            with fcol2:
+                st.markdown("**🗺️ CPs (Polígonos)**")
+                rangos_c = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
+                filtro_cps = []
+                for fila in range(0, len(rangos_c), 3):
+                    cc = st.columns(3)
+                    for j, col in enumerate(cc):
+                        idx = fila + j
+                        if idx < len(rangos_c):
+                            with col:
+                                if st.checkbox(rangos_c[idx], value=True, key=f"fc_{idx}"):
+                                    filtro_cps.append(rangos_c[idx])
+                st.session_state['filtro_cps_activo'] = filtro_cps
 
             st.write("---")
             st.markdown("### 🖥️ Control de Cobertura (Albers Equal-Area + Lambert Conformal)")
@@ -568,7 +574,7 @@ if st.session_state["authentication_status"]:
 
             c1, c2 = st.columns(2)
             with c1:
-                st.download_button(label="💾 Descargar Mapa HTML", data=m_html, file_name=f"Mapa_{res['estado_nombre']}.html", mime="text/html", use_container_width=True)
+                st.download_button(label="💾 Descargar Mapa HTML", data=st.session_state.get('mapa_descarga_html', m_html), file_name=f"Mapa_{res['estado_nombre']}.html", mime="text/html", use_container_width=True)
             with c2:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
