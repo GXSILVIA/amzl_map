@@ -98,6 +98,32 @@ if st.session_state["authentication_status"]:
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🎛️ FILTROS POR RANGO: Solo visibles cuando hay archivos cargados
+        # ═══════════════════════════════════════════════════════════════
+        if f_poligonos and f_zonas:
+            st.markdown("---")
+            st.markdown("**🎨 Filtros de Zonas (Círculos)**")
+            rangos_zonas_opciones = ["⚪ R0", "🟡 R1-15", "🟠 R16-20", "🔴 R21-30", "🟣 R31-40", "🟤 R41+"]
+            filtro_zonas = st.multiselect(
+                "Rangos visibles:",
+                rangos_zonas_opciones,
+                default=rangos_zonas_opciones,
+                key="filtro_rangos_zonas"
+            )
+            st.session_state['filtro_zonas_activo'] = filtro_zonas
+
+            st.markdown("**🗺️ Filtros de CPs (Polígonos)**")
+            rangos_cp_opciones = ["⚪ R0", "🟡 R1-100", "🟠 R101-200", "🔴 R201-300", "🟣 R301-400", "🟤 R401+"]
+            filtro_cps = st.multiselect(
+                "Rangos visibles:",
+                rangos_cp_opciones,
+                default=rangos_cp_opciones,
+                key="filtro_rangos_cps"
+            )
+            st.session_state['filtro_cps_activo'] = filtro_cps
+            st.markdown("---")
+
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
             with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
                 # Limpiar caché para garantizar datos frescos en cada procesamiento
@@ -477,28 +503,41 @@ if st.session_state["authentication_status"]:
             gdf_mapa_cp_wgs84['_color_hex'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[0])
             gdf_mapa_cp_wgs84['_rango_txt'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[1])
 
-            # Inyectar como GeoJson con style_function que lee el color de las properties
-            folium.GeoJson(
-                gdf_mapa_cp_wgs84.to_json(),
+            # 🎛️ FILTRAR CPs por rangos seleccionados
+            filtro_cps_activo = st.session_state.get('filtro_cps_activo', [])
+            if filtro_cps_activo:
+                gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_rango_txt'].isin(filtro_cps_activo)]
+            else:
+                gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84  # Sin filtro = mostrar todo
+
+            if not gdf_mapa_cp_filtrado.empty:
+                folium.GeoJson(
+                gdf_mapa_cp_filtrado.to_json(),
                 style_function=lambda feature: {
                     'fillColor': feature['properties'].get('_color_hex', '#9e9e9e'),
                     'color': '#ffffff',
                     'weight': 1.5,
-                    'fillOpacity': 0.3
+                    'fillOpacity': 0.45
                 },
                 tooltip=folium.GeoJsonTooltip(
                     fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_rango_txt'],
                     aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Rango:'],
                     localize=True
                 )
-            ).add_to(m)
+                ).add_to(m)
         
             # ═══════════════════════════════════════════════════════════════
             # 🔵 CAPA CÍRCULOS: Coloreados con rangos de zona
             # ═══════════════════════════════════════════════════════════════
+            filtro_zonas_activo = st.session_state.get('filtro_zonas_activo', [])
+
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
             
+                # 🎛️ FILTRAR: Si el rango de esta zona no está seleccionado, saltarla
+                if filtro_zonas_activo and r_text not in filtro_zonas_activo:
+                    continue
+
                 geom_circulo = r['geometry']
                 cps_bajo_circulo = []
             
