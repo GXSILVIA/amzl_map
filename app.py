@@ -10,7 +10,7 @@ from shapely.geometry import Point
 from shapely.ops import unary_union
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Sistema Pro AMZL - Cobertura Montecarlo", layout="wide")
+st.set_page_config(page_title="Sistema Pro AMZL - Cobertura Albers-Lambert", layout="wide")
 
 def normalizar_cp(v):
     try:
@@ -95,17 +95,30 @@ if st.session_state["authentication_status"]:
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
 
-        n_simulaciones = st.slider("🎯 Puntos de Muestreo Montecarlo:", 2000, 20000, 10000, 2000)
-
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
-            with st.spinner("Ejecutando simulación estadística sobre la cobertura..."):
+            with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
+                # Limpiar caché para garantizar datos frescos en cada procesamiento
+                st.cache_data.clear()
+
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
-                df_poly_user = df_poly_user.drop_duplicates(subset=['CP'])
+                # Consolidar duplicados: sumamos volúmenes y mantenemos la primera ZONA
+                if 'VOLUMEN' in df_poly_user.columns:
+                    df_poly_user['VOLUMEN'] = pd.to_numeric(df_poly_user['VOLUMEN'], errors='coerce').fillna(0)
+                    agg_dict = {'VOLUMEN': 'sum'}
+                    if 'ZONA' in df_poly_user.columns:
+                        agg_dict['ZONA'] = 'first'
+                    # Preservar todas las demás columnas con 'first'
+                    for col in df_poly_user.columns:
+                        if col not in ['CP', 'VOLUMEN', 'ZONA']:
+                            agg_dict[col] = 'first'
+                    df_poly_user = df_poly_user.groupby('CP', as_index=False).agg(agg_dict)
+                else:
+                    df_poly_user = df_poly_user.drop_duplicates(subset=['CP'])
 
                 df_zonas_user = pd.read_excel(f_zonas)
                 df_zonas_user.columns = df_zonas_user.columns.str.strip()
@@ -148,8 +161,16 @@ if st.session_state["authentication_status"]:
                 pts = [Point(xy) for xy in zip(df_zonas_user['LONGITUD'], df_zonas_user['LATITUD'])]
                 gdf_circles = gpd.GeoDataFrame(df_zonas_user, geometry=pts, crs="EPSG:4326")
 
-                gdf_cobertura_m = gdf_cobertura.to_crs("EPSG:6362")
-                gdf_circles_m = gdf_circles.to_crs("EPSG:6362")
+                # ═══════════════════════════════════════════════════════════════
+                # 📐 DOBLE PROYECCIÓN: Albers (áreas) + Lambert (distancias)
+                # EPSG:6372 = Albers Equal-Area Conic México → preserva ÁREAS
+                # EPSG:6362 = Lambert Conformal Conic México → preserva DISTANCIAS
+                # ═══════════════════════════════════════════════════════════════
+                CRS_AREAS = "EPSG:6372"      # Albers — para km², % cobertura
+                CRS_DISTANCIAS = "EPSG:6362"  # Lambert — para metros, radios, perímetros
+
+                gdf_cobertura_m = gdf_cobertura.to_crs(CRS_AREAS)
+                gdf_circles_m = gdf_circles.to_crs(CRS_AREAS)
                 gdf_circles_m['geometry'] = gdf_circles_m.apply(lambda r: r['geometry'].buffer(r['RADIO']), axis=1)
 
                 gdf_circles_m['AREA_KM2'] = gdf_circles_m['geometry'].area / 1000000.0
@@ -169,7 +190,7 @@ if st.session_state["authentication_status"]:
                 gdf_circles_m_corr = gdf_circles_m.copy()
                 for idx, row in gdf_circles_m_corr.iterrows():
                     if row['RADIO'] < 100:
-                        base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs("EPSG:6362").iloc[0]
+                        base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs(CRS_DISTANCIAS).iloc[0]
                         gdf_circles_m_corr.at[idx, 'geometry'] = base_geom.buffer(row['RADIO'] * 1000)
                 
                 reporte_cp_por_zona = []
@@ -178,27 +199,31 @@ if st.session_state["authentication_status"]:
 
                 nodos_unicos_maestro = gdf_cobertura['ZONA'].dropna().unique().tolist()
                 centroides_nodos_globales = []
+
+                # Proyecciones Lambert para cálculos de distancia radial
+                gdf_cobertura_lambert = gdf_cobertura.to_crs(CRS_DISTANCIAS)
+                gdf_circles_m_lambert = gdf_circles_m_corr.to_crs(CRS_DISTANCIAS)
                 
                 for nodo in nodos_unicos_maestro:
                     cob_nodo_completa = gdf_cobertura[gdf_cobertura['ZONA'] == nodo]
-                    if cob_nodo_completa.empty or gdf_circles_m_corr.empty:
+                    if cob_nodo_completa.empty or gdf_circles_m_lambert.empty:
                         continue
                         
-                    g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs("EPSG:6362").buffer(0))
+                    g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
                     
-                    partners_del_nodo = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(g_cob_nodo_global)]
+                    partners_del_nodo = gdf_circles_m_lambert[gdf_circles_m_lambert['geometry'].intersects(g_cob_nodo_global)]
                     
                     if partners_del_nodo.empty:
                         centroide_temp_cob = g_cob_nodo_global.centroid
-                        distancias_a_partners = gdf_circles_m_corr['geometry'].distance(centroide_temp_cob)
-                        partners_del_nodo = gdf_circles_m_corr.loc[[distancias_a_partners.idxmin()]]
+                        distancias_a_partners = gdf_circles_m_lambert['geometry'].distance(centroide_temp_cob)
+                        partners_del_nodo = gdf_circles_m_lambert.loc[[distancias_a_partners.idxmin()]]
                     
                     masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
                     centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
                     
                     centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
                     
-                    pt_gps = gpd.GeoSeries([centroide_acumulacion_nodo_m], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0]
+                    pt_gps = gpd.GeoSeries([centroide_acumulacion_nodo_m], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0]
                     
                     b5 = centroide_acumulacion_nodo_m.buffer(5000)
                     b10 = centroide_acumulacion_nodo_m.buffer(10000)
@@ -207,15 +232,17 @@ if st.session_state["authentication_status"]:
                     anillos_por_estado[nodo] = {
                         'centro_lat': pt_gps.y,
                         'centro_lon': pt_gps.x,
-                        'r5': gpd.GeoSeries([b5], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                        'r10': gpd.GeoSeries([b10], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                        'r15': gpd.GeoSeries([b15], crs="EPSG:6362").to_crs("EPSG:4326").iloc[0].__geo_interface__
+                        'r5': gpd.GeoSeries([b5], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                        'r10': gpd.GeoSeries([b10], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                        'r15': gpd.GeoSeries([b15], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__
                     }
 
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
                 for est in estados_con_cobertura_real:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
+                    # Proyección Lambert del mismo subconjunto para cálculos de distancia
+                    sub_cob_lambert = gdf_cobertura_lambert[gdf_cobertura_lambert['ESTADO_PERTENECE'] == est]
                     if not sub_cob.empty:
                         
                         cps_cubiertos_100 = set()
@@ -226,12 +253,11 @@ if st.session_state["authentication_status"]:
                         cps_perimetro_gt10km = set()
                         
                         for _, cp_row in sub_cob.iterrows():
-                            area_real_cp_fija = cp_row['geometry'].area
+                            area_real_cp_fija = cp_row['geometry'].area  # Albers → área precisa
                             if area_real_cp_fija <= 0:
                                 continue
                                 
-                            geom_cp = cp_row['geometry'].buffer(0)
-                            centroide_cp = geom_cp.centroid
+                            geom_cp = cp_row['geometry'].buffer(0)  # Albers para intersección de áreas
                             cp_str = cp_row['CP']
                             zona_lbl = cp_row.get('ZONA', 'S/N')
                             
@@ -256,8 +282,11 @@ if st.session_state["authentication_status"]:
                             else:
                                 cp_str = f"LIBRE - {cp_str}"
 
+                            # 📏 DISTANCIA RADIAL: Usamos Lambert para medir distancias precisas
+                            centroide_cp_lambert = sub_cob_lambert.loc[cp_row.name, 'geometry'].buffer(0).centroid
+
                             if centroides_nodos_globales:
-                                distancia_al_centroide = min([centroide.distance(centroide_cp) for centroide in centroides_nodos_globales])
+                                distancia_al_centroide = min([centroide.distance(centroide_cp_lambert) for centroide in centroides_nodos_globales])
                                 
                                 if distancia_al_centroide <= 5000:
                                     cps_perimetro_5km.add(f"{zona_lbl}: {cp_str}")
@@ -386,7 +415,7 @@ if st.session_state["authentication_status"]:
                 c_lat = 23.6345
                 c_lon = -102.5528
                 
-            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="CartoDB Voyager")
+            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="OpenStreetMap")
             
             if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
                 for nodo_key, anillos in res['anillos_por_estado'].items():
@@ -399,19 +428,19 @@ if st.session_state["authentication_status"]:
                     folium.GeoJson(
                         anillos['r5'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"perimetro <5 km ({nodo_key})"
+                        tooltip=f"5 km ({nodo_key})"
                     ).add_to(m)
                     
                     folium.GeoJson(
                         anillos['r10'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"perimetro 5-10km ({nodo_key})"
+                        tooltip=f"10 km ({nodo_key})"
                     ).add_to(m)
                     
                     folium.GeoJson(
                         anillos['r15'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5', 'pointerEvents': 'none'}, 
-                        tooltip=f"perimetro >10km ({nodo_key})"
+                        tooltip=f"15 km ({nodo_key})"
                     ).add_to(m)
 
             # ═══════════════════════════════════════════════════════════════
@@ -480,7 +509,7 @@ if st.session_state["authentication_status"]:
             components.html(m_html, height=600)
 
             st.write("---")
-            st.markdown("### 🖥️ Consola de Control de Territorios (Muestreo de Cobertura Montecarlo)")
+            st.markdown("### 🖥️ Consola de Control de Territorios (Albers Equal-Area + Lambert Conformal)")
             st.markdown(f"**Filtro de Consulta Activo:** `{res['estado_nombre']}`")
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
 
