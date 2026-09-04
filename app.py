@@ -425,7 +425,12 @@ if st.session_state["authentication_status"]:
                 c_lat = 23.6345
                 c_lon = -102.5528
                 
-            m = folium.Map(location=[c_lat, c_lon], zoom_start=6 if res['estado_nombre'] == "Todos" else 10, tiles="OpenStreetMap")
+            m = folium.Map(
+                location=[c_lat, c_lon],
+                zoom_start=6 if res['estado_nombre'] == "Todos" else 10,
+                tiles="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+                attr='&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+            )
             
             if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
                 for nodo_key, anillos in res['anillos_por_estado'].items():
@@ -513,7 +518,7 @@ if st.session_state["authentication_status"]:
 
                 folium.GeoJson(
                     geom_circulo,
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.3},
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
                     tooltip=tt_c
                 ).add_to(m)
 
