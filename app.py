@@ -65,84 +65,150 @@ def obtener_color_rango_cp(v):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🎲 SIMULACIÓN MONTE CARLO: Traslape entre zonas (círculos) DENTRO de cada nodo
+# 🎲 TRASLAPE: Monte Carlo vectorizado (misma fórmula que Sistema Pro)
 # ═══════════════════════════════════════════════════════════════════════
 
-def monte_carlo_traslape_por_nodo(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos, n_puntos=10000, seed=42):
-    """
-    Calcula el % de traslape INTERNO por nodo usando simulación Monte Carlo.
-    Para cada nodo, identifica las zonas (círculos) que le pertenecen,
-    genera puntos aleatorios dentro de la unión de esas zonas y verifica
-    cuántos caen en 2+ círculos a la vez (área de traslape entre zonas).
-    
-    Returns: list[dict] con Nodo, % Traslape, Nivel
-    """
-    rng = np.random.RandomState(seed)
+def clasificar_nivel_traslape(pct):
+    """Clasifica nivel de traslape por porcentaje."""
+    if pct < 25:
+        return "🟢 BAJO"
+    elif pct < 50:
+        return "🟡 MEDIO"
+    elif pct < 75:
+        return "🟠 ALTO"
+    else:
+        return "🔴 CRÍTICO"
 
-    # Identificar qué círculos pertenecen a cada nodo (por intersección con sus CPs)
-    circulos_por_nodo = {}
+
+def calcular_traslape_real(p1, otros_pts):
+    """
+    Monte Carlo vectorizado — misma función de app_sistema_pro.py.
+    Genera 10,000 puntos dentro del círculo p1 y mide cuántos caen en otros círculos.
+    
+    Args:
+        p1: dict con LAT, LON, RAD, NOM
+        otros_pts: lista de dicts con LAT, LON, RAD, NOM
+    
+    Returns:
+        porcentaje_global, zonas_intersecadas, desglose [{NOM, PCT}]
+    """
+    if not otros_pts:
+        return 0.0, [], []
+    n = 10000
+    ang = np.random.uniform(0, 2 * np.pi, n)
+    rad = np.sqrt(np.random.uniform(0, 1, n)) * p1['RAD']
+    m_grado = 111139
+    cos_lat = np.cos(np.radians(p1['LAT']))
+
+    p_lat = p1['LAT'] + ((rad * np.sin(ang)) / m_grado)
+    p_lon = p1['LON'] + ((rad * np.cos(ang)) / (m_grado * cos_lat))
+
+    lats_otros = np.array([p['LAT'] for p in otros_pts])
+    lons_otros = np.array([p['LON'] for p in otros_pts])
+    rads_otros = np.array([p['RAD'] for p in otros_pts])
+    nombres_otros = np.array([p['NOM'] for p in otros_pts])
+
+    p_lat_m = p_lat[:, np.newaxis]
+    p_lon_m = p_lon[:, np.newaxis]
+
+    d2 = ((p_lat_m - lats_otros)**2 + ((p_lon_m - lons_otros) * cos_lat)**2) * (m_grado**2)
+    puntos_en_zonas = d2 <= rads_otros**2
+
+    cubiertos = np.any(puntos_en_zonas, axis=1)
+    porcentaje = float((np.sum(cubiertos) / n) * 100)
+
+    zonas_que_cubren = np.any(puntos_en_zonas, axis=0)
+    zonas_intersecadas = nombres_otros[zonas_que_cubren].tolist()
+
+    desglose = []
+    conteo_por_zona = np.sum(puntos_en_zonas, axis=0)
+    for idx_z in range(len(otros_pts)):
+        if conteo_por_zona[idx_z] > 0:
+            pct_individual = float((conteo_por_zona[idx_z] / n) * 100)
+            desglose.append({'NOM': nombres_otros[idx_z], 'PCT': round(pct_individual, 1)})
+    desglose.sort(key=lambda x: x['PCT'], reverse=True)
+
+    return porcentaje, zonas_intersecadas, desglose
+
+
+def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unicos):
+    """
+    Calcula traslape por zona y por nodo usando Monte Carlo vectorizado.
+    Usa las coordenadas GPS originales de los círculos (LATITUD, LONGITUD, RADIO).
+    
+    Returns:
+        traslape_por_zona: {nombre_zona: {"pct": float, "nivel": str, "nodo": str, "desglose": list}}
+        resultados_nodo: [{"Nodo": str, "% Traslape": str, "Nivel": str}]
+    """
+    # 1. Asignar cada círculo a su nodo por intersección con CPs
+    circulos_con_nodo = []
     for nodo in nodos_unicos:
         cps_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
         if cps_nodo.empty:
             continue
         union_cps_nodo = unary_union(cps_nodo['geometry'].buffer(0))
-        # Obtener los círculos individuales que intersectan este nodo
-        mask = gdf_circles_m_corr['geometry'].intersects(union_cps_nodo)
-        circulos_nodo = gdf_circles_m_corr[mask]
-        if not circulos_nodo.empty and len(circulos_nodo) >= 2:
-            circulos_por_nodo[nodo] = [g.buffer(0) for g in circulos_nodo['geometry']]
+        for idx, row in gdf_circles_wgs84_df.iterrows():
+            pt_check = Point(row['LONGITUD'], row['LATITUD'])
+            # Verificar si el centro del círculo cae cerca de los CPs de este nodo
+            # (usar la geometría proyectada del círculo para intersección)
+            if row['geometry'].intersects(union_cps_nodo):
+                circulos_con_nodo.append({
+                    'NOM': row['NOMBRE'],
+                    'LAT': row['LATITUD'],
+                    'LON': row['LONGITUD'],
+                    'RAD': row['RADIO'],
+                    'VOL': row.get('VOLUMEN', 0),
+                    'nodo': nodo
+                })
+
+    # 2. Calcular traslape por zona usando Monte Carlo (igual que Sistema Pro)
+    np.random.seed(42)  # Semilla fija para reproducibilidad
+    traslape_por_zona = {}
     
-    resultados = []
-    for nodo in nodos_unicos:
-        if nodo not in circulos_por_nodo:
-            # Nodo con 0 o 1 círculo → no puede haber traslape interno
-            resultados.append({"Nodo": nodo, "% Traslape": "0.00%", "Nivel": "⚪ Sin datos"})
+    for i, circ in enumerate(circulos_con_nodo):
+        nombre = circ['NOM']
+        nodo = circ['nodo']
+        
+        # Otros círculos del MISMO nodo (excluir el actual)
+        otros = [c for j, c in enumerate(circulos_con_nodo) if j != i and c['nodo'] == nodo]
+        
+        if not otros:
+            traslape_por_zona[nombre] = {
+                "pct": 0.0, "nivel": "🟢 BAJO", "nodo": nodo, "desglose": []
+            }
             continue
         
-        circulos_lista = circulos_por_nodo[nodo]
-        union_total = unary_union(circulos_lista).buffer(0)
-
-        # Generar puntos aleatorios dentro de la unión de todos los círculos del nodo
-        minx, miny, maxx, maxy = union_total.bounds
-        puntos_dentro = 0
-        puntos_traslape = 0
-        intentos = 0
-        max_intentos = n_puntos * 20
+        pct, zonas_inter, desglose = calcular_traslape_real(circ, otros)
+        pct = round(pct, 1)
         
-        while puntos_dentro < n_puntos and intentos < max_intentos:
-            x = rng.uniform(minx, maxx)
-            y = rng.uniform(miny, maxy)
-            pt = Point(x, y)
-            intentos += 1
-            if union_total.contains(pt):
-                puntos_dentro += 1
-                # Contar en cuántos círculos individuales cae este punto
-                n_circulos = sum(1 for c in circulos_lista if c.contains(pt))
-                if n_circulos >= 2:
-                    puntos_traslape += 1
-        
-        if puntos_dentro > 0:
-            pct = (puntos_traslape / puntos_dentro) * 100
+        traslape_por_zona[nombre] = {
+            "pct": pct,
+            "nivel": clasificar_nivel_traslape(pct),
+            "nodo": nodo,
+            "desglose": desglose
+        }
+    
+    # 3. Agregar por nodo: promedio de traslape de sus zonas
+    nodo_traslapes = {}
+    for nombre, datos in traslape_por_zona.items():
+        nodo = datos['nodo']
+        if nodo not in nodo_traslapes:
+            nodo_traslapes[nodo] = []
+        nodo_traslapes[nodo].append(datos['pct'])
+    
+    resultados_nodo = []
+    for nodo in nodos_unicos:
+        if nodo in nodo_traslapes and nodo_traslapes[nodo]:
+            pct_promedio = round(sum(nodo_traslapes[nodo]) / len(nodo_traslapes[nodo]), 2)
         else:
-            pct = 0.0
-        
-        # Clasificar nivel
-        if pct < 25:
-            nivel = "🟢 BAJO"
-        elif pct < 50:
-            nivel = "🟡 MEDIO"
-        elif pct < 75:
-            nivel = "🟠 ALTO"
-        else:
-            nivel = "🔴 CRÍTICO"
-        
-        resultados.append({
+            pct_promedio = 0.0
+        resultados_nodo.append({
             "Nodo": nodo,
-            "% Traslape": f"{round(pct, 2)}%",
-            "Nivel": nivel
+            "% Traslape": f"{pct_promedio}%",
+            "Nivel": clasificar_nivel_traslape(pct_promedio)
         })
     
-    return resultados
+    return traslape_por_zona, resultados_nodo
 
 
 with open('config.yaml') as f:
@@ -497,8 +563,14 @@ if st.session_state["authentication_status"]:
                 # ═══════════════════════════════════════════════════════════════
                 # 🎲 MONTE CARLO: Calcular traslape entre zonas de cada nodo
                 # ═══════════════════════════════════════════════════════════════
-                resultados_mc = monte_carlo_traslape_por_nodo(
-                    gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_maestro, n_puntos=10000, seed=42
+                # Preparar DataFrame de círculos con coordenadas GPS para Monte Carlo
+                gdf_circles_para_traslape = gdf_circles.copy()
+                gdf_circles_para_traslape['RADIO_ORIG'] = df_zonas_user['RADIO'].values
+                # Usar RADIO original en metros para el Monte Carlo
+                gdf_circles_para_traslape['RADIO'] = gdf_circles_para_traslape['RADIO_ORIG']
+                
+                traslape_por_zona, resultados_mc = calcular_traslape_por_zona(
+                    gdf_cobertura.to_crs("EPSG:4326"), gdf_circles_para_traslape, nodos_unicos_maestro
                 )
                 df_traslape_mc = pd.DataFrame(resultados_mc)
                 if df_traslape_mc.empty:
@@ -525,13 +597,14 @@ if st.session_state["authentication_status"]:
                 # ═══════════════════════════════════════════════════════════════
                 st.session_state['gdf_cobertura_global'] = gdf_cobertura
 
-                # Integrar % Traslape a tabla de CPs por Zona
-                if not df_traslape_mc.empty and not df_cp_por_zona.empty and 'Nodo' in df_cp_por_zona.columns:
-                    df_cp_por_zona = df_cp_por_zona.merge(
-                        df_traslape_mc[['Nodo', '% Traslape']],
-                        on='Nodo', how='left'
+                # Integrar % Traslape individual de cada zona a tabla de CPs por Zona
+                if traslape_por_zona and not df_cp_por_zona.empty and 'Zona' in df_cp_por_zona.columns:
+                    df_cp_por_zona['% Traslape'] = df_cp_por_zona['Zona'].apply(
+                        lambda z: f"{traslape_por_zona[z]['pct']}%" if z in traslape_por_zona else "0.00%"
                     )
-                    df_cp_por_zona['% Traslape'] = df_cp_por_zona['% Traslape'].fillna('0.00%')
+                    df_cp_por_zona['Nivel Traslape'] = df_cp_por_zona['Zona'].apply(
+                        lambda z: traslape_por_zona[z]['nivel'] if z in traslape_por_zona else "⚪ Sin datos"
+                    )
 
                 st.session_state.resultados = {
                     'estado_nombre': edo_sel,
@@ -546,7 +619,8 @@ if st.session_state["authentication_status"]:
                     'df_cp_por_estado': df_cp_por_estado,
                     'df_cp_por_zona': df_cp_por_zona,
                     'anillos_por_estado': anillos_por_estado,
-                    'df_traslape_mc': df_traslape_mc
+                    'df_traslape_mc': df_traslape_mc,
+                    'traslape_por_zona': traslape_por_zona
                 }
                 st.session_state.procesado = True
                 st.session_state['_mapa_recien_procesado'] = True
@@ -627,6 +701,7 @@ if st.session_state["authentication_status"]:
                     cp_partners_lookup[str(row_cp['CP'])] = int(row_cp.get('PARTNERS', 0))
 
             mostrar_zonas_flag = st.session_state.get('mostrar_zonas', True)
+            traslape_zona_lookup = res.get('traslape_por_zona', {})
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
                 if not mostrar_zonas_flag:
@@ -636,23 +711,33 @@ if st.session_state["authentication_status"]:
                 for _, cp_row in gdf_cobertura.iterrows():
                     if geom_circulo.intersects(cp_row['geometry']):
                         cps_bajo_circulo.append(str(cp_row['CP']))
-                # ═══════════════════════════════════════════════════════════
-                # 🔧 PARTNERS: Agregar conteo de partners por CP en tooltip
-                # ═══════════════════════════════════════════════════════════
                 if cps_bajo_circulo:
                     cps_unicos = sorted(list(set(cps_bajo_circulo)))
                     txt_cps_atrapados = ", ".join(cps_unicos)
                 else:
                     txt_cps_atrapados = "Ninguno"
 
-                tt_c = (
-                    f"<b>Zona Operativa: {r['NOMBRE']}</b><br>"
-                    f"Rango: {r_text}<br>"
-                    f"Volumen: {r['VOLUMEN']}<br>"
-                    f"Radio Ope: {r['RADIO']}m<br>"
-                    f"-------------------------<br>"
-                    f"<b>CPs Ocupados:</b> {txt_cps_atrapados}"
-                )
+                # Obtener % traslape de esta zona
+                info_traslape = traslape_zona_lookup.get(r['NOMBRE'], {})
+                pct_traslape = info_traslape.get('pct', 0.0)
+                nivel_traslape = info_traslape.get('nivel', '⚪ Sin datos')
+                desglose_traslape = info_traslape.get('desglose', [])
+
+                # Construir tooltip con desglose
+                tt_lines = [
+                    f"<b>Zona Operativa: {r['NOMBRE']}</b>",
+                    f"Rango: {r_text}",
+                    f"Volumen: {r['VOLUMEN']}",
+                    f"Radio Ope: {r['RADIO']}m",
+                    f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>"
+                ]
+                if desglose_traslape:
+                    tt_lines.append("── Detalle Traslape ──")
+                    for d in desglose_traslape:
+                        tt_lines.append(f"&nbsp;&nbsp;• {d['NOM']}: {d['PCT']}%")
+                tt_lines.append("-------------------------")
+                tt_lines.append(f"<b>CPs Ocupados:</b> {txt_cps_atrapados}")
+                tt_c = "<br>".join(tt_lines)
                 folium.GeoJson(
                     geom_circulo,
                     style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
