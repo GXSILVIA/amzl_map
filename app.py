@@ -904,6 +904,16 @@ if st.session_state["authentication_status"]:
                 // URL parameter ?cp=XXXXX
                 var pr = new URLSearchParams(window.location.search).get('cp');
                 if (pr) setTimeout(function() { buscarCP(pr); }, 500);
+                
+                // Listen for postMessage from parent (for iframe embedding)
+                window.addEventListener('message', function(e) {
+                    if (e.data && e.data.action === 'searchCP' && e.data.cp) {
+                        buscarCP(e.data.cp);
+                    }
+                });
+                
+                // Also try to notify parent that we're ready
+                try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
             }
             </script>
             """
