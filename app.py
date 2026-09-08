@@ -920,8 +920,14 @@ if st.session_state["authentication_status"]:
             m.get_root().html.add_child(folium.Element(search_html))
 
             m_html = m._repr_html_()
+            # Save standalone HTML (no iframe/srcdoc wrapper) for download & GitHub Pages
+            import tempfile
+            _tmp_map = os.path.join(tempfile.gettempdir(), 'mapa_standalone.html')
+            m.save(_tmp_map)
+            with open(_tmp_map, 'r', encoding='utf-8') as _f:
+                _mapa_standalone = _f.read()
             if 'mapa_descarga_html' not in st.session_state or st.session_state.get('_mapa_recien_procesado', False):
-                st.session_state['mapa_descarga_html'] = m_html
+                st.session_state['mapa_descarga_html'] = _mapa_standalone
                 st.session_state['_mapa_recien_procesado'] = False
             components.html(m_html, height=600)
 
