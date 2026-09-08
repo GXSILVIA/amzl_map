@@ -809,76 +809,102 @@ if st.session_state["authentication_status"]:
                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
             </div>
             <script>
-            (function(){
-                var map = null;
-                for (var k in window) {
-                    try { if (window[k] instanceof L.Map) { map = window[k]; break; } }
-                    catch(e) {}
-                }
-                if (!map) return;
+            window.addEventListener('load', function() {
+                setTimeout(function() { initCPSearch(); }, 1500);
+            });
 
-                // Indexar todos los polígonos de CP
-                var cpIdx = {};
-                map.eachLayer(function(ly) {
-                    if (ly.eachLayer) {
-                        ly.eachLayer(function(sub) {
-                            if (sub.feature && sub.feature.properties && sub.feature.properties.CP) {
-                                cpIdx[String(sub.feature.properties.CP)] = sub;
+            function initCPSearch() {
+                var map = null;
+                // Find Leaflet map instance (Folium uses map_<hash> variable names)
+                for (var k in window) {
+                    try {
+                        if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) {
+                            map = window[k]; break;
+                        }
+                    } catch(e) {}
+                }
+                if (!map) {
+                    for (var k in window) {
+                        try {
+                            if (window[k] && window[k]._leaflet_id && window[k]._container) {
+                                map = window[k]; break;
                             }
-                        });
+                        } catch(e) {}
                     }
-                });
+                }
+                if (!map) {
+                    var rd = document.getElementById('cpResult');
+                    if (rd) { rd.innerHTML = '⚠ Mapa no encontrado'; rd.style.color = '#d97706'; }
+                    return;
+                }
+
+                // Build CP index — recursively search ALL layer types
+                var cpIdx = {};
+                var totalFeatures = 0;
+
+                function indexLayer(layer) {
+                    if (layer.feature && layer.feature.properties && ('CP' in layer.feature.properties)) {
+                        var cpVal = String(layer.feature.properties.CP).replace(/\.0$/, '').trim();
+                        while (cpVal.length < 5) cpVal = '0' + cpVal;
+                        cpIdx[cpVal] = layer;
+                        totalFeatures++;
+                    }
+                    if (layer.eachLayer) {
+                        layer.eachLayer(function(sub) { indexLayer(sub); });
+                    }
+                    if (layer._layers) {
+                        for (var id in layer._layers) { indexLayer(layer._layers[id]); }
+                    }
+                }
+                map.eachLayer(function(layer) { indexLayer(layer); });
+
+                var rd = document.getElementById('cpResult');
+                if (rd && totalFeatures > 0) {
+                    rd.innerHTML = totalFeatures + ' CPs indexados ✓';
+                    rd.style.color = '#16a34a';
+                    setTimeout(function() { rd.innerHTML = ''; }, 3000);
+                } else if (rd) {
+                    rd.innerHTML = '⚠ 0 CPs encontrados';
+                    rd.style.color = '#d97706';
+                }
 
                 var hl = null, os = null;
 
                 window.buscarCP = function(cp) {
-                    cp = String(cp).trim();
-                    // Restaurar estilo anterior
-                    if (hl && os) hl.setStyle(os);
+                    cp = String(cp).trim().replace(/\.0$/, '');
+                    while (cp.length < 5) cp = '0' + cp;
+                    if (hl && os) { try { hl.setStyle(os); } catch(e) {} }
 
                     var ly = cpIdx[cp];
                     var rd = document.getElementById('cpResult');
 
                     if (ly) {
-                        // Guardar estilo original
                         os = {
-                            fillColor: ly.options.fillColor,
+                            fillColor: ly.options.fillColor || '#9e9e9e',
                             fillOpacity: ly.options.fillOpacity || 0.45,
                             color: ly.options.color || '#ffffff',
                             weight: ly.options.weight || 1.5
                         };
-                        // Resaltar en rojo
-                        ly.setStyle({
-                            fillColor: '#ff0000',
-                            fillOpacity: 0.7,
-                            color: '#ff0000',
-                            weight: 3
-                        });
+                        ly.setStyle({ fillColor:'#ff0000', fillOpacity:0.7, color:'#ff0000', weight:3 });
                         hl = ly;
-
-                        // Zoom al polígono
-                        map.fitBounds(ly.getBounds(), {padding: [50, 50], maxZoom: 14});
-                        ly.openTooltip();
-
-                        // Mostrar resultado
+                        if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
+                        if (ly.openTooltip) ly.openTooltip();
                         if (rd) {
                             var p = ly.feature.properties;
-                            rd.innerHTML = '\u2714 CP ' + cp + ' \u2014 ' +
-                                (p.ESTADO_PERTENECE || '') +
-                                ' | Vol: ' + (p.VOLUMEN || 0) +
-                                ' | Partners: ' + (p.PARTNERS || 0);
+                            rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') +
+                                ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
                             rd.style.color = '#16a34a';
                         }
                     } else if (rd) {
-                        rd.innerHTML = '\u2718 CP ' + cp + ' no encontrado';
+                        rd.innerHTML = '✘ CP ' + cp + ' no encontrado (' + totalFeatures + ' indexados)';
                         rd.style.color = '#dc2626';
                     }
                 };
 
-                // Leer parámetro URL ?cp=XXXXX
+                // URL parameter ?cp=XXXXX
                 var pr = new URLSearchParams(window.location.search).get('cp');
-                if (pr) setTimeout(function(){ buscarCP(pr); }, 800);
-            })();
+                if (pr) setTimeout(function() { buscarCP(pr); }, 500);
+            }
             </script>
             """
             m.get_root().html.add_child(folium.Element(search_html))
