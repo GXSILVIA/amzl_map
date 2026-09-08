@@ -785,6 +785,104 @@ if st.session_state["authentication_status"]:
             # Control de capas (toggle sin recargar la app)
             folium.LayerControl(position='topright', collapsed=False).add_to(m)
 
+            # ═══════════════════════════════════════════════════════════════
+            # 🔍 BUSCADOR DE CP — Barra de búsqueda + zoom + highlight
+            #    + lectura de parámetro URL ?cp=XXXXX
+            # ═══════════════════════════════════════════════════════════════
+            search_html = """
+            <div id="cpSearchBar" style="
+                position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
+                background:white; padding:8px 14px; border-radius:10px;
+                box-shadow:0 4px 16px rgba(0,0,0,0.25);
+                display:flex; align-items:center; gap:8px;
+                font-family:'Segoe UI',sans-serif;">
+                <span style="font-size:16px">🔍</span>
+                <input id="cpInput" type="text" placeholder="Buscar CP..."
+                    onkeyup="if(event.key==='Enter')buscarCP(this.value)"
+                    style="border:1px solid #e2e8f0; border-radius:6px; padding:6px 12px;
+                    font-size:14px; width:150px; outline:none;" />
+                <button onclick="buscarCP(document.getElementById('cpInput').value)"
+                    style="background:#2563eb; color:white; border:none; border-radius:6px;
+                    padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer;">
+                    Buscar</button>
+                <span id="cpResult" style="font-size:12px; max-width:350px;
+                    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+            </div>
+            <script>
+            (function(){
+                var map = null;
+                for (var k in window) {
+                    try { if (window[k] instanceof L.Map) { map = window[k]; break; } }
+                    catch(e) {}
+                }
+                if (!map) return;
+
+                // Indexar todos los polígonos de CP
+                var cpIdx = {};
+                map.eachLayer(function(ly) {
+                    if (ly.eachLayer) {
+                        ly.eachLayer(function(sub) {
+                            if (sub.feature && sub.feature.properties && sub.feature.properties.CP) {
+                                cpIdx[String(sub.feature.properties.CP)] = sub;
+                            }
+                        });
+                    }
+                });
+
+                var hl = null, os = null;
+
+                window.buscarCP = function(cp) {
+                    cp = String(cp).trim();
+                    // Restaurar estilo anterior
+                    if (hl && os) hl.setStyle(os);
+
+                    var ly = cpIdx[cp];
+                    var rd = document.getElementById('cpResult');
+
+                    if (ly) {
+                        // Guardar estilo original
+                        os = {
+                            fillColor: ly.options.fillColor,
+                            fillOpacity: ly.options.fillOpacity || 0.45,
+                            color: ly.options.color || '#ffffff',
+                            weight: ly.options.weight || 1.5
+                        };
+                        // Resaltar en rojo
+                        ly.setStyle({
+                            fillColor: '#ff0000',
+                            fillOpacity: 0.7,
+                            color: '#ff0000',
+                            weight: 3
+                        });
+                        hl = ly;
+
+                        // Zoom al polígono
+                        map.fitBounds(ly.getBounds(), {padding: [50, 50], maxZoom: 14});
+                        ly.openTooltip();
+
+                        // Mostrar resultado
+                        if (rd) {
+                            var p = ly.feature.properties;
+                            rd.innerHTML = '\u2714 CP ' + cp + ' \u2014 ' +
+                                (p.ESTADO_PERTENECE || '') +
+                                ' | Vol: ' + (p.VOLUMEN || 0) +
+                                ' | Partners: ' + (p.PARTNERS || 0);
+                            rd.style.color = '#16a34a';
+                        }
+                    } else if (rd) {
+                        rd.innerHTML = '\u2718 CP ' + cp + ' no encontrado';
+                        rd.style.color = '#dc2626';
+                    }
+                };
+
+                // Leer parámetro URL ?cp=XXXXX
+                var pr = new URLSearchParams(window.location.search).get('cp');
+                if (pr) setTimeout(function(){ buscarCP(pr); }, 800);
+            })();
+            </script>
+            """
+            m.get_root().html.add_child(folium.Element(search_html))
+
             m_html = m._repr_html_()
             if 'mapa_descarga_html' not in st.session_state or st.session_state.get('_mapa_recien_procesado', False):
                 st.session_state['mapa_descarga_html'] = m_html
