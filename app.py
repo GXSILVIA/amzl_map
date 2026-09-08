@@ -625,14 +625,7 @@ if st.session_state["authentication_status"]:
                 st.session_state.procesado = True
                 st.session_state['_mapa_recien_procesado'] = True
 
-        # ═══════════════════════════════════════════════════════════════
-        # 🎛️ FILTROS EN PANEL (no recargan datos, solo visualización)
-        # ═══════════════════════════════════════════════════════════════
-        if st.session_state.procesado:
-            st.write("---")
-            st.markdown("#### 🎛️ Filtros")
-            mostrar_zonas = st.checkbox("⭕ Mostrar Zonas (Círculos)", value=True, key="mostrar_zonas_check")
-            st.session_state['mostrar_zonas'] = mostrar_zonas
+
 
     with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
@@ -674,9 +667,6 @@ if st.session_state["authentication_status"]:
             gdf_mapa_cp_wgs84['_color_hex'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[0])
             gdf_mapa_cp_wgs84['_rango_txt'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[1])
 
-            # ═══════════════════════════════════════════════════════════════
-            # 🔧 PARTNERS: Asegurar que la columna existe para el tooltip
-            # ═══════════════════════════════════════════════════════════════
             if 'PARTNERS' not in gdf_mapa_cp_wgs84.columns:
                 gdf_mapa_cp_wgs84['PARTNERS'] = 0
             gdf_mapa_cp_wgs84['PARTNERS'] = pd.to_numeric(gdf_mapa_cp_wgs84['PARTNERS'], errors='coerce').fillna(0).astype(int)
@@ -699,22 +689,16 @@ if st.session_state["authentication_status"]:
                     )
                 ).add_to(m)
 
-            # 2. CÍRCULOS DE ZONAS (capa intermedia)
-            # ═══════════════════════════════════════════════════════════════
-            # 🔧 PARTNERS: Construir lookup CP→PARTNERS para mostrar en
-            #    el tooltip de cada círculo/zona
-            # ═══════════════════════════════════════════════════════════════
+            # 2. CÍRCULOS DE ZONAS — en FeatureGroup para toggle sin recargar
             cp_partners_lookup = {}
             if 'PARTNERS' in gdf_cobertura.columns:
                 for _, row_cp in gdf_cobertura.iterrows():
                     cp_partners_lookup[str(row_cp['CP'])] = int(row_cp.get('PARTNERS', 0))
 
-            mostrar_zonas_flag = st.session_state.get('mostrar_zonas', True)
+            fg_zonas = folium.FeatureGroup(name="⭕ Zonas (Círculos)", show=True)
             traslape_zona_lookup = res.get('traslape_por_zona', {})
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
-                if not mostrar_zonas_flag:
-                    continue
                 geom_circulo = r['geometry']
                 cps_bajo_circulo = []
                 for _, cp_row in gdf_cobertura.iterrows():
@@ -747,20 +731,23 @@ if st.session_state["authentication_status"]:
                 tt_lines.append("-------------------------")
                 tt_lines.append(f"<b>CPs Ocupados:</b> {txt_cps_atrapados}")
                 tt_c = "<br>".join(tt_lines)
+
                 folium.GeoJson(
                     geom_circulo,
                     style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
                     tooltip=tt_c
-                ).add_to(m)
+                ).add_to(fg_zonas)
+            fg_zonas.add_to(m)
 
-            # 3. ANILLOS DE FACTIBILIDAD (encima de todo)
-            if st.session_state.get('mostrar_anillos', True) and 'anillos_por_estado' in res:
+            # 3. ANILLOS DE FACTIBILIDAD — en FeatureGroup para toggle sin recargar
+            fg_anillos = folium.FeatureGroup(name="📍 Radios de Factibilidad", show=st.session_state.get('mostrar_anillos', True))
+            if 'anillos_por_estado' in res:
                 for nodo_key, anillos in res['anillos_por_estado'].items():
                     folium.Marker(
                         location=[anillos['centro_lat'], anillos['centro_lon']],
                         icon=folium.Icon(color='purple', icon='crosshairs', prefix='fa'),
                         tooltip=f"Centroide Nodo: {str(nodo_key).upper()}"
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
                     c_lat = anillos['centro_lat']
                     c_lon = anillos['centro_lon']
 
@@ -768,34 +755,37 @@ if st.session_state["authentication_status"]:
                         anillos['r15'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5'},
                         interactive=False
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
                     folium.Marker(
                         location=[c_lat + 0.135, c_lon],
                         icon=folium.DivIcon(html='<div style="font-size:11px;font-weight:bold;color:#e74c3c;white-space:nowrap;pointer-events:none;">15 km</div>', icon_size=(50, 15), icon_anchor=(25, 7))
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
 
                     folium.GeoJson(
                         anillos['r10'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5'},
                         interactive=False
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
                     folium.Marker(
                         location=[c_lat + 0.090, c_lon],
                         icon=folium.DivIcon(html='<div style="font-size:11px;font-weight:bold;color:#d4ac0d;white-space:nowrap;pointer-events:none;">10 km</div>', icon_size=(50, 15), icon_anchor=(25, 7))
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
 
                     folium.GeoJson(
                         anillos['r5'], 
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5'},
                         interactive=False
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
                     folium.Marker(
                         location=[c_lat + 0.045, c_lon],
                         icon=folium.DivIcon(html='<div style="font-size:11px;font-weight:bold;color:#2ecc71;white-space:nowrap;pointer-events:none;">5 km</div>', icon_size=(50, 15), icon_anchor=(25, 7))
-                    ).add_to(m)
+                    ).add_to(fg_anillos)
+            fg_anillos.add_to(m)
+
+            # Control de capas (toggle sin recargar la app)
+            folium.LayerControl(position='topright', collapsed=False).add_to(m)
 
             m_html = m._repr_html_()
-            # Guardar mapa completo (todas las capas) para descarga
             if 'mapa_descarga_html' not in st.session_state or st.session_state.get('_mapa_recien_procesado', False):
                 st.session_state['mapa_descarga_html'] = m_html
                 st.session_state['_mapa_recien_procesado'] = False
