@@ -625,6 +625,15 @@ if st.session_state["authentication_status"]:
                 st.session_state.procesado = True
                 st.session_state['_mapa_recien_procesado'] = True
 
+        # ═══════════════════════════════════════════════════════════════
+        # 🎛️ FILTROS EN PANEL (no recargan datos, solo visualización)
+        # ═══════════════════════════════════════════════════════════════
+        if st.session_state.procesado:
+            st.write("---")
+            st.markdown("#### 🎛️ Filtros")
+            mostrar_zonas = st.checkbox("⭕ Mostrar Zonas (Círculos)", value=True, key="mostrar_zonas_check")
+            st.session_state['mostrar_zonas'] = mostrar_zonas
+
     with col_m:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
@@ -791,13 +800,6 @@ if st.session_state["authentication_status"]:
                 st.session_state['mapa_descarga_html'] = m_html
                 st.session_state['_mapa_recien_procesado'] = False
             components.html(m_html, height=600)
-
-            # ═══════════════════════════════════════════════════════════════
-            # 🎛️ FILTRO: Mostrar/Ocultar Zonas (Círculos)
-            # ═══════════════════════════════════════════════════════════════
-            st.markdown("#### 🎛️ Filtros de Visualización")
-            mostrar_zonas = st.checkbox("⭕ Mostrar Zonas (Círculos)", value=True, key="mostrar_zonas_check")
-            st.session_state['mostrar_zonas'] = mostrar_zonas
 
             st.write("---")
             st.markdown("### 🖥️ Control de Cobertura por Nodo (Albers Equal-Area + Lambert Conformal)")
