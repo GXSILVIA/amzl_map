@@ -433,8 +433,8 @@ if st.session_state["authentication_status"]:
                                 
                                 if cps_actuales_zona_con_pct:
                                     reporte_cp_por_zona.append({
+                                        "Nodo": nodo_iter,
                                         "Zona": zona_row['NOMBRE'],
-                                        "Estado": nodo_iter,
                                         "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona_con_pct))))
                                     })
 
@@ -512,7 +512,13 @@ if st.session_state["authentication_status"]:
                         df_traslape_mc[['Nodo', '% Traslape', 'Nivel']],
                         on='Nodo', how='left'
                     )
+                    df_desglose['% Traslape'] = df_desglose['% Traslape'].fillna('0.00%')
+                    df_desglose['Nivel'] = df_desglose['Nivel'].fillna('⚪ Sin datos')
                     df_desglose.rename(columns={'Nivel': 'Nivel Traslape'}, inplace=True)
+                else:
+                    # Si no hay datos de traslape, agregar columnas con valores por defecto
+                    df_desglose['% Traslape'] = '0.00%'
+                    df_desglose['Nivel Traslape'] = '⚪ Sin datos' 
 
                 # ═══════════════════════════════════════════════════════════════
                 # 🔧 FIX: Guardar gdf_cobertura en session_state para que el
@@ -520,6 +526,14 @@ if st.session_state["authentication_status"]:
                 #    reruns posteriores (al descargar mapa/reporte).
                 # ═══════════════════════════════════════════════════════════════
                 st.session_state['gdf_cobertura_global'] = gdf_cobertura
+
+                # Integrar % Traslape a tabla de CPs por Zona
+                if not df_traslape_mc.empty and not df_cp_por_zona.empty and 'Nodo' in df_cp_por_zona.columns:
+                    df_cp_por_zona = df_cp_por_zona.merge(
+                        df_traslape_mc[['Nodo', '% Traslape']],
+                        on='Nodo', how='left'
+                    )
+                    df_cp_por_zona['% Traslape'] = df_cp_por_zona['% Traslape'].fillna('0.00%')
 
                 st.session_state.resultados = {
                     'estado_nombre': edo_sel,
