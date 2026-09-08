@@ -65,62 +65,60 @@ def obtener_color_rango_cp(v):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🎲 SIMULACIÓN MONTE CARLO: Traslape entre zonas de diferentes nodos
+# 🎲 SIMULACIÓN MONTE CARLO: Traslape entre zonas (círculos) DENTRO de cada nodo
 # ═══════════════════════════════════════════════════════════════════════
 
 def monte_carlo_traslape_por_nodo(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos, n_puntos=10000, seed=42):
     """
-    Calcula el % de traslape por nodo usando simulación Monte Carlo.
-    Para cada nodo, genera n_puntos aleatorios dentro de sus CPs de cobertura
-    y verifica cuántos caen dentro de zonas (círculos) que pertenecen a OTROS nodos.
+    Calcula el % de traslape INTERNO por nodo usando simulación Monte Carlo.
+    Para cada nodo, identifica las zonas (círculos) que le pertenecen,
+    genera puntos aleatorios dentro de la unión de esas zonas y verifica
+    cuántos caen en 2+ círculos a la vez (área de traslape entre zonas).
     
     Returns: list[dict] con Nodo, % Traslape, Nivel
     """
     rng = np.random.RandomState(seed)
 
-    # Construir geometría unificada de círculos por nodo
-    # Primero necesitamos saber qué zonas (círculos) pertenecen a qué nodo
-    # Usamos intersección espacial: una zona pertenece a un nodo si intersecta sus CPs
-    zonas_por_nodo = {}
+    # Identificar qué círculos pertenecen a cada nodo (por intersección con sus CPs)
+    circulos_por_nodo = {}
     for nodo in nodos_unicos:
         cps_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
         if cps_nodo.empty:
             continue
         union_cps_nodo = unary_union(cps_nodo['geometry'].buffer(0))
-        zonas_intersectan = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(union_cps_nodo)]
-        if not zonas_intersectan.empty:
-            zonas_por_nodo[nodo] = unary_union(zonas_intersectan['geometry'].buffer(0))
+        # Obtener los círculos individuales que intersectan este nodo
+        mask = gdf_circles_m_corr['geometry'].intersects(union_cps_nodo)
+        circulos_nodo = gdf_circles_m_corr[mask]
+        if not circulos_nodo.empty and len(circulos_nodo) >= 2:
+            circulos_por_nodo[nodo] = [g.buffer(0) for g in circulos_nodo['geometry']]
     
     resultados = []
     for nodo in nodos_unicos:
-        if nodo not in zonas_por_nodo:
+        if nodo not in circulos_por_nodo:
+            # Nodo con 0 o 1 círculo → no puede haber traslape interno
             resultados.append({"Nodo": nodo, "% Traslape": "0.00%", "Nivel": "⚪ Sin datos"})
             continue
         
-        geom_nodo = zonas_por_nodo[nodo]
-        # Unión de zonas de TODOS los otros nodos
-        otros_nodos_geoms = [zonas_por_nodo[n] for n in zonas_por_nodo if n != nodo]
-        if not otros_nodos_geoms:
-            resultados.append({"Nodo": nodo, "% Traslape": "0.00%", "Nivel": "🟢 BAJO"})
-            continue
-        
-        union_otros = unary_union(otros_nodos_geoms).buffer(0)
-        
-        # Generar puntos aleatorios dentro de la geometría del nodo
-        minx, miny, maxx, maxy = geom_nodo.bounds
+        circulos_lista = circulos_por_nodo[nodo]
+        union_total = unary_union(circulos_lista).buffer(0)
+
+        # Generar puntos aleatorios dentro de la unión de todos los círculos del nodo
+        minx, miny, maxx, maxy = union_total.bounds
         puntos_dentro = 0
         puntos_traslape = 0
         intentos = 0
-        max_intentos = n_puntos * 20  # evitar loop infinito en geometrías pequeñas
+        max_intentos = n_puntos * 20
         
         while puntos_dentro < n_puntos and intentos < max_intentos:
             x = rng.uniform(minx, maxx)
             y = rng.uniform(miny, maxy)
             pt = Point(x, y)
             intentos += 1
-            if geom_nodo.contains(pt):
+            if union_total.contains(pt):
                 puntos_dentro += 1
-                if union_otros.contains(pt):
+                # Contar en cuántos círculos individuales cae este punto
+                n_circulos = sum(1 for c in circulos_lista if c.contains(pt))
+                if n_circulos >= 2:
                     puntos_traslape += 1
         
         if puntos_dentro > 0:
