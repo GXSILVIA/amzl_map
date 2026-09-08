@@ -9,6 +9,7 @@ import streamlit_authenticator as stauth
 from shapely.geometry import Point
 from shapely.ops import unary_union
 import streamlit.components.v1 as components
+from itertools import combinations
 
 st.set_page_config(page_title="Sistema Pro AMZL - Cobertura Albers-Lambert", layout="wide")
 
@@ -63,6 +64,91 @@ def obtener_color_rango_cp(v):
         return "#9e9e9e", "⚪ Desconocido"
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🎲 SIMULACIÓN MONTE CARLO: Traslape entre zonas de diferentes nodos
+# ═══════════════════════════════════════════════════════════════════════
+
+def monte_carlo_traslape_por_nodo(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos, n_puntos=10000, seed=42):
+    """
+    Calcula el % de traslape por nodo usando simulación Monte Carlo.
+    Para cada nodo, genera n_puntos aleatorios dentro de sus CPs de cobertura
+    y verifica cuántos caen dentro de zonas (círculos) que pertenecen a OTROS nodos.
+    
+    Returns: list[dict] con Nodo, % Traslape, Puntos Totales, Puntos en Traslape, Nivel
+    """
+    rng = np.random.RandomState(seed)
+
+    # Construir geometría unificada de círculos por nodo
+    # Primero necesitamos saber qué zonas (círculos) pertenecen a qué nodo
+    # Usamos intersección espacial: una zona pertenece a un nodo si intersecta sus CPs
+    zonas_por_nodo = {}
+    for nodo in nodos_unicos:
+        cps_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
+        if cps_nodo.empty:
+            continue
+        union_cps_nodo = unary_union(cps_nodo['geometry'].buffer(0))
+        zonas_intersectan = gdf_circles_m_corr[gdf_circles_m_corr['geometry'].intersects(union_cps_nodo)]
+        if not zonas_intersectan.empty:
+            zonas_por_nodo[nodo] = unary_union(zonas_intersectan['geometry'].buffer(0))
+    
+    resultados = []
+    for nodo in nodos_unicos:
+        if nodo not in zonas_por_nodo:
+            resultados.append({"Nodo": nodo, "% Traslape": "0.00%", "Puntos Totales": 0, "Puntos en Traslape": 0, "Nivel": "⚪ Sin datos"})
+            continue
+        
+        geom_nodo = zonas_por_nodo[nodo]
+        # Unión de zonas de TODOS los otros nodos
+        otros_nodos_geoms = [zonas_por_nodo[n] for n in zonas_por_nodo if n != nodo]
+        if not otros_nodos_geoms:
+            resultados.append({"Nodo": nodo, "% Traslape": "0.00%", "Puntos Totales": n_puntos, "Puntos en Traslape": 0, "Nivel": "🟢 BAJO"})
+            continue
+        
+        union_otros = unary_union(otros_nodos_geoms).buffer(0)
+        
+        # Generar puntos aleatorios dentro de la geometría del nodo
+        minx, miny, maxx, maxy = geom_nodo.bounds
+        puntos_dentro = 0
+        puntos_traslape = 0
+        intentos = 0
+        max_intentos = n_puntos * 20  # evitar loop infinito en geometrías pequeñas
+        
+        while puntos_dentro < n_puntos and intentos < max_intentos:
+            x = rng.uniform(minx, maxx)
+            y = rng.uniform(miny, maxy)
+            pt = Point(x, y)
+            intentos += 1
+            if geom_nodo.contains(pt):
+                puntos_dentro += 1
+                if union_otros.contains(pt):
+                    puntos_traslape += 1
+        
+        if puntos_dentro > 0:
+            pct = (puntos_traslape / puntos_dentro) * 100
+        else:
+            pct = 0.0
+        
+        # Clasificar nivel
+        if pct < 25:
+            nivel = "🟢 BAJO"
+        elif pct < 50:
+            nivel = "🟡 MEDIO"
+        elif pct < 75:
+            nivel = "🟠 ALTO"
+        else:
+            nivel = "🔴 CRÍTICO"
+        
+        resultados.append({
+            "Nodo": nodo,
+            "% Traslape": f"{round(pct, 2)}%",
+            "Puntos Totales": puntos_dentro,
+            "Puntos en Traslape": puntos_traslape,
+            "Nivel": nivel
+        })
+    
+    return resultados
+
+
 with open('config.yaml') as f:
     config = yaml.load(f, SafeLoader)
 
@@ -106,15 +192,27 @@ if st.session_state["authentication_status"]:
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
+
+                # ═══════════════════════════════════════════════════════════
+                # 🔧 PARTNERS: Convertir a numérico antes de consolidar
+                # ═══════════════════════════════════════════════════════════
+                if 'PARTNERS' in df_poly_user.columns:
+                    df_poly_user['PARTNERS'] = pd.to_numeric(df_poly_user['PARTNERS'], errors='coerce').fillna(0).astype(int)
+
                 # Consolidar duplicados: sumamos volúmenes y mantenemos la primera ZONA
                 if 'VOLUMEN' in df_poly_user.columns:
                     df_poly_user['VOLUMEN'] = pd.to_numeric(df_poly_user['VOLUMEN'], errors='coerce').fillna(0)
                     agg_dict = {'VOLUMEN': 'sum'}
                     if 'ZONA' in df_poly_user.columns:
                         agg_dict['ZONA'] = 'first'
+                    # ═══════════════════════════════════════════════════════
+                    # 🔧 PARTNERS: Sumar partners al consolidar CPs duplicados
+                    # ═══════════════════════════════════════════════════════
+                    if 'PARTNERS' in df_poly_user.columns:
+                        agg_dict['PARTNERS'] = 'sum'
                     # Preservar todas las demás columnas con 'first'
                     for col in df_poly_user.columns:
-                        if col not in ['CP', 'VOLUMEN', 'ZONA']:
+                        if col not in ['CP', 'VOLUMEN', 'ZONA', 'PARTNERS']:
                             agg_dict[col] = 'first'
                     df_poly_user = df_poly_user.groupby('CP', as_index=False).agg(agg_dict)
                 else:
@@ -347,17 +445,24 @@ if st.session_state["authentication_status"]:
                 if not df_cp_por_estado.empty:
                     df_cp_por_estado = df_cp_por_estado[["Estado", "Estatus", "CP"]]
 
-                desglose_estados = []
-                for est in estados_con_cobertura_real:
-                    sub_cob = gdf_cobertura_m[gdf_cobertura_m['ESTADO_PERTENECE'] == est]
-                    if not sub_cob.empty:
-                        g_cob_est = unary_union(sub_cob['geometry'].buffer(0))
+                # ═══════════════════════════════════════════════════════════════
+                # 📊 DESGLOSE POR NODO (ZONA) — Territorio, Ocupado, Libre, Eficiencia
+                # ═══════════════════════════════════════════════════════════════
+                desglose_nodos = []
+                for nodo in nodos_unicos_maestro:
+                    sub_cob_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
+                    if not sub_cob_nodo.empty:
+                        # Estado(s) al que pertenece este nodo
+                        estados_nodo = sub_cob_nodo['ESTADO_PERTENECE'].unique()
+                        estado_txt = ", ".join(sorted([e.upper() for e in estados_nodo]))
 
-                        cob_km2 = g_cob_est.area / 1000000.0
+                        g_cob_nodo = unary_union(sub_cob_nodo['geometry'].buffer(0))
+
+                        cob_km2 = g_cob_nodo.area / 1000000.0
                         
                         if union_total_partners_m is not None:
                             union_total_partners_clean = union_total_partners_m.buffer(0)
-                            interseccion_ocupada = g_cob_est.intersection(union_total_partners_clean)
+                            interseccion_ocupada = g_cob_nodo.intersection(union_total_partners_clean)
                             ocu_km2 = interseccion_ocupada.area / 1000000.0
                         else:
                             ocu_km2 = 0.0
@@ -369,20 +474,48 @@ if st.session_state["authentication_status"]:
                         else:
                             eficiencia = 0.0
 
-                        desglose_estados.append({
-                            "Estado": est.upper(),
+                        # Volumen y Partners totales del nodo
+                        vol_nodo = sub_cob_nodo['VOLUMEN'].sum() if 'VOLUMEN' in sub_cob_nodo.columns else 0
+                        partners_nodo = sub_cob_nodo['PARTNERS'].sum() if 'PARTNERS' in sub_cob_nodo.columns else 0
+                        num_cps_nodo = len(sub_cob_nodo)
+
+                        desglose_nodos.append({
+                            "Nodo": nodo,
+                            "Estado": estado_txt,
+                            "CPs": num_cps_nodo,
+                            "Volumen Total": int(vol_nodo),
+                            "Partners": int(partners_nodo),
                             "Territorio Cobertura Total (km²)": round(cob_km2, 2),
                             "Territorio Ocupado Total (km²)": round(ocu_km2, 2),
                             "Territorio Libre Total (km²)": round(lib_km2, 2),
                             "Eficiencia de Ocupación": f"{round(eficiencia, 2)}%"
                         })
 
-                df_desglose = pd.DataFrame(desglose_estados)
+                df_desglose = pd.DataFrame(desglose_nodos)
                 if df_desglose.empty:
-                    df_desglose = pd.DataFrame(columns=["Estado", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
+                    df_desglose = pd.DataFrame(columns=["Nodo", "Estado", "CPs", "Volumen Total", "Partners", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
 
-                estados_validos = df_desglose['Estado'].unique().tolist()
-                gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ESTADO_PERTENECE'].isin(estados_validos)]
+                nodos_validos = df_desglose['Nodo'].unique().tolist() if not df_desglose.empty else []
+                gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ZONA'].isin(nodos_validos)] if nodos_validos else gdf_cobertura
+
+                # ═══════════════════════════════════════════════════════════════
+                # 🎲 MONTE CARLO: Calcular traslape entre zonas de cada nodo
+                # ═══════════════════════════════════════════════════════════════
+                resultados_mc = monte_carlo_traslape_por_nodo(
+                    gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_maestro, n_puntos=10000, seed=42
+                )
+                df_traslape_mc = pd.DataFrame(resultados_mc)
+                if df_traslape_mc.empty:
+                    df_traslape_mc = pd.DataFrame(columns=["Nodo", "% Traslape", "Puntos Totales",
+                                                            "Puntos en Traslape", "Nivel"])
+
+                # Integrar % Traslape y Nivel al desglose por nodo
+                if not df_traslape_mc.empty and not df_desglose.empty:
+                    df_desglose = df_desglose.merge(
+                        df_traslape_mc[['Nodo', '% Traslape', 'Nivel']],
+                        on='Nodo', how='left'
+                    )
+                    df_desglose.rename(columns={'Nivel': 'Nivel Traslape'}, inplace=True)
 
                 # ═══════════════════════════════════════════════════════════════
                 # 🔧 FIX: Guardar gdf_cobertura en session_state para que el
@@ -403,7 +536,8 @@ if st.session_state["authentication_status"]:
                     }),
                     'df_cp_por_estado': df_cp_por_estado,
                     'df_cp_por_zona': df_cp_por_zona,
-                    'anillos_por_estado': anillos_por_estado
+                    'anillos_por_estado': anillos_por_estado,
+                    'df_traslape_mc': df_traslape_mc
                 }
                 st.session_state.procesado = True
                 st.session_state['_mapa_recien_procesado'] = True
@@ -448,6 +582,13 @@ if st.session_state["authentication_status"]:
             gdf_mapa_cp_wgs84['_color_hex'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[0])
             gdf_mapa_cp_wgs84['_rango_txt'] = gdf_mapa_cp_wgs84['VOLUMEN'].apply(lambda v: obtener_color_rango_cp(v)[1])
 
+            # ═══════════════════════════════════════════════════════════════
+            # 🔧 PARTNERS: Asegurar que la columna existe para el tooltip
+            # ═══════════════════════════════════════════════════════════════
+            if 'PARTNERS' not in gdf_mapa_cp_wgs84.columns:
+                gdf_mapa_cp_wgs84['PARTNERS'] = 0
+            gdf_mapa_cp_wgs84['PARTNERS'] = pd.to_numeric(gdf_mapa_cp_wgs84['PARTNERS'], errors='coerce').fillna(0).astype(int)
+
             filtro_cps_activo = st.session_state.get('filtro_cps_activo', [])
             if filtro_cps_activo:
                 gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_rango_txt'].isin(filtro_cps_activo)]
@@ -464,13 +605,22 @@ if st.session_state["authentication_status"]:
                         'fillOpacity': 0.45
                     },
                     tooltip=folium.GeoJsonTooltip(
-                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_rango_txt'],
-                        aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Rango:'],
+                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', 'PARTNERS', '_rango_txt'],
+                        aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Partners:', 'Rango:'],
                         localize=True
                     )
                 ).add_to(m)
 
             # 2. CÍRCULOS DE ZONAS (capa intermedia)
+            # ═══════════════════════════════════════════════════════════════
+            # 🔧 PARTNERS: Construir lookup CP→PARTNERS para mostrar en
+            #    el tooltip de cada círculo/zona
+            # ═══════════════════════════════════════════════════════════════
+            cp_partners_lookup = {}
+            if 'PARTNERS' in gdf_cobertura.columns:
+                for _, row_cp in gdf_cobertura.iterrows():
+                    cp_partners_lookup[str(row_cp['CP'])] = int(row_cp.get('PARTNERS', 0))
+
             filtro_zonas_activo = st.session_state.get('filtro_zonas_activo', [])
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
@@ -481,14 +631,27 @@ if st.session_state["authentication_status"]:
                 for _, cp_row in gdf_cobertura.iterrows():
                     if geom_circulo.intersects(cp_row['geometry']):
                         cps_bajo_circulo.append(str(cp_row['CP']))
-                txt_cps_atrapados = ", ".join(sorted(list(set(cps_bajo_circulo)))) if cps_bajo_circulo else "Ninguno"
+                # ═══════════════════════════════════════════════════════════
+                # 🔧 PARTNERS: Agregar conteo de partners por CP en tooltip
+                # ═══════════════════════════════════════════════════════════
+                if cps_bajo_circulo:
+                    cps_unicos = sorted(list(set(cps_bajo_circulo)))
+                    txt_cps_con_partners = ", ".join(
+                        [f"{cp} ({cp_partners_lookup.get(cp, 0)}p)" for cp in cps_unicos]
+                    )
+                    total_partners_zona = sum(cp_partners_lookup.get(cp, 0) for cp in cps_unicos)
+                else:
+                    txt_cps_con_partners = "Ninguno"
+                    total_partners_zona = 0
+
                 tt_c = (
                     f"<b>Zona Operativa: {r['NOMBRE']}</b><br>"
                     f"Rango: {r_text}<br>"
                     f"Volumen: {r['VOLUMEN']}<br>"
                     f"Radio Ope: {r['RADIO']}m<br>"
+                    f"<b>Partners Totales: {total_partners_zona}</b><br>"
                     f"-------------------------<br>"
-                    f"<b>CPs Ocupados Abajo:</b> {txt_cps_atrapados}"
+                    f"<b>CPs Ocupados (partners):</b> {txt_cps_con_partners}"
                 )
                 folium.GeoJson(
                     geom_circulo,
@@ -578,9 +741,13 @@ if st.session_state["authentication_status"]:
                 st.session_state['filtro_cps_activo'] = filtro_cps
 
             st.write("---")
-            st.markdown("### 🖥️ Control de Cobertura (Albers Equal-Area + Lambert Conformal)")
+            st.markdown("### 🖥️ Control de Cobertura por Nodo (Albers Equal-Area + Lambert Conformal)")
             st.markdown(f"**Filtro de Consulta Activo:** `{res['estado_nombre']}`")
             st.dataframe(res['df_desglose'], use_container_width=True, hide_index=True)
+
+            st.markdown("### 🎲 Análisis de Traslape por Nodo")
+            st.markdown("_Porcentaje de traslape de las zonas operativas de cada nodo._")
+            st.dataframe(res['df_traslape_mc'], use_container_width=True, hide_index=True)
 
             st.markdown("### 📍 Cobertura y Proximidad de Códigos Postales por Estado")
             st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
@@ -595,10 +762,11 @@ if st.session_state["authentication_status"]:
             with c2:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                    res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Estado')
+                    res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Nodo')
                     res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalles')
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Estado')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
+                    res['df_traslape_mc'].to_excel(writer, index=False, sheet_name='Traslape entre Zonas')
 
                 st.download_button(label="📊 Descargar Reporte Excel", data=buf.getvalue(), file_name=f"Reporte_{res['estado_nombre']}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
 
