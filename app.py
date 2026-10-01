@@ -84,11 +84,11 @@ def calcular_traslape_real(p1, otros_pts):
     """
     Monte Carlo vectorizado — misma función de app_sistema_pro.py.
     Genera 10,000 puntos dentro del círculo p1 y mide cuántos caen en otros círculos.
-    
+
     Args:
         p1: dict con LAT, LON, RAD, NOM
         otros_pts: lista de dicts con LAT, LON, RAD, NOM
-    
+
     Returns:
         porcentaje_global, zonas_intersecadas, desglose [{NOM, PCT}]
     """
@@ -135,7 +135,7 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
     """
     Calcula traslape por zona y por nodo usando Monte Carlo vectorizado.
     Usa las coordenadas GPS originales de los círculos (LATITUD, LONGITUD, RADIO).
-    
+
     Returns:
         traslape_por_zona: {nombre_zona: {"pct": float, "nivel": str, "nodo": str, "desglose": list}}
         resultados_nodo: [{"Nodo": str, "% Traslape": str, "Nivel": str}]
@@ -164,30 +164,30 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
     # 2. Calcular traslape por zona usando Monte Carlo (igual que Sistema Pro)
     np.random.seed(42)  # Semilla fija para reproducibilidad
     traslape_por_zona = {}
-    
+
     for i, circ in enumerate(circulos_con_nodo):
         nombre = circ['NOM']
         nodo = circ['nodo']
-        
+
         # Otros círculos del MISMO nodo (excluir el actual)
         otros = [c for j, c in enumerate(circulos_con_nodo) if j != i and c['nodo'] == nodo]
-        
+
         if not otros:
             traslape_por_zona[nombre] = {
                 "pct": 0.0, "nivel": "🟢 BAJO", "nodo": nodo, "desglose": []
             }
             continue
-        
+
         pct, zonas_inter, desglose = calcular_traslape_real(circ, otros)
         pct = round(pct, 1)
-        
+
         traslape_por_zona[nombre] = {
             "pct": pct,
             "nivel": clasificar_nivel_traslape(pct),
             "nodo": nodo,
             "desglose": desglose
         }
-    
+
     # 3. Agregar por nodo: promedio de traslape de sus zonas
     nodo_traslapes = {}
     for nombre, datos in traslape_por_zona.items():
@@ -195,7 +195,7 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
         if nodo not in nodo_traslapes:
             nodo_traslapes[nodo] = []
         nodo_traslapes[nodo].append(datos['pct'])
-    
+
     resultados_nodo = []
     for nodo in nodos_unicos:
         if nodo in nodo_traslapes and nodo_traslapes[nodo]:
@@ -207,8 +207,135 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
             "% Traslape": f"{pct_promedio}%",
             "Nivel": clasificar_nivel_traslape(pct_promedio)
         })
-    
+
     return traslape_por_zona, resultados_nodo
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 📦 UPSIDE: Paquetes adicionales que cada zona puede capturar de cada CP
+# ═══════════════════════════════════════════════════════════════════════
+
+def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_maestro):
+    """
+    Calcula el UPSIDE (paquetes adicionales capturables) de cada ZONA sobre cada CP.
+
+    Lógica (confirmada por la usuaria):
+      - Un CP tiene VOLUMEN total de paquetes (del primer archivo de cobertura).
+      - Una zona que cubre X% del área del CP puede capturar X% del volumen de ese CP.
+      - Cuando VARIAS zonas se traslapan sobre el mismo pedazo del CP, el volumen de
+        ese pedazo se REPARTE equitativamente entre las zonas que lo cubren (reparto 1/k),
+        para que la suma de upsides nunca supere el volumen realmente cubierto.
+
+    Método Monte Carlo por CP:
+      - Se lanzan N puntos aleatorios dentro del polígono del CP.
+      - Para cada punto se cuenta cuántas zonas (k) lo cubren.
+      - Cada zona que cubre el punto recibe un peso de 1/k.
+      - Upside_zona_sobre_CP = VOLUMEN_CP × (suma_pesos_zona / N)
+
+    Todas las geometrías deben estar en el MISMO CRS proyectado (metros).
+
+    Returns:
+        upside_por_zona: {nombre_zona: {"total": int, "por_cp": [{"CP": str, "pct": float, "upside": int}]}}
+        upside_por_cp_zona: {(nombre_zona, cp_str): upside_int}  (lookup auxiliar)
+        upside_ocupado_por_cp: {cp_str: upside_total_ocupado_int}  (suma de upsides de todas las zonas sobre el CP)
+    """
+    N = 2000  # puntos por CP (balance precisión/velocidad)
+    rng = np.random.default_rng(42)
+
+    # Preparar lista de zonas con geometría proyectada
+    zonas = []
+    for _, zrow in gdf_circles_m_corr.iterrows():
+        if zrow['geometry'] is not None and not zrow['geometry'].is_empty:
+            zonas.append({
+                'NOM': zrow['NOMBRE'],
+                'geom': zrow['geometry']
+            })
+
+    if not zonas:
+        return {}, {}
+
+    # Acumuladores
+    upside_por_zona = {z['NOM']: {"total": 0.0, "por_cp": []} for z in zonas}
+    upside_por_cp_zona = {}
+    upside_ocupado_por_cp = {}  # cp_str -> suma de upsides de todas las zonas sobre ese CP
+
+    # Recorremos TODOS los CPs de la cobertura (de todos los nodos)
+    for _, cp_row in gdf_cobertura_m.iterrows():
+        geom_cp = cp_row['geometry'].buffer(0)
+        if geom_cp.is_empty or geom_cp.area <= 0:
+            continue
+
+        vol_cp = pd.to_numeric(cp_row.get('VOLUMEN', 0), errors='coerce')
+        vol_cp = 0 if pd.isna(vol_cp) else float(vol_cp)
+        cp_str = str(cp_row['CP'])
+
+        # Zonas que realmente intersectan este CP (prefiltro para eficiencia)
+        zonas_cp = [z for z in zonas if z['geom'].intersects(geom_cp)]
+        if not zonas_cp or vol_cp <= 0:
+            continue
+
+        # Muestreo Monte Carlo de puntos dentro del polígono del CP
+        minx, miny, maxx, maxy = geom_cp.bounds
+        pts_x = rng.uniform(minx, maxx, N)
+        pts_y = rng.uniform(miny, maxy, N)
+
+        # Peso acumulado por zona (suma de 1/k) y conteo de puntos dentro del CP
+        pesos = {z['NOM']: 0.0 for z in zonas_cp}
+        puntos_dentro = 0
+
+        from shapely.geometry import Point as _Pt
+        # Pre-preparar geometrías para contains rápido
+        from shapely.prepared import prep
+        geom_cp_prep = prep(geom_cp)
+        zonas_prep = [(z['NOM'], prep(z['geom'])) for z in zonas_cp]
+
+        for i in range(N):
+            p = _Pt(pts_x[i], pts_y[i])
+            if not geom_cp_prep.contains(p):
+                continue
+            puntos_dentro += 1
+            # ¿Qué zonas cubren este punto?
+            cubren = [nom for (nom, gp) in zonas_prep if gp.contains(p)]
+            k = len(cubren)
+            if k == 0:
+                continue
+            w = 1.0 / k
+            for nom in cubren:
+                pesos[nom] += w
+
+        if puntos_dentro == 0:
+            continue
+
+        # Upside de cada zona sobre este CP
+        for nom, peso in pesos.items():
+            if peso <= 0:
+                continue
+            # fracción del volumen del CP asignada a esta zona (ya con reparto 1/k)
+            frac = peso / puntos_dentro
+            upside_val = vol_cp * frac
+            upside_int = int(round(upside_val))
+            if upside_int <= 0:
+                continue
+            # % que esta zona cubre del CP (sin reparto, para mostrar contexto)
+            # = (puntos de la zona / puntos_dentro) — aproximado contando cobertura simple
+            pct_cobertura = round((peso / puntos_dentro) * 100 * 1.0, 1)
+            upside_por_zona[nom]["total"] += upside_int
+            upside_por_zona[nom]["por_cp"].append({
+                "CP": cp_str,
+                "pct": pct_cobertura,
+                "upside": upside_int
+            })
+            upside_por_cp_zona[(nom, cp_str)] = upside_int
+            # Acumular upside ocupado total de este CP (suma de todas las zonas encima)
+            upside_ocupado_por_cp[cp_str] = upside_ocupado_por_cp.get(cp_str, 0) + upside_int
+
+    # Redondear totales a enteros
+    for nom in upside_por_zona:
+        upside_por_zona[nom]["total"] = int(round(upside_por_zona[nom]["total"]))
+        # Ordenar desglose por upside desc
+        upside_por_zona[nom]["por_cp"].sort(key=lambda d: d["upside"], reverse=True)
+
+    return upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp
 
 
 with open('config.yaml') as f:
@@ -245,6 +372,15 @@ if st.session_state["authentication_status"]:
 
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
+
+        # 🖱️ Control de comportamiento del tooltip de los círculos:
+        #    ✅ Activado  = se muestra al PASAR EL CURSOR (hover)
+        #    ⬜ Desactivado = se muestra al HACER CLICK (popup)
+        tooltip_hover = st.checkbox(
+            "🖱️ Mostrar info de zonas al pasar el cursor (desactiva = al hacer click)",
+            value=True
+        )
+        st.session_state['tooltip_hover'] = tooltip_hover
 
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
             with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
@@ -295,14 +431,14 @@ if st.session_state["authentication_status"]:
                             g = gpd.read_file(p)
                             g['ESTADO_PERTENECE'] = e
                             gdfs.append(g)
-            
+
                     if not gdfs:
                         return gpd.GeoDataFrame()
-        
+
                     gdf_base = pd.concat(gdfs, ignore_index=True)
                     cp_col = next((c for c in ['d_codigo', 'd_cp', 'CP', 'CODIGOPOSTAL', 'cp'] if c in gdf_base.columns), gdf_base.columns[0])
                     gdf_base[cp_col] = gdf_base[cp_col].astype(str).apply(normalizar_cp)
-    
+
                     gdf_cob = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
                     return gdf_cob
 
@@ -339,7 +475,7 @@ if st.session_state["authentication_status"]:
                 nombre_archivo_zonas = f_zonas.name if hasattr(f_zonas, 'name') else "JUNIO.xlsx"
                 mes_extraido = os.path.splitext(nombre_archivo_zonas)[0].upper()
                 gdf_circles_m['Territorio MES'] = mes_extraido
-                
+
                 if 'geometry' in gdf_circles_m.columns and not gdf_cobertura.empty:
                     circles_gps = gdf_circles_m.to_crs(gdf_cobertura.crs)
                     joined = gpd.sjoin(circles_gps, gdf_cobertura[['geometry', 'ESTADO_PERTENECE']], how='left', predicate='intersects')
@@ -352,7 +488,7 @@ if st.session_state["authentication_status"]:
                     if row['RADIO'] < 100:
                         base_geom = gdf_circles[gdf_circles['NOMBRE'] == row['NOMBRE']]['geometry'].to_crs(CRS_DISTANCIAS).iloc[0]
                         gdf_circles_m_corr.at[idx, 'geometry'] = base_geom.buffer(row['RADIO'] * 1000)
-                
+
                 reporte_cp_por_zona = []
                 reporte_cp_por_estado = []
                 anillos_por_estado = {}
@@ -363,32 +499,32 @@ if st.session_state["authentication_status"]:
                 # Proyecciones Lambert para cálculos de distancia radial
                 gdf_cobertura_lambert = gdf_cobertura.to_crs(CRS_DISTANCIAS)
                 gdf_circles_m_lambert = gdf_circles_m_corr.to_crs(CRS_DISTANCIAS)
-                
+
                 for nodo in nodos_unicos_maestro:
                     cob_nodo_completa = gdf_cobertura[gdf_cobertura['ZONA'] == nodo]
                     if cob_nodo_completa.empty or gdf_circles_m_lambert.empty:
                         continue
-                        
+
                     g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
-                    
+
                     partners_del_nodo = gdf_circles_m_lambert[gdf_circles_m_lambert['geometry'].intersects(g_cob_nodo_global)]
-                    
+
                     if partners_del_nodo.empty:
                         centroide_temp_cob = g_cob_nodo_global.centroid
                         distancias_a_partners = gdf_circles_m_lambert['geometry'].distance(centroide_temp_cob)
                         partners_del_nodo = gdf_circles_m_lambert.loc[[distancias_a_partners.idxmin()]]
-                    
+
                     masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
                     centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
-                    
+
                     centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
-                    
+
                     pt_gps = gpd.GeoSeries([centroide_acumulacion_nodo_m], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0]
-                    
+
                     b5 = centroide_acumulacion_nodo_m.buffer(5000)
                     b10 = centroide_acumulacion_nodo_m.buffer(10000)
                     b15 = centroide_acumulacion_nodo_m.buffer(15000)
-                    
+
                     anillos_por_estado[nodo] = {
                         'centro_lat': pt_gps.y,
                         'centro_lon': pt_gps.x,
@@ -399,44 +535,53 @@ if st.session_state["authentication_status"]:
 
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
+                # ═══════════════════════════════════════════════════════════════
+                # 📦 CÁLCULO DE UPSIDE: paquetes capturables por zona sobre cada CP
+                #    (Monte Carlo por CP con reparto 1/k en zonas traslapadas)
+                #    Se usa gdf_cobertura_m (Albers) para áreas precisas.
+                # ═══════════════════════════════════════════════════════════════
+                upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp = calcular_upside_por_zona(
+                    gdf_cobertura_m, gdf_circles_m_corr.to_crs(CRS_AREAS), nodos_unicos_maestro
+                )
+
                 for nodo_iter in nodos_unicos_maestro:
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo_iter]
                     # Proyección Lambert del mismo subconjunto para cálculos de distancia
                     sub_cob_lambert = gdf_cobertura_lambert[gdf_cobertura_lambert['ZONA'] == nodo_iter]
                     if not sub_cob.empty:
-                        
+
                         cps_cubiertos_100 = set()
                         cps_cubiertos_parcial = set()
                         cps_parciales_faltantes_porc = set()
                         cps_perimetro_5km = set()
                         cps_perimetro_5_10km = set()
                         cps_perimetro_gt10km = set()
-                        
+
                         for _, cp_row in sub_cob.iterrows():
                             area_real_cp_fija = cp_row['geometry'].area  # Albers → área precisa
                             if area_real_cp_fija <= 0:
                                 continue
-                                
+
                             geom_cp = cp_row['geometry'].buffer(0)  # Albers para intersección de áreas
                             cp_str = cp_row['CP']
                             zona_lbl = cp_row.get('ZONA', 'S/N')
-                            
+
                             if union_total_partners_m is not None and union_total_partners_m.intersects(geom_cp):
                                 try:
                                     area_interseccion = geom_cp.intersection(union_total_partners_m).area
                                     porcentaje_cobertura = (area_interseccion / area_real_cp_fija) * 100
                                 except Exception:
                                     porcentaje_cobertura = 50.0
-                                
+
                                 porcentaje_cobertura = min(100.0, porcentaje_cobertura)
-                                
+
                                 if porcentaje_cobertura >= 95:
                                     cps_cubiertos_100.add(f"{cp_str}")
                                 else:
                                     cps_cubiertos_parcial.add(f"{cp_str} ({round(porcentaje_cobertura, 0)}%)")
                                     porcentaje_faltante = 100 - porcentaje_cobertura
                                     cps_parciales_faltantes_porc.add(f"{cp_str} ({round(porcentaje_faltante, 0)}%)")
-                                
+
                                 if porcentaje_cobertura < 0.01:
                                     cp_str = f"LIBRE - {cp_str}"
                             else:
@@ -447,7 +592,7 @@ if st.session_state["authentication_status"]:
 
                             if centroides_nodos_globales:
                                 distancia_al_centroide = min([centroide.distance(centroide_cp_lambert) for centroide in centroides_nodos_globales])
-                                
+
                                 if distancia_al_centroide <= 5000:
                                     cps_perimetro_5km.add(f"{cp_str}")
                                 elif distancia_al_centroide <= 10000:
@@ -458,16 +603,16 @@ if st.session_state["authentication_status"]:
                                 cps_perimetro_gt10km.add(f"{cp_str}")
 
                         cps_reales_primer_archivo = set(sub_cob['CP'].astype(str).tolist())
-                        
+
                         cps_solo_libres = [cp for cp in (list(cps_perimetro_5km) + list(cps_perimetro_5_10km) + list(cps_perimetro_gt10km)) if "LIBRE" in cp]
                         cps_solo_libres_clean = [cp.replace("LIBRE - ", "") for cp in cps_solo_libres]
-                        
+
                         cps_libres_filtrados = [cp for cp in cps_solo_libres_clean if cp in cps_reales_primer_archivo]
-                        
+
                         cps_p5_limpios = [cp for cp in cps_perimetro_5km if "LIBRE" not in cp]
                         cps_p10_limpios = [cp for cp in cps_perimetro_5_10km if "LIBRE" not in cp]
                         cps_p15_limpios = [cp for cp in cps_perimetro_gt10km if "LIBRE" not in cp]
-                        
+
                         reporte_cp_por_estado.append({"Nodo": nodo_iter, "Estatus": "Cubierto Total (100%)", "CP": ", ".join(sorted(list(cps_cubiertos_100))) if cps_cubiertos_100 else "Ninguno"})
                         reporte_cp_por_estado.append({"Nodo": nodo_iter, "Estatus": "Cubierto Parcial (~50%)", "CP": ", ".join(sorted(list(cps_cubiertos_parcial))) if cps_cubiertos_parcial else "Ninguno"})
                         reporte_cp_por_estado.append({"Nodo": nodo_iter, "Estatus": "libre", "CP": ", ".join(sorted(cps_libres_filtrados)) if cps_libres_filtrados else "Ninguno"})
@@ -493,13 +638,19 @@ if st.session_state["authentication_status"]:
                                             pct = 0.0
                                         # Solo incluir CPs con cobertura real (>= 1%)
                                         if round(pct) >= 1:
-                                            cps_actuales_zona_con_pct.append(f"{cp_row['CP']} ({round(pct)}%)")
-                                
+                                            # 📦 UPSIDE de esta zona sobre este CP (reparto 1/k)
+                                            up_val = upside_por_cp_zona.get((zona_row['NOMBRE'], str(cp_row['CP'])), 0)
+                                            cps_actuales_zona_con_pct.append(
+                                                f"{cp_row['CP']} ({round(pct)}% → Upside {up_val})"
+                                            )
+
                                 if cps_actuales_zona_con_pct:
+                                    up_total_zona = upside_por_zona.get(zona_row['NOMBRE'], {}).get('total', 0)
                                     reporte_cp_por_zona.append({
                                         "Nodo": nodo_iter,
                                         "Zona": zona_row['NOMBRE'],
-                                        "CPs Cubiertos": ", ".join(sorted(list(set(cps_actuales_zona_con_pct))))
+                                        "CPs Cubiertos (% → Upside pqts)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
+                                        "Upside Total (pqts)": up_total_zona
                                     })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
@@ -521,16 +672,16 @@ if st.session_state["authentication_status"]:
                         g_cob_nodo = unary_union(sub_cob_nodo['geometry'].buffer(0))
 
                         cob_km2 = g_cob_nodo.area / 1000000.0
-                        
+
                         if union_total_partners_m is not None:
                             union_total_partners_clean = union_total_partners_m.buffer(0)
                             interseccion_ocupada = g_cob_nodo.intersection(union_total_partners_clean)
                             ocu_km2 = interseccion_ocupada.area / 1000000.0
                         else:
                             ocu_km2 = 0.0
-                            
+
                         lib_km2 = max(0.0, cob_km2 - ocu_km2)
-                        
+
                         if cob_km2 > 0:
                             eficiencia = (ocu_km2 / cob_km2) * 100.0
                         else:
@@ -568,7 +719,7 @@ if st.session_state["authentication_status"]:
                 gdf_circles_para_traslape['RADIO_ORIG'] = df_zonas_user['RADIO'].values
                 # Usar RADIO original en metros para el Monte Carlo
                 gdf_circles_para_traslape['RADIO'] = gdf_circles_para_traslape['RADIO_ORIG']
-                
+
                 traslape_por_zona, resultados_mc = calcular_traslape_por_zona(
                     gdf_cobertura.to_crs("EPSG:4326"), gdf_circles_para_traslape, nodos_unicos_maestro
                 )
@@ -588,7 +739,7 @@ if st.session_state["authentication_status"]:
                 else:
                     # Si no hay datos de traslape, agregar columnas con valores por defecto
                     df_desglose['% Traslape'] = '0.00%'
-                    df_desglose['Nivel Traslape'] = '⚪ Sin datos' 
+                    df_desglose['Nivel Traslape'] = '⚪ Sin datos'
 
                 # ═══════════════════════════════════════════════════════════════
                 # 🔧 FIX: Guardar gdf_cobertura en session_state para que el
@@ -606,21 +757,46 @@ if st.session_state["authentication_status"]:
                         lambda z: traslape_por_zona[z]['nivel'] if z in traslape_por_zona else "⚪ Sin datos"
                     )
 
+                # ═══════════════════════════════════════════════════════════════
+                # 📦 Agregar columna "Upside Total (pqts)" al desglose por nodo
+                #    (suma del upside de todas las zonas asignadas a ese nodo)
+                # ═══════════════════════════════════════════════════════════════
+                # Mapear cada zona a su nodo vía traslape_por_zona
+                upside_por_nodo = {}
+                for zona_nom, info_tz in traslape_por_zona.items():
+                    nodo_de_zona = info_tz.get('nodo')
+                    up_z = upside_por_zona.get(zona_nom, {}).get('total', 0)
+                    if nodo_de_zona:
+                        upside_por_nodo[nodo_de_zona] = upside_por_nodo.get(nodo_de_zona, 0) + up_z
+                if not df_desglose.empty:
+                    df_desglose['Upside Total (pqts)'] = df_desglose['Nodo'].map(
+                        lambda n: int(upside_por_nodo.get(n, 0))
+                    )
+
+                # Construir df de detalle de zonas con Upside Total por zona
+                df_zonas_detalles_base = gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy()
+                df_zonas_detalles_base['Upside Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
+                    lambda n: int(upside_por_zona.get(n, {}).get('total', 0))
+                )
+                df_zonas_detalles_base = df_zonas_detalles_base.rename(columns={
+                    'NOMBRE': 'Nombre de la Zona',
+                    'RADIO': 'Radio (m)',
+                    'AREA_KM2': 'Territorio'
+                })
+
                 st.session_state.resultados = {
                     'estado_nombre': edo_sel,
                     'df_desglose': df_desglose,
                     'gdf_cobertura_wgs84': gdf_cobertura_filtrada.to_crs("EPSG:4326"),
                     'gdf_circles_wgs84': gdf_circles_m.to_crs("EPSG:4326").assign(LATITUD=gdf_circles['LATITUD'], LONGITUD=gdf_circles['LONGITUD']),
-                    'df_zonas_detalles': gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy().rename(columns={
-                        'NOMBRE': 'Nombre de la Zona',
-                        'RADIO': 'Radio (m)',
-                        'AREA_KM2': 'Territorio'
-                    }),
+                    'df_zonas_detalles': df_zonas_detalles_base,
                     'df_cp_por_estado': df_cp_por_estado,
                     'df_cp_por_zona': df_cp_por_zona,
                     'anillos_por_estado': anillos_por_estado,
                     'df_traslape_mc': df_traslape_mc,
-                    'traslape_por_zona': traslape_por_zona
+                    'traslape_por_zona': traslape_por_zona,
+                    'upside_por_zona': upside_por_zona,
+                    'upside_ocupado_por_cp': upside_ocupado_por_cp
                 }
                 st.session_state.procesado = True
                 st.session_state['_mapa_recien_procesado'] = True
@@ -639,21 +815,21 @@ if st.session_state["authentication_status"]:
             if gdf_cobertura is None:
                 st.warning("⚠️ Datos de cobertura no disponibles. Por favor, procesa la información nuevamente.")
                 st.stop()
-            
+
             if not res['gdf_circles_wgs84'].empty:
                 c_lat = res['gdf_circles_wgs84']['LATITUD'].mean()
                 c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean()
             else:
                 c_lat = 23.6345
                 c_lon = -102.5528
-                
+
             m = folium.Map(
                 location=[c_lat, c_lon],
                 zoom_start=6 if res['estado_nombre'] == "Todos" else 10,
                 tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
                 attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             )
-            
+
             # ═══════════════════════════════════════════════════════════════
             # RENDERIZADO DE CAPAS (orden: CPs fondo → Zonas intermedio → Anillos encima)
             # ═══════════════════════════════════════════════════════════════
@@ -671,6 +847,33 @@ if st.session_state["authentication_status"]:
                 gdf_mapa_cp_wgs84['PARTNERS'] = 0
             gdf_mapa_cp_wgs84['PARTNERS'] = pd.to_numeric(gdf_mapa_cp_wgs84['PARTNERS'], errors='coerce').fillna(0).astype(int)
 
+            # ═══════════════════════════════════════════════════════════
+            # 📦 UPSIDE por CP: Ocupado (suma de zonas encima) y Libre
+            #    Upside Libre = VOLUMEN_CP − Upside Ocupado (lo que ninguna zona cubre)
+            # ═══════════════════════════════════════════════════════════
+            _upside_ocu_cp = res.get('upside_ocupado_por_cp', {})
+            gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(
+                lambda c: int(_upside_ocu_cp.get(str(c), 0))
+            )
+            gdf_mapa_cp_wgs84['_UPSIDE_LIBRE'] = (
+                gdf_mapa_cp_wgs84['VOLUMEN'].astype(float) - gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO']
+            ).clip(lower=0).round().astype(int)
+
+            # 📦 Desglose "Upside por zona encima del CP": construir lookup CP -> "ZonaA: 25, ZonaB: 10"
+            _upside_zona_lookup_cp = res.get('upside_por_zona', {})
+            _cp_to_zonas = {}
+            for _znom, _zinfo in _upside_zona_lookup_cp.items():
+                for _d in _zinfo.get('por_cp', []):
+                    _cpk = str(_d['CP'])
+                    _cp_to_zonas.setdefault(_cpk, []).append((_znom, _d['upside']))
+            def _fmt_zonas_cp(c):
+                lst = _cp_to_zonas.get(str(c), [])
+                if not lst:
+                    return "Ninguna"
+                lst = sorted(lst, key=lambda t: t[1], reverse=True)
+                return ", ".join([f"{nom}: {up}" for nom, up in lst])
+            gdf_mapa_cp_wgs84['_UPSIDE_ZONAS'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(_fmt_zonas_cp)
+
             gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84
 
             if not gdf_mapa_cp_filtrado.empty:
@@ -683,8 +886,8 @@ if st.session_state["authentication_status"]:
                         'fillOpacity': 0.45
                     },
                     tooltip=folium.GeoJsonTooltip(
-                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', 'PARTNERS', '_rango_txt'],
-                        aliases=['Código Postal:', 'Estado:', 'Volumen:', 'Partners:', 'Rango:'],
+                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
+                        aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
                         localize=True
                     )
                 ).add_to(m)
@@ -697,6 +900,7 @@ if st.session_state["authentication_status"]:
 
             fg_zonas = folium.FeatureGroup(name="⭕ Zonas (Círculos)", show=True)
             traslape_zona_lookup = res.get('traslape_por_zona', {})
+            upside_zona_lookup = res.get('upside_por_zona', {})
             for _, r in res['gdf_circles_wgs84'].iterrows():
                 color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
                 geom_circulo = r['geometry']
@@ -716,14 +920,27 @@ if st.session_state["authentication_status"]:
                 nivel_traslape = info_traslape.get('nivel', '⚪ Sin datos')
                 desglose_traslape = info_traslape.get('desglose', [])
 
+                # 📦 Obtener Upside de esta zona (total + desglose por CP)
+                info_upside = upside_zona_lookup.get(r['NOMBRE'], {})
+                upside_total = info_upside.get('total', 0)
+                upside_por_cp = info_upside.get('por_cp', [])
+
                 # Construir tooltip con desglose
                 tt_lines = [
                     f"<b>Zona Operativa: {r['NOMBRE']}</b>",
                     f"Rango: {r_text}",
                     f"Volumen: {r['VOLUMEN']}",
                     f"Radio Ope: {r['RADIO']}m",
-                    f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>"
+                    f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>",
+                    f"<b>📦 Upside Total: {upside_total} pqts</b>"
                 ]
+                if upside_por_cp:
+                    tt_lines.append("── Upside por CP ──")
+                    # Mostrar hasta 15 CPs en el tooltip para no saturar
+                    for d in upside_por_cp[:15]:
+                        tt_lines.append(f"&nbsp;&nbsp;• CP {d['CP']} ({d['pct']}%): {d['upside']} pqts")
+                    if len(upside_por_cp) > 15:
+                        tt_lines.append(f"&nbsp;&nbsp;… (+{len(upside_por_cp) - 15} CPs más)")
                 if desglose_traslape:
                     tt_lines.append("── Detalle Traslape ──")
                     for d in desglose_traslape:
@@ -732,10 +949,23 @@ if st.session_state["authentication_status"]:
                 tt_lines.append(f"<b>CPs Ocupados:</b> {txt_cps_atrapados}")
                 tt_c = "<br>".join(tt_lines)
 
+                # 🖱️ Según el checkbox del panel:
+                #    hover  → tooltip (se muestra al pasar el cursor)
+                #    click  → popup   (se muestra al hacer click)
+                usar_hover = st.session_state.get('tooltip_hover', True)
+                gj_kwargs = dict(
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
+                    # Guardamos NOMBRE de la zona en properties para que el buscador JS lo encuentre
+                    name=str(r['NOMBRE'])
+                )
+                if usar_hover:
+                    gj_kwargs['tooltip'] = tt_c
+                else:
+                    # Popup al hacer click (ancho fijo para que el desglose quepa)
+                    gj_kwargs['popup'] = folium.Popup(tt_c, max_width=360)
                 folium.GeoJson(
                     geom_circulo,
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
-                    tooltip=tt_c
+                    **gj_kwargs
                 ).add_to(fg_zonas)
             fg_zonas.add_to(m)
 
@@ -752,7 +982,7 @@ if st.session_state["authentication_status"]:
                     c_lon = anillos['centro_lon']
 
                     folium.GeoJson(
-                        anillos['r15'], 
+                        anillos['r15'],
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5'},
                         interactive=False
                     ).add_to(fg_anillos)
@@ -762,7 +992,7 @@ if st.session_state["authentication_status"]:
                     ).add_to(fg_anillos)
 
                     folium.GeoJson(
-                        anillos['r10'], 
+                        anillos['r10'],
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#f1c40f', 'weight': 2, 'dashArray': '5, 5'},
                         interactive=False
                     ).add_to(fg_anillos)
@@ -772,7 +1002,7 @@ if st.session_state["authentication_status"]:
                     ).add_to(fg_anillos)
 
                     folium.GeoJson(
-                        anillos['r5'], 
+                        anillos['r5'],
                         style_function=lambda x: {'fillColor': 'transparent', 'color': '#2ecc71', 'weight': 2, 'dashArray': '5, 5'},
                         interactive=False
                     ).add_to(fg_anillos)
@@ -786,8 +1016,10 @@ if st.session_state["authentication_status"]:
             folium.LayerControl(position='topright', collapsed=False).add_to(m)
 
             # ═══════════════════════════════════════════════════════════════
-            # 🔍 BUSCADOR DE CP — Barra de búsqueda + zoom + highlight
+            # 🔍 BUSCADOR DE CP + NOMBRE DE ZONA — Barra de búsqueda + zoom + highlight
             #    + lectura de parámetro URL ?cp=XXXXX
+            #    MOD: ahora busca por CP O por NOMBRE de zona (case-insensitive)
+            #         y avisa si el CP no está dentro de la cobertura.
             # ═══════════════════════════════════════════════════════════════
             search_html = """
             <div id="cpSearchBar" style="
@@ -797,10 +1029,10 @@ if st.session_state["authentication_status"]:
                 display:flex; align-items:center; gap:8px;
                 font-family:'Segoe UI',sans-serif;">
                 <span style="font-size:16px">🔍</span>
-                <input id="cpInput" type="text" placeholder="Buscar CP..."
+                <input id="cpInput" type="text" placeholder="Buscar CP o Zona..."
                     onkeyup="if(event.key==='Enter')buscarCP(this.value)"
                     style="border:1px solid #e2e8f0; border-radius:6px; padding:6px 12px;
-                    font-size:14px; width:150px; outline:none;" />
+                    font-size:14px; width:170px; outline:none;" />
                 <button onclick="buscarCP(document.getElementById('cpInput').value)"
                     style="background:#2563eb; color:white; border:none; border-radius:6px;
                     padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer;">
@@ -838,16 +1070,33 @@ if st.session_state["authentication_status"]:
                     return;
                 }
 
-                // Build CP index — recursively search ALL layer types
-                var cpIdx = {};
+                // Build CP index + ZONA (name) index — recursively search ALL layer types
+                var cpIdx = {};        // CP (5 dígitos) -> layer
+                var zonaIdx = {};      // nombre de zona en MAYÚSCULAS -> layer
                 var totalFeatures = 0;
+                var totalZonas = 0;
 
                 function indexLayer(layer) {
-                    if (layer.feature && layer.feature.properties && ('CP' in layer.feature.properties)) {
-                        var cpVal = String(layer.feature.properties.CP).replace(/\.0$/, '').trim();
-                        while (cpVal.length < 5) cpVal = '0' + cpVal;
-                        cpIdx[cpVal] = layer;
-                        totalFeatures++;
+                    if (layer.feature && layer.feature.properties) {
+                        var props = layer.feature.properties;
+                        // Indexar por CP
+                        if ('CP' in props) {
+                            var cpVal = String(props.CP).replace(/\\.0$/, '').trim();
+                            while (cpVal.length < 5) cpVal = '0' + cpVal;
+                            cpIdx[cpVal] = layer;
+                            totalFeatures++;
+                        }
+                        // Indexar por NOMBRE de zona (si el GeoJson lo tiene en 'name' o 'NOMBRE')
+                        var zonaNom = props.name || props.NOMBRE || props.Name || null;
+                        if (zonaNom) {
+                            zonaIdx[String(zonaNom).trim().toUpperCase()] = layer;
+                            totalZonas++;
+                        }
+                    }
+                    // Capturar también el nombre de capa asignado por Folium (option 'name')
+                    if (layer.options && layer.options.name) {
+                        zonaIdx[String(layer.options.name).trim().toUpperCase()] = layer;
+                        totalZonas++;
                     }
                     if (layer.eachLayer) {
                         layer.eachLayer(function(sub) { indexLayer(sub); });
@@ -860,7 +1109,7 @@ if st.session_state["authentication_status"]:
 
                 var rd = document.getElementById('cpResult');
                 if (rd && totalFeatures > 0) {
-                    rd.innerHTML = totalFeatures + ' CPs indexados ✓';
+                    rd.innerHTML = totalFeatures + ' CPs y ' + Object.keys(zonaIdx).length + ' zonas indexados ✓';
                     rd.style.color = '#16a34a';
                     setTimeout(function() { rd.innerHTML = ''; }, 3000);
                 } else if (rd) {
@@ -870,33 +1119,74 @@ if st.session_state["authentication_status"]:
 
                 var hl = null, os = null;
 
-                window.buscarCP = function(cp) {
-                    cp = String(cp).trim().replace(/\.0$/, '');
-                    while (cp.length < 5) cp = '0' + cp;
+                function resaltarCapa(ly, rd, etiqueta) {
+                    os = {
+                        fillColor: ly.options.fillColor || '#9e9e9e',
+                        fillOpacity: ly.options.fillOpacity || 0.45,
+                        color: ly.options.color || '#ffffff',
+                        weight: ly.options.weight || 1.5
+                    };
+                    ly.setStyle({ fillColor:'#ff0000', fillOpacity:0.7, color:'#ff0000', weight:3 });
+                    hl = ly;
+                    if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
+                    if (ly.openTooltip) ly.openTooltip();
+                }
+
+                window.buscarCP = function(valor) {
+                    var rd = document.getElementById('cpResult');
+                    var raw = String(valor).trim();
+                    if (!raw) {
+                        if (rd) { rd.innerHTML = 'Escribe un CP o nombre de zona'; rd.style.color = '#64748b'; }
+                        return;
+                    }
+
+                    // Limpiar highlight previo
                     if (hl && os) { try { hl.setStyle(os); } catch(e) {} }
 
-                    var ly = cpIdx[cp];
-                    var rd = document.getElementById('cpResult');
+                    // ¿Es un CP? (solo dígitos, con posible .0)
+                    var esCP = /^[0-9]+(\\.0)?$/.test(raw);
 
-                    if (ly) {
-                        os = {
-                            fillColor: ly.options.fillColor || '#9e9e9e',
-                            fillOpacity: ly.options.fillOpacity || 0.45,
-                            color: ly.options.color || '#ffffff',
-                            weight: ly.options.weight || 1.5
-                        };
-                        ly.setStyle({ fillColor:'#ff0000', fillOpacity:0.7, color:'#ff0000', weight:3 });
-                        hl = ly;
-                        if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
-                        if (ly.openTooltip) ly.openTooltip();
+                    if (esCP) {
+                        var cp = raw.replace(/\\.0$/, '');
+                        while (cp.length < 5) cp = '0' + cp;
+                        var ly = cpIdx[cp];
+                        if (ly) {
+                            resaltarCapa(ly, rd, 'CP');
+                            if (rd) {
+                                var p = ly.feature.properties;
+                                rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') +
+                                    ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
+                                rd.style.color = '#16a34a';
+                            }
+                        } else if (rd) {
+                            // 📍 Mensaje explícito: el CP NO está dentro de la cobertura
+                            rd.innerHTML = '⚠ El CP ' + cp + ' no está dentro de la cobertura';
+                            rd.style.color = '#dc2626';
+                        }
+                        return;
+                    }
+
+                    // No es CP → buscar por NOMBRE de zona (case-insensitive)
+                    var clave = raw.toUpperCase();
+                    var lyZona = zonaIdx[clave];
+
+                    // Coincidencia parcial si no hay exacta
+                    if (!lyZona) {
+                        var candidatos = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
+                        if (candidatos.length > 0) {
+                            lyZona = zonaIdx[candidatos[0]];
+                            clave = candidatos[0];
+                        }
+                    }
+
+                    if (lyZona) {
+                        resaltarCapa(lyZona, rd, 'ZONA');
                         if (rd) {
-                            var p = ly.feature.properties;
-                            rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') +
-                                ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
+                            rd.innerHTML = '✔ Zona ' + clave + ' localizada';
                             rd.style.color = '#16a34a';
                         }
                     } else if (rd) {
-                        rd.innerHTML = '✘ CP ' + cp + ' no encontrado (' + totalFeatures + ' indexados)';
+                        rd.innerHTML = '✘ No se encontró el CP ni la zona "' + raw + '"';
                         rd.style.color = '#dc2626';
                     }
                 };
@@ -904,14 +1194,14 @@ if st.session_state["authentication_status"]:
                 // URL parameter ?cp=XXXXX
                 var pr = new URLSearchParams(window.location.search).get('cp');
                 if (pr) setTimeout(function() { buscarCP(pr); }, 500);
-                
+
                 // Listen for postMessage from parent (for iframe embedding)
                 window.addEventListener('message', function(e) {
                     if (e.data && e.data.action === 'searchCP' && e.data.cp) {
                         buscarCP(e.data.cp);
                     }
                 });
-                
+
                 // Also try to notify parent that we're ready
                 try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
             }
@@ -943,7 +1233,7 @@ if st.session_state["authentication_status"]:
             st.markdown("### 📍 Cobertura por CPs por Nodo")
             st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
 
-            st.markdown("### ⭕ Cobertura Detallada por cada Zona")
+            st.markdown("### ⭕ Cobertura Detallada por cada Zona (con Upside de paquetes)")
             st.dataframe(res['df_cp_por_zona'], use_container_width=True, hide_index=True)
             st.write("---")
 
