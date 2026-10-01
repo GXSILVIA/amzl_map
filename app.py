@@ -373,15 +373,6 @@ if st.session_state["authentication_status"]:
         mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
-        # 🖱️ Control de comportamiento del tooltip de los círculos:
-        #    ✅ Activado  = se muestra al PASAR EL CURSOR (hover)
-        #    ⬜ Desactivado = se muestra al HACER CLICK (popup)
-        tooltip_hover = st.checkbox(
-            "🖱️ Mostrar info de zonas al pasar el cursor (desactiva = al hacer click)",
-            value=True
-        )
-        st.session_state['tooltip_hover'] = tooltip_hover
-
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
             with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
                 # Limpiar caché para garantizar datos frescos en cada procesamiento
@@ -877,20 +868,39 @@ if st.session_state["authentication_status"]:
             gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84
 
             if not gdf_mapa_cp_filtrado.empty:
+                _cp_geojson_str = gdf_mapa_cp_filtrado.to_json()
+
+                # ── Capa "CP": polígonos coloreados, SIEMPRE visibles, SIN tooltip ──
+                fg_cp = folium.FeatureGroup(name="CP", show=True)
                 folium.GeoJson(
-                    gdf_mapa_cp_filtrado.to_json(),
+                    _cp_geojson_str,
                     style_function=lambda feature: {
                         'fillColor': feature['properties'].get('_color_hex', '#9e9e9e'),
                         'color': '#ffffff',
                         'weight': 1.5,
                         'fillOpacity': 0.45
+                    }
+                ).add_to(fg_cp)
+                fg_cp.add_to(m)
+
+                # ── Capa "Info CP": transparente encima, con TOOLTIP, toggleable ──
+                #    Al desmarcarla en el selector, los CP siguen con color pero sin info.
+                fg_info_cp = folium.FeatureGroup(name="Info CP", show=True)
+                folium.GeoJson(
+                    _cp_geojson_str,
+                    style_function=lambda feature: {
+                        'fillColor': '#000000',
+                        'color': '#000000',
+                        'weight': 0,
+                        'fillOpacity': 0.0
                     },
                     tooltip=folium.GeoJsonTooltip(
                         fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
                         aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
                         localize=True
                     )
-                ).add_to(m)
+                ).add_to(fg_info_cp)
+                fg_info_cp.add_to(m)
 
             # 2. CÍRCULOS DE ZONAS — en FeatureGroup para toggle sin recargar
             cp_partners_lookup = {}
@@ -898,7 +908,10 @@ if st.session_state["authentication_status"]:
                 for _, row_cp in gdf_cobertura.iterrows():
                     cp_partners_lookup[str(row_cp['CP'])] = int(row_cp.get('PARTNERS', 0))
 
-            fg_zonas = folium.FeatureGroup(name="⭕ Zonas (Círculos)", show=True)
+            # ── Capa "Zonas": círculos coloreados, SIEMPRE visibles, SIN tooltip ──
+            fg_zonas = folium.FeatureGroup(name="Zonas", show=True)
+            # ── Capa "Info Zonas": tooltip de cada círculo, toggleable ──
+            fg_info_zonas = folium.FeatureGroup(name="Info Zonas", show=True)
             traslape_zona_lookup = res.get('traslape_por_zona', {})
             upside_zona_lookup = res.get('upside_por_zona', {})
             for _, r in res['gdf_circles_wgs84'].iterrows():
@@ -949,28 +962,32 @@ if st.session_state["authentication_status"]:
                 tt_lines.append(f"<b>CPs Ocupados:</b> {txt_cps_atrapados}")
                 tt_c = "<br>".join(tt_lines)
 
-                # 🖱️ Según el checkbox del panel:
-                #    hover  → tooltip (se muestra al pasar el cursor)
-                #    click  → popup   (se muestra al hacer click)
-                usar_hover = st.session_state.get('tooltip_hover', True)
-                gj_kwargs = dict(
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
-                    # Guardamos NOMBRE de la zona en properties para que el buscador JS lo encuentre
-                    name=str(r['NOMBRE'])
-                )
-                if usar_hover:
-                    gj_kwargs['tooltip'] = tt_c
-                else:
-                    # Popup al hacer click (ancho fijo para que el desglose quepa)
-                    gj_kwargs['popup'] = folium.Popup(tt_c, max_width=360)
+                # Construir un Feature GeoJSON con properties.NOMBRE para que
+                # el buscador JS pueda localizar la zona por su nombre.
+                _feat_zona = {
+                    "type": "Feature",
+                    "properties": {"NOMBRE": str(r['NOMBRE'])},
+                    "geometry": geom_circulo.__geo_interface__
+                }
+
+                # ── Círculo coloreado (siempre visible, SIN tooltip) → capa "Zonas"
                 folium.GeoJson(
-                    geom_circulo,
-                    **gj_kwargs
+                    _feat_zona,
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45}
                 ).add_to(fg_zonas)
+
+                # ── Mismo círculo transparente CON tooltip → capa "Info Zonas" (toggleable)
+                #    Al desmarcar "Info Zonas", los círculos siguen con color pero sin info.
+                folium.GeoJson(
+                    _feat_zona,
+                    style_function=lambda x: {'fillColor': '#000000', 'color': '#000000', 'weight': 0, 'fillOpacity': 0.0},
+                    tooltip=tt_c
+                ).add_to(fg_info_zonas)
             fg_zonas.add_to(m)
+            fg_info_zonas.add_to(m)
 
             # 3. ANILLOS DE FACTIBILIDAD — en FeatureGroup para toggle sin recargar
-            fg_anillos = folium.FeatureGroup(name="📍 Radios de Factibilidad", show=st.session_state.get('mostrar_anillos', True))
+            fg_anillos = folium.FeatureGroup(name="Radios", show=st.session_state.get('mostrar_anillos', True))
             if 'anillos_por_estado' in res:
                 for nodo_key, anillos in res['anillos_por_estado'].items():
                     folium.Marker(
@@ -1076,27 +1093,45 @@ if st.session_state["authentication_status"]:
                 var totalFeatures = 0;
                 var totalZonas = 0;
 
+                // ¿La capa es VISIBLE (coloreada) y no la transparente de 'Info'?
+                //   Las capas de color tienen fillOpacity > 0; las de Info tienen 0.
+                //   Priorizamos las visibles para que el highlight rojo se vea.
+                function esVisible(layer) {
+                    var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined')
+                             ? layer.options.fillOpacity : 0.45;
+                    return fo > 0;
+                }
+
                 function indexLayer(layer) {
                     if (layer.feature && layer.feature.properties) {
                         var props = layer.feature.properties;
-                        // Indexar por CP
+                        var visible = esVisible(layer);
+                        // Indexar por CP — solo sobreescribir con capa visible (o si no hay nada aún)
                         if ('CP' in props) {
                             var cpVal = String(props.CP).replace(/\\.0$/, '').trim();
                             while (cpVal.length < 5) cpVal = '0' + cpVal;
-                            cpIdx[cpVal] = layer;
-                            totalFeatures++;
+                            if (!(cpVal in cpIdx) || visible) {
+                                if (!(cpVal in cpIdx)) totalFeatures++;
+                                cpIdx[cpVal] = layer;
+                            }
                         }
-                        // Indexar por NOMBRE de zona (si el GeoJson lo tiene en 'name' o 'NOMBRE')
+                        // Indexar por NOMBRE de zona
                         var zonaNom = props.name || props.NOMBRE || props.Name || null;
                         if (zonaNom) {
-                            zonaIdx[String(zonaNom).trim().toUpperCase()] = layer;
-                            totalZonas++;
+                            var zk = String(zonaNom).trim().toUpperCase();
+                            if (!(zk in zonaIdx) || visible) {
+                                if (!(zk in zonaIdx)) totalZonas++;
+                                zonaIdx[zk] = layer;
+                            }
                         }
                     }
                     // Capturar también el nombre de capa asignado por Folium (option 'name')
                     if (layer.options && layer.options.name) {
-                        zonaIdx[String(layer.options.name).trim().toUpperCase()] = layer;
-                        totalZonas++;
+                        var zk2 = String(layer.options.name).trim().toUpperCase();
+                        if (!(zk2 in zonaIdx) || esVisible(layer)) {
+                            if (!(zk2 in zonaIdx)) totalZonas++;
+                            zonaIdx[zk2] = layer;
+                        }
                     }
                     if (layer.eachLayer) {
                         layer.eachLayer(function(sub) { indexLayer(sub); });
