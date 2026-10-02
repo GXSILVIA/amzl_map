@@ -1,12 +1,14 @@
 streamlit
 pandas
-folium
-geopandas
+folium>=0.15
+geopandas>=0.14
 shapely>=2.0.0
 numpy
 PyYAML
-streamlit-authenticator
+streamlit-authenticator>=0.3.1
 openpyxl
 xlsxwriter
 fiona
 pyproj
+mapclassify
+branca
