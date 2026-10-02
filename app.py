@@ -343,13 +343,16 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 🗺️ CONSTRUCCIÓN DEL MAPA FOLIUM (cacheable en session_state)
-#    Se extrajo a una función para construir el mapa UNA sola vez al procesar
-#    y re-mostrar el HTML cacheado en reruns (checkboxes, descargas) → instantáneo.
+# 🗺️ CONSTRUCCIÓN DEL MAPA FOLIUM — ⚡ OPTIMIZADO CANVAS RENDERER
+#    4 fixes de rendimiento para 3000+ zonas y 3000+ CPs:
+#    (1) prefer_canvas=True  → Leaflet pinta en <canvas>, no en miles de SVG
+#    (2) Capas únicas         → tooltip + popup en la MISMA capa (no duplicar)
+#    (3) Zonas en UNA capa    → un solo GeoJson con todos los círculos
+#    (4) simplify() de CPs    → ~25 m, reduce vértices ~80% sin diferencia visible
 # ═══════════════════════════════════════════════════════════════════════
 
 def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
-    """Construye el mapa Folium completo y devuelve su HTML standalone (una sola vez)."""
+    """Construye el mapa Folium completo (Canvas renderer) y devuelve su HTML standalone."""
     if not res['gdf_circles_wgs84'].empty:
         c_lat = res['gdf_circles_wgs84']['LATITUD'].mean()
         c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean()
@@ -357,20 +360,28 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         c_lat = 23.6345
         c_lon = -102.5528
 
+    # ⚡ FIX 1: prefer_canvas=True → todas las capas vectoriales se dibujan en
+    #    un ÚNICO elemento <canvas> por píxeles, en vez de miles de nodos SVG.
     m = folium.Map(
         location=[c_lat, c_lon],
         zoom_start=6 if res['estado_nombre'] == "Todos" else 10,
         tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
-        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        prefer_canvas=True
     )
 
     # ═══════════════════════════════════════════════════════════════
-    # RENDERIZADO DE CAPAS (orden: CPs fondo → Zonas intermedio → Anillos encima)
+    # 1. POLÍGONOS DE CPs (fondo) — UNA sola capa con tooltip + popup
     # ═══════════════════════════════════════════════════════════════
-
-    # 1. POLÍGONOS DE CPs (fondo)
     gdf_mapa_cp = gdf_cobertura.copy()
     gdf_mapa_cp_wgs84 = gdf_mapa_cp.to_crs("EPSG:4326") if gdf_mapa_cp.crs != "EPSG:4326" else gdf_mapa_cp
+
+    # ⚡ FIX 4: simplificar geometría ~25 m (0.000225°). Reduce vértices ~80%
+    #    sin diferencia visible. preserve_topology evita polígonos rotos.
+    _TOL = 25 / 111139  # ~25 metros en grados
+    gdf_mapa_cp_wgs84 = gdf_mapa_cp_wgs84.copy()
+    gdf_mapa_cp_wgs84['geometry'] = gdf_mapa_cp_wgs84['geometry'].simplify(_TOL, preserve_topology=True)
+
     if 'VOLUMEN' not in gdf_mapa_cp_wgs84.columns:
         gdf_mapa_cp_wgs84['VOLUMEN'] = 0
     gdf_mapa_cp_wgs84['VOLUMEN'] = pd.to_numeric(gdf_mapa_cp_wgs84['VOLUMEN'], errors='coerce').fillna(0)
@@ -381,10 +392,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         gdf_mapa_cp_wgs84['PARTNERS'] = 0
     gdf_mapa_cp_wgs84['PARTNERS'] = pd.to_numeric(gdf_mapa_cp_wgs84['PARTNERS'], errors='coerce').fillna(0).astype(int)
 
-    # ═══════════════════════════════════════════════════════════
     # 📦 UPSIDE por CP: Ocupado (suma de zonas encima) y Libre
-    #    Upside Libre = VOLUMEN_CP − Upside Ocupado (lo que ninguna zona cubre)
-    # ═══════════════════════════════════════════════════════════
     _upside_ocu_cp = res.get('upside_ocupado_por_cp', {})
     gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(
         lambda c: int(_upside_ocu_cp.get(str(c), 0))
@@ -393,7 +401,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         gdf_mapa_cp_wgs84['VOLUMEN'].astype(float) - gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO']
     ).clip(lower=0).round().astype(int)
 
-    # 📦 Desglose "Upside por zona encima del CP": construir lookup CP -> "ZonaA: 25, ZonaB: 10"
+    # 📦 Desglose "Upside por zona encima del CP"
     _upside_zona_lookup_cp = res.get('upside_por_zona', {})
     _cp_to_zonas = {}
     for _znom, _zinfo in _upside_zona_lookup_cp.items():
@@ -408,14 +416,13 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         return ", ".join([f"{nom}: {up}" for nom, up in lst])
     gdf_mapa_cp_wgs84['_UPSIDE_ZONAS'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(_fmt_zonas_cp)
 
-    gdf_mapa_cp_filtrado = gdf_mapa_cp_wgs84
+    if not gdf_mapa_cp_wgs84.empty:
+        _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
-    if not gdf_mapa_cp_filtrado.empty:
-        _cp_geojson_str = gdf_mapa_cp_filtrado.to_json()
+        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:']
 
-        # ── Capa "CP": polígonos coloreados, SIEMPRE visibles ──
-        #    Llevan POPUP (click): la info SIEMPRE está disponible al hacer click,
-        #    independientemente de que "Info CP" (hover) esté activo o no.
+        # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
         folium.GeoJson(
             _cp_geojson_str,
@@ -425,53 +432,18 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 'weight': 1.5,
                 'fillOpacity': 0.45
             },
-            popup=folium.GeoJsonPopup(
-                fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
-                aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
-                localize=True
-            )
+            tooltip=folium.GeoJsonTooltip(fields=_campos_cp, aliases=_alias_cp, localize=True),
+            popup=folium.GeoJsonPopup(fields=_campos_cp, aliases=_alias_cp, localize=True)
         ).add_to(fg_cp)
         fg_cp.add_to(m)
 
-        # ── Capa "Info CP": transparente encima, con TOOLTIP, toggleable ──
-        #    Al desmarcarla en el selector, los CP siguen con color pero sin info.
-        fg_info_cp = folium.FeatureGroup(name="Info CP", show=True)
-        folium.GeoJson(
-            _cp_geojson_str,
-            style_function=lambda feature: {
-                'fillColor': '#000000',
-                'color': '#000000',
-                'weight': 0,
-                'fillOpacity': 0.0
-            },
-            tooltip=folium.GeoJsonTooltip(
-                fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
-                aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
-                localize=True
-            ),
-            popup=folium.GeoJsonPopup(
-                fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
-                aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
-                localize=True
-            )
-        ).add_to(fg_info_cp)
-        fg_info_cp.add_to(m)
-
-    # 2. CÍRCULOS DE ZONAS — en FeatureGroup para toggle sin recargar
-    cp_partners_lookup = {}
-    if 'PARTNERS' in gdf_cobertura.columns:
-        for _, row_cp in gdf_cobertura.iterrows():
-            cp_partners_lookup[str(row_cp['CP'])] = int(row_cp.get('PARTNERS', 0))
-
-    # ── Capa "Zonas": círculos coloreados, SIEMPRE visibles, SIN tooltip ──
-    fg_zonas = folium.FeatureGroup(name="Zonas", show=True)
-    # ── Capa "Info Zonas": tooltip de cada círculo, toggleable ──
-    fg_info_zonas = folium.FeatureGroup(name="Info Zonas", show=True)
+    # ═══════════════════════════════════════════════════════════════
+    # 2. CÍRCULOS DE ZONAS — ⚡ FIX 3: UNA sola capa GeoJson (no iterar)
+    # ═══════════════════════════════════════════════════════════════
     traslape_zona_lookup = res.get('traslape_por_zona', {})
     upside_zona_lookup = res.get('upside_por_zona', {})
 
-    # ⚡ OPTIMIZACIÓN: precalcular "CPs bajo cada círculo" con un spatial join vectorizado
-    #    en vez de un doble bucle O(zonas × CPs) de .intersects() punto por punto.
+    # ⚡ OPTIMIZACIÓN: precalcular "CPs bajo cada círculo" con sjoin vectorizado
     _gdf_circ = res['gdf_circles_wgs84']
     _cps_por_circulo = {}
     try:
@@ -485,30 +457,28 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     except Exception:
         _cps_por_circulo = {}
 
+    # Construir UN SOLO GeoJSON FeatureCollection con todos los círculos.
+    _zona_features = []
     for _pos, (_, r) in enumerate(res['gdf_circles_wgs84'].iterrows()):
         color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
         geom_circulo = r['geometry']
 
         cps_unicos = _cps_por_circulo.get(_pos, None)
         if cps_unicos is None:
-            # fallback puntual (solo si falló el sjoin)
             cps_bajo_circulo = [str(cp_row['CP']) for _, cp_row in gdf_cobertura.iterrows()
                                 if geom_circulo.intersects(cp_row['geometry'])]
             cps_unicos = sorted(set(cps_bajo_circulo))
         txt_cps_atrapados = ", ".join(cps_unicos) if cps_unicos else "Ninguno"
 
-        # Obtener % traslape de esta zona
         info_traslape = traslape_zona_lookup.get(r['NOMBRE'], {})
         pct_traslape = info_traslape.get('pct', 0.0)
         nivel_traslape = info_traslape.get('nivel', '⚪ Sin datos')
         desglose_traslape = info_traslape.get('desglose', [])
 
-        # 📦 Obtener Upside de esta zona (total + desglose por CP)
         info_upside = upside_zona_lookup.get(r['NOMBRE'], {})
         upside_total = info_upside.get('total', 0)
         upside_por_cp = info_upside.get('por_cp', [])
 
-        # Construir tooltip con desglose
         tt_lines = [
             f"<b>Zona Operativa: {r['NOMBRE']}</b>",
             f"Rango: {r_text}",
@@ -519,7 +489,6 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         ]
         if upside_por_cp:
             tt_lines.append("── Upside por CP ──")
-            # Mostrar hasta 15 CPs en el tooltip para no saturar
             for d in upside_por_cp[:15]:
                 tt_lines.append(f"&nbsp;&nbsp;• CP {d['CP']} ({d['pct']}%): {d['upside']} pqts")
             if len(upside_por_cp) > 15:
@@ -532,32 +501,37 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         tt_lines.append(f"<b>CPs Ocupados:</b> {txt_cps_atrapados}")
         tt_c = "<br>".join(tt_lines)
 
-        # Construir un Feature GeoJSON con properties.NOMBRE para que
-        # el buscador JS pueda localizar la zona por su nombre.
-        _feat_zona = {
+        _zona_features.append({
             "type": "Feature",
-            "properties": {"NOMBRE": str(r['NOMBRE'])},
+            "properties": {
+                "NOMBRE": str(r['NOMBRE']),
+                "_color": color_hex,
+                "_tt": tt_c
+            },
             "geometry": geom_circulo.__geo_interface__
-        }
+        })
 
-        # ── Círculo coloreado (siempre visible) → capa "Zonas"
+    _zonas_fc = {"type": "FeatureCollection", "features": _zona_features}
+
+    # ⚡ FIX 2+3: UNA sola capa con color + tooltip + popup (sin duplicar).
+    fg_zonas = folium.FeatureGroup(name="Zonas", show=True)
+    if _zona_features:
         folium.GeoJson(
-            _feat_zona,
-            style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
-            popup=folium.Popup(tt_c, max_width=360)
+            _zonas_fc,
+            style_function=lambda feat: {
+                'fillColor': feat['properties'].get('_color', '#9e9e9e'),
+                'color': 'black',
+                'weight': 1,
+                'fillOpacity': 0.45
+            },
+            tooltip=folium.GeoJsonTooltip(fields=['_tt'], aliases=[''], localize=True),
+            popup=folium.GeoJsonPopup(fields=['_tt'], aliases=[''], max_width=360)
         ).add_to(fg_zonas)
-
-        # ── Mismo círculo transparente CON tooltip + popup → capa "Info Zonas" (toggleable)
-        folium.GeoJson(
-            _feat_zona,
-            style_function=lambda x: {'fillColor': '#000000', 'color': '#000000', 'weight': 0, 'fillOpacity': 0.0},
-            tooltip=tt_c,
-            popup=folium.Popup(tt_c, max_width=360)
-        ).add_to(fg_info_zonas)
     fg_zonas.add_to(m)
-    fg_info_zonas.add_to(m)
 
+    # ═══════════════════════════════════════════════════════════════
     # 3. ANILLOS DE FACTIBILIDAD — en FeatureGroup para toggle sin recargar
+    # ═══════════════════════════════════════════════════════════════
     fg_anillos = folium.FeatureGroup(name="Radios", show=mostrar_anillos)
     if 'anillos_por_estado' in res:
         for nodo_key, anillos in res['anillos_por_estado'].items():
@@ -600,7 +574,6 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             ).add_to(fg_anillos)
     fg_anillos.add_to(m)
 
-    # Control de capas (toggle sin recargar la app)
     folium.LayerControl(position='topright', collapsed=False).add_to(m)
 
     # ═══════════════════════════════════════════════════════════════
@@ -796,9 +769,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     """
     m.get_root().html.add_child(folium.Element(search_html))
 
-    # ⚡ FIX: generar el HTML standalone UNA sola vez (sirve para mostrar y descargar).
-    #    m.get_root().render() produce el documento completo sin el iframe/srcdoc
-    #    de _repr_html_() → compatible con ?cp= y postMessage, y sin duplicar trabajo.
+    # ⚡ Un solo render del HTML standalone (sirve para mostrar y descargar).
     return m.get_root().render()
 
 
