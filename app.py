@@ -870,7 +870,9 @@ if st.session_state["authentication_status"]:
             if not gdf_mapa_cp_filtrado.empty:
                 _cp_geojson_str = gdf_mapa_cp_filtrado.to_json()
 
-                # ── Capa "CP": polígonos coloreados, SIEMPRE visibles, SIN tooltip ──
+                # ── Capa "CP": polígonos coloreados, SIEMPRE visibles ──
+                #    Llevan POPUP (click): la info SIEMPRE está disponible al hacer click,
+                #    independientemente de que "Info CP" (hover) esté activo o no.
                 fg_cp = folium.FeatureGroup(name="CP", show=True)
                 folium.GeoJson(
                     _cp_geojson_str,
@@ -879,7 +881,12 @@ if st.session_state["authentication_status"]:
                         'color': '#ffffff',
                         'weight': 1.5,
                         'fillOpacity': 0.45
-                    }
+                    },
+                    popup=folium.GeoJsonPopup(
+                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
+                        aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
+                        localize=True
+                    )
                 ).add_to(fg_cp)
                 fg_cp.add_to(m)
 
@@ -895,6 +902,11 @@ if st.session_state["authentication_status"]:
                         'fillOpacity': 0.0
                     },
                     tooltip=folium.GeoJsonTooltip(
+                        fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
+                        aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
+                        localize=True
+                    ),
+                    popup=folium.GeoJsonPopup(
                         fields=['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt'],
                         aliases=['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:'],
                         localize=True
@@ -970,18 +982,24 @@ if st.session_state["authentication_status"]:
                     "geometry": geom_circulo.__geo_interface__
                 }
 
-                # ── Círculo coloreado (siempre visible, SIN tooltip) → capa "Zonas"
+                # ── Círculo coloreado (siempre visible) → capa "Zonas"
+                #    Lleva POPUP (click): la info SIEMPRE disponible al hacer click,
+                #    aunque "Info Zonas" (hover) esté desactivado.
                 folium.GeoJson(
                     _feat_zona,
-                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45}
+                    style_function=lambda x, col=color_hex: {'fillColor': col, 'color': 'black', 'weight': 1, 'fillOpacity': 0.45},
+                    popup=folium.Popup(tt_c, max_width=360)
                 ).add_to(fg_zonas)
 
-                # ── Mismo círculo transparente CON tooltip → capa "Info Zonas" (toggleable)
-                #    Al desmarcar "Info Zonas", los círculos siguen con color pero sin info.
+                # ── Mismo círculo transparente CON tooltip + popup → capa "Info Zonas" (toggleable)
+                #    Info Zonas ACTIVA (encima): hover y click muestran la info.
+                #    Info Zonas DESACTIVADA: queda expuesta la capa "Zonas" (color) de abajo,
+                #    que también tiene popup → el CLICK sigue funcionando; el hover ya no.
                 folium.GeoJson(
                     _feat_zona,
                     style_function=lambda x: {'fillColor': '#000000', 'color': '#000000', 'weight': 0, 'fillOpacity': 0.0},
-                    tooltip=tt_c
+                    tooltip=tt_c,
+                    popup=folium.Popup(tt_c, max_width=360)
                 ).add_to(fg_info_zonas)
             fg_zonas.add_to(m)
             fg_info_zonas.add_to(m)
