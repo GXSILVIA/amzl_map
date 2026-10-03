@@ -475,19 +475,26 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # 📍 CÍRCULOS DE PROSPECCIÓN por CP factible (Volumen Total ≥ 32).
     #    Nº de círculos de un CP = su valor PARTNERS (1er archivo) → círculos nuevos
     #    directos. Si PARTNERS = 0 → NO se dibuja nada (PARTNERS manda, aunque haya vol).
-    #    Los círculos se REPARTEN dentro del polígono del CP, separados entre sí y
-    #    EVITANDO las zonas existentes (del 2º archivo), para que no queden encimados.
+    #    DISTRIBUCIÓN INTELIGENTE (packing): los círculos mantienen su RADIO REAL
+    #    (750m, no se reduce) y se acomodan dentro del espacio del CP SEPARADOS entre
+    #    sí y de las zonas existentes por ~1 radio, para que no queden encimados.
+    #    Pueden sobresalir un poco del CP (su centro cae dentro). Si no cabe el nº de
+    #    PARTNERS con separación, se colocan los que quepan sin encimar.
     _prosp_centros = []  # [(lat, lon, cp_str, idx_circulo, total_circulos)]
     try:
         import shapely
-        _RADIO_SEP_M = float(_RADIO_PROSPECCION_M)  # separación objetivo entre círculos
+        _R = float(_RADIO_PROSPECCION_M)            # radio real del círculo (750m)
+        # Separación OBJETIVO entre centros: los círculos pueden quedar JUNTOS (bordes
+        # casi pegados) sin encimarse mucho. ~1 radio permite cercanía estrecha.
+        # No hace falta más separación. Si aun así no caben, se relaja hasta encimar.
+        _SEP_MIN = _R * 1.0
         _fact = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] == 1].copy()
         # Geometrías de las ZONAS existentes (del 2º archivo) en métrico, para evitarlas
         try:
             _zonas_exist_m = gdf_circles_m_corr.to_crs("EPSG:6362")
-            _zonas_union = unary_union(_zonas_exist_m.geometry.buffer(0))
+            _zonas_centros = [(g.centroid.x, g.centroid.y) for g in _zonas_exist_m.geometry if g is not None and not g.is_empty]
         except Exception:
-            _zonas_union = None
+            _zonas_centros = []
         if not _fact.empty:
             _fact_m = _fact.to_crs("EPSG:6362")  # métrico para medir distancias
             for _geo_m, _cpv, _parts in zip(
@@ -500,55 +507,56 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 if _k <= 0 or _geo_m is None or _geo_m.is_empty:
                     continue
                 _poly = _geo_m.buffer(0)
-                # Área del CP "libre" de zonas existentes (donde tiene sentido prospectar)
-                _libre = _poly
-                if _zonas_union is not None:
-                    try:
-                        _libre = _poly.difference(_zonas_union)
-                        if _libre.is_empty:
-                            _libre = _poly  # si todo está ocupado, usar el polígono completo
-                    except Exception:
-                        _libre = _poly
-                # Generar _k puntos repartidos dentro de _libre, separados entre sí.
-                # Muestreo: muchos candidatos aleatorios dentro del bbox, filtrar los que
-                # caen dentro de _libre, y elegir greedy los más separados.
-                minx, miny, maxx, maxy = _libre.bounds
+                minx, miny, maxx, maxy = _poly.bounds
+                # Centros de zonas existentes CERCANAS a este CP (para no encimar)
+                _cx_cp, _cy_cp = _poly.centroid.x, _poly.centroid.y
+                _ocupados = [(zx, zy) for (zx, zy) in _zonas_centros
+                             if (zx - _cx_cp)**2 + (zy - _cy_cp)**2 <= (3 * _R)**2]
+                # Candidatos: puntos dentro del CP (bbox + contains)
                 _rng = np.random.default_rng(42)
                 _cand = []
                 _tries = 0
-                _NEED = max(300, _k * 150)
-                while len(_cand) < _NEED and _tries < _NEED * 6:
-                    _px = _rng.uniform(minx, maxx)
-                    _py = _rng.uniform(miny, maxy)
-                    _pt = shapely.geometry.Point(_px, _py)
-                    if _libre.contains(_pt):
+                _NEED = max(400, _k * 200)
+                while len(_cand) < _NEED and _tries < _NEED * 8:
+                    _px = _rng.uniform(minx, maxx); _py = _rng.uniform(miny, maxy)
+                    if _poly.contains(shapely.geometry.Point(_px, _py)):
                         _cand.append((_px, _py))
                     _tries += 1
                 if not _cand:
-                    # fallback: usar el centroide del área libre
-                    _c = _libre.representative_point()
-                    _cand = [(_c.x, _c.y)]
+                    _c = _poly.representative_point(); _cand = [(_c.x, _c.y)]
                 _cand = np.array(_cand)
-                # Greedy: elegir el 1º (más cerca del centro del área libre), luego los
-                # que maximizan la distancia mínima a los ya elegidos (reparto uniforme).
-                _elegidos = []
-                _c0 = _libre.representative_point()
-                _d0 = (_cand[:, 0] - _c0.x)**2 + (_cand[:, 1] - _c0.y)**2
-                _elegidos.append(int(np.argmin(_d0)))
-                while len(_elegidos) < _k and len(_elegidos) < len(_cand):
-                    _sel = np.array(_elegidos)
-                    # distancia de cada candidato al elegido más cercano
-                    _dmin = np.min(
-                        (_cand[:, None, 0] - _cand[_sel, 0])**2 + (_cand[:, None, 1] - _cand[_sel, 1])**2,
-                        axis=1
-                    )
-                    _dmin[_sel] = -1  # no re-elegir
-                    _elegidos.append(int(np.argmax(_dmin)))
-                # Convertir los puntos elegidos a WGS84 para dibujar
-                _pts_m = [shapely.geometry.Point(_cand[i][0], _cand[i][1]) for i in _elegidos]
-                _gs = gpd.GeoSeries(_pts_m, crs="EPSG:6362").to_crs("EPSG:4326")
-                for _j, _pwgs in enumerate(_gs.tolist(), 1):
-                    _prosp_centros.append((float(_pwgs.y), float(_pwgs.x), _cpv, _j, _k))
+                # Packing greedy con SEPARACIÓN DURA (~1 radio) entre centros nuevos y
+                # contra zonas existentes. Si no caben todos los PARTNERS con separación,
+                # se relaja progresivamente para colocar los restantes (último recurso).
+                _colocados = list(_ocupados)  # arranca con las zonas existentes como "ocupadas"
+                _nuevos = []
+                # Relajación: empieza en 1.0 (no encimado, pueden estar cerca) y baja
+                # gradualmente hasta 0.0 (permite encimarse) SOLO si no caben de otra forma.
+                # Factores sobre _SEP_MIN (=1.5R): 1.0→1.5R, 0.66→~1R, 0.5→~0.75R, 0.0→encima.
+                for _sep_factor in (1.0, 0.66, 0.5, 0.33, 0.0):
+                    _sep2 = (_SEP_MIN * _sep_factor)**2
+                    for _ci in range(len(_cand)):
+                        if len(_nuevos) >= _k:
+                            break
+                        _pxy = _cand[_ci]
+                        # distancia² al centro ocupado/nuevo más cercano
+                        if _colocados:
+                            _arr = np.array(_colocados)
+                            _dmin2 = np.min((_arr[:, 0] - _pxy[0])**2 + (_arr[:, 1] - _pxy[1])**2)
+                        else:
+                            _dmin2 = 1e18
+                        if _dmin2 >= _sep2:
+                            _nuevos.append((_pxy[0], _pxy[1]))
+                            _colocados.append((_pxy[0], _pxy[1]))
+                    if len(_nuevos) >= _k:
+                        break
+                # Convertir a WGS84 y registrar
+                if _nuevos:
+                    _pts_m = [shapely.geometry.Point(x, y) for (x, y) in _nuevos[:_k]]
+                    _gs = gpd.GeoSeries(_pts_m, crs="EPSG:6362").to_crs("EPSG:4326")
+                    _tot = len(_gs)
+                    for _j, _pwgs in enumerate(_gs.tolist(), 1):
+                        _prosp_centros.append((float(_pwgs.y), float(_pwgs.x), _cpv, _j, _tot))
     except Exception:
         _prosp_centros = []
 
