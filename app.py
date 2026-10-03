@@ -528,32 +528,32 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 if not _cand:
                     _c = _poly.representative_point(); _cand = [(_c.x, _c.y)]
                 _cand = np.array(_cand)
-                # Ordenar candidatos desde el CENTROIDE del CP hacia afuera: el 1er círculo
-                # queda al centro y los demás se reparten alrededor sin encimarse.
-                _dcm = (_cand[:, 0] - _cx_cp)**2 + (_cand[:, 1] - _cy_cp)**2
-                _cand = _cand[np.argsort(_dcm)]
-                _colocados = list(_ocupados)  # arranca con las zonas existentes como "ocupadas"
+                # 🎯 FARTHEST-POINT SAMPLING: coloca cada círculo nuevo en el candidato
+                #    que MAXIMIZA la distancia mínima a todo lo ya colocado (zonas
+                #    existentes + círculos nuevos). Así, cuando el CP tiene espacio, los
+                #    círculos se REPARTEN por todo el polígono en vez de amontonarse.
+                #    Solo se descarta un candidato si su separación es menor al mínimo
+                #    aceptable (_SEP_MIN) — si ninguno cumple, se relaja para permitir
+                #    acercamiento/encimado (último recurso en CPs saturados).
                 _nuevos = []
-                # Relajación: empieza en 1.0 (no encimado, pueden estar cerca) y baja
-                # gradualmente hasta 0.0 (permite encimarse) SOLO si no caben de otra forma.
-                # Factores sobre _SEP_MIN (=1.5R): 1.0→1.5R, 0.66→~1R, 0.5→~0.75R, 0.0→encima.
-                for _sep_factor in (1.0, 0.66, 0.5, 0.33, 0.0):
-                    _sep2 = (_SEP_MIN * _sep_factor)**2
-                    for _ci in range(len(_cand)):
-                        if len(_nuevos) >= _k:
-                            break
-                        _pxy = _cand[_ci]
-                        # distancia² al centro ocupado/nuevo más cercano
-                        if _colocados:
-                            _arr = np.array(_colocados)
-                            _dmin2 = np.min((_arr[:, 0] - _pxy[0])**2 + (_arr[:, 1] - _pxy[1])**2)
-                        else:
-                            _dmin2 = 1e18
-                        if _dmin2 >= _sep2:
-                            _nuevos.append((_pxy[0], _pxy[1]))
-                            _colocados.append((_pxy[0], _pxy[1]))
-                    if len(_nuevos) >= _k:
-                        break
+                # distancia² de CADA candidato a lo ya ocupado (se actualiza al colocar)
+                if _ocupados:
+                    _occ = np.array(_ocupados)
+                    _dmin = np.min(
+                        (_cand[:, None, 0] - _occ[None, :, 0])**2 + (_cand[:, None, 1] - _occ[None, :, 1])**2,
+                        axis=1
+                    )
+                else:
+                    _dmin = np.full(len(_cand), 1e18)
+                for _n in range(_k):
+                    _idx_best = int(np.argmax(_dmin))
+                    # Si el mejor candidato no respeta ni el piso mínimo y YA colocamos
+                    # algo, igual lo aceptamos (último recurso: no hay más espacio).
+                    _bx, _by = _cand[_idx_best]
+                    _nuevos.append((_bx, _by))
+                    # actualizar distancia mínima de todos los candidatos al nuevo punto
+                    _dnew = (_cand[:, 0] - _bx)**2 + (_cand[:, 1] - _by)**2
+                    _dmin = np.minimum(_dmin, _dnew)
                 # Convertir a WGS84 y registrar
                 if _nuevos:
                     _pts_m = [shapely.geometry.Point(x, y) for (x, y) in _nuevos[:_k]]
