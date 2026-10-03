@@ -1345,21 +1345,24 @@ if st.session_state["authentication_status"]:
                     #    Se disuelven todos los CPs del nodo en un solo polígono y se guarda
                     #    su geometría (en WGS84) para dibujar su borde en el mapa.
                     try:
-                        # Disolver TODOS los CPs del nodo en un solo polígono y quedarnos
-                        # SOLO con el contorno EXTERIOR (sin fronteras internas entre CPs).
-                        # El buffer(+ε)→buffer(−ε) funde CPs adyacentes y borra líneas internas.
-                        _eps = 30  # metros
+                        # Disolver TODOS los CPs del nodo en UN SOLO polígono = territorio
+                        # COMPLETO del nodo. Se funden CPs adyacentes (closing con ε grande
+                        # para cerrar micro-separaciones del GeoJSON) y se eliminan las
+                        # fronteras internas, pero SIN recortar el territorio: el contorno
+                        # llega hasta el borde real del conjunto de CPs (pegado al vecino).
+                        from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
+                        _eps = 60  # metros — cierra separaciones entre CPs vecinos sin deformar
                         _u = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
-                        _limite_nodo_m = _u.buffer(_eps).buffer(-_eps)
-                        # Quedarnos solo con el anillo exterior (descartar huecos internos)
-                        try:
-                            from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
-                            if isinstance(_limite_nodo_m, _MPoly):
-                                _limite_nodo_m = _MPoly([_Poly(p.exterior) for p in _limite_nodo_m.geoms])
-                            elif isinstance(_limite_nodo_m, _Poly):
-                                _limite_nodo_m = _Poly(_limite_nodo_m.exterior)
-                        except Exception:
-                            pass
+                        # closing (+ε, −ε) para unir CPs casi-adyacentes y borrar líneas internas
+                        _closed = _u.buffer(_eps).buffer(-_eps)
+                        # Rellenar huecos internos: quedarse SOLO con el contorno exterior de
+                        # cada pieza → el territorio del nodo queda sólido hasta su borde.
+                        if isinstance(_closed, _MPoly):
+                            _limite_nodo_m = _MPoly([_Poly(p.exterior) for p in _closed.geoms])
+                        elif isinstance(_closed, _Poly):
+                            _limite_nodo_m = _Poly(_closed.exterior)
+                        else:
+                            _limite_nodo_m = _closed
                         _limite_nodo_wgs = gpd.GeoSeries([_limite_nodo_m], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0]
                         _limite_geojson = _limite_nodo_wgs.__geo_interface__
                     except Exception:
