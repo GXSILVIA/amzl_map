@@ -422,20 +422,23 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     # ═══════════════════════════════════════════════════════════════
     # 📍 FACTIBILIDAD DE PROSPECCIÓN ("¿Dónde prospectar?")
-    #    Un CP es PROSPECTABLE si su Volumen Total, sumado al de los CPs
+    #    Un CP es PROSPECTABLE si su UPSIDE LIBRE (volumen disponible que
+    #    NINGUNA zona cubre todavía), sumado al Upside Libre de los CPs
     #    vecinos cuyos CENTROIDES caen dentro de 750 m, alcanza ≥ 32.
-    #    (Regla de negocio: para ingresar un VR nuevo o ampliar capacidad.)
+    #    Se usa Upside Libre (no Volumen Total) porque solo se puede prospectar
+    #    sobre volumen DISPONIBLE — lo ya ocupado por zonas no cuenta.
     # ═══════════════════════════════════════════════════════════════
     _UMBRAL_PROSPECCION = 32
     _RADIO_PROSPECCION_M = 750
     try:
         # Proyectar a métrico (Lambert México) para medir 750 m con precisión
-        _gdf_prox = gdf_mapa_cp_wgs84[['CP', 'VOLUMEN', 'geometry']].copy()
+        _gdf_prox = gdf_mapa_cp_wgs84[['CP', '_UPSIDE_LIBRE', 'geometry']].copy()
         _gdf_prox_m = _gdf_prox.to_crs("EPSG:6362")
         _cent_m = _gdf_prox_m.geometry.centroid
         _cx = _cent_m.x.to_numpy()
         _cy = _cent_m.y.to_numpy()
-        _vol = pd.to_numeric(_gdf_prox_m['VOLUMEN'], errors='coerce').fillna(0).to_numpy(dtype=float)
+        # ⚡ Usar UPSIDE LIBRE (disponible), no Volumen Total
+        _vol = pd.to_numeric(_gdf_prox_m['_UPSIDE_LIBRE'], errors='coerce').fillna(0).to_numpy(dtype=float)
         _cps_arr = _gdf_prox_m['CP'].astype(str).to_numpy()
         _n = len(_cx)
         _vol_acum = np.zeros(_n, dtype=float)
@@ -469,17 +472,36 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] = (gdf_mapa_cp_wgs84['_VOL_750M'] >= _UMBRAL_PROSPECCION).astype(int)
 
     # 📍 Centroides (lat/lon WGS84) de los CPs factibles → para dibujar círculos verdes de 750m
+    #    ⚡ DEDUPLICACIÓN: los CPs factibles se solapan mucho dentro de 750m, lo que
+    #       generaría cientos de círculos encimados. Usamos un algoritmo greedy:
+    #       ordenamos los CPs factibles por mayor upside acumulado, y por cada uno que
+    #       elegimos como centro de círculo, descartamos todos los demás factibles que
+    #       caen dentro de su radio de 750m. Resultado: pocos círculos representativos
+    #       sin solape excesivo, cada uno marcando una oportunidad distinta.
     _prosp_centros = []  # [(lat, lon, cp_str, vol_acum)]
     try:
-        _fact = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] == 1]
+        _fact = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] == 1].copy()
         if not _fact.empty:
-            _cent_wgs = _fact.geometry.centroid
-            for _cpv, _vacum, _cxy in zip(
-                _fact['CP'].astype(str).tolist(),
-                _fact['_VOL_750M'].tolist(),
-                _cent_wgs.tolist()
-            ):
-                _prosp_centros.append((_cxy.y, _cxy.x, _cpv, int(_vacum)))
+            # Centroides en métrico (Lambert) para medir 750m, y en WGS84 para dibujar
+            _fact_m = _fact.to_crs("EPSG:6362")
+            _cm = _fact_m.geometry.centroid
+            _fx = _cm.x.to_numpy(); _fy = _cm.y.to_numpy()
+            _cw = _fact.to_crs("EPSG:4326").geometry.centroid
+            _flat = _cw.y.to_numpy(); _flon = _cw.x.to_numpy()
+            _fcp = _fact['CP'].astype(str).tolist()
+            _fvol = _fact['_VOL_750M'].to_numpy()
+            # Ordenar índices por upside acumulado DESC (los más fuertes primero)
+            _orden = list(np.argsort(-_fvol))
+            _usado = np.zeros(len(_fx), dtype=bool)
+            _r2d = float(_RADIO_PROSPECCION_M) ** 2
+            for _idx in _orden:
+                if _usado[_idx]:
+                    continue
+                # elegir este CP como centro de un círculo de oportunidad
+                _prosp_centros.append((float(_flat[_idx]), float(_flon[_idx]), _fcp[_idx], int(_fvol[_idx])))
+                # descartar todos los factibles dentro de 750m de este centro
+                _dd = (_fx - _fx[_idx])**2 + (_fy - _fy[_idx])**2
+                _usado[_dd <= _r2d] = True
     except Exception:
         _prosp_centros = []
 
@@ -487,7 +509,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
         _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', '_VOL_750M', '_PROSPECTAR', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Vol. en 750m (acum):', '¿Prospectar? (≥32):', 'Partners:', 'Rango:']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Upside disp. en 750m:', '¿Prospectar? (≥32):', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -657,8 +679,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             fill=True,
             fill_color='#22c55e',
             fill_opacity=0.35,
-            tooltip=f"✅ Prospectable — CP {_pcp}<br>Vol. acumulado en 750m: {_pvol} (≥32)",
-            popup=folium.Popup(f"<b>✅ Zona prospectable</b><br>CP base: {_pcp}<br>Volumen acumulado en 750m: <b>{_pvol}</b> pqts<br>Umbral mínimo: 32<br><i>Cabe un nuevo VR o ampliar capacidad.</i>", max_width=300)
+            tooltip=f"✅ Prospectable — CP {_pcp}<br>Upside disponible en 750m: {_pvol} (≥32)",
+            popup=folium.Popup(f"<b>✅ Zona prospectable</b><br>CP base: {_pcp}<br>Upside disponible en 750m: <b>{_pvol}</b> pqts<br>Umbral mínimo: 32<br><i>Cabe un nuevo VR o ampliar capacidad.</i>", max_width=300)
         ).add_to(fg_prospeccion)
     fg_prospeccion.add_to(m)
 
@@ -1402,9 +1424,14 @@ if st.session_state["authentication_status"]:
                 for nodo in nodos_unicos_maestro:
                     sub_cob_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
                     if not sub_cob_nodo.empty:
-                        # Estado(s) al que pertenece este nodo
-                        estados_nodo = sub_cob_nodo['ESTADO_PERTENECE'].unique()
-                        estado_txt = ", ".join(sorted([e.upper() for e in estados_nodo]))
+                        # 🗺️ Estado del nodo = VOTO POR MAYORÍA de sus CPs.
+                        #    Un CP fronterizo puede venir del GeoJSON del estado vecino
+                        #    (p.ej. un CP de Oaxaca que también existe en el archivo de
+                        #    Veracruz). Para no mal-clasificar el nodo, lo asignamos al
+                        #    estado donde está la MAYORÍA de sus CPs.
+                        _conteo_estados = sub_cob_nodo['ESTADO_PERTENECE'].value_counts()
+                        _estado_dominante = _conteo_estados.index[0] if len(_conteo_estados) else "DESCONOCIDO"
+                        estado_txt = str(_estado_dominante).upper()
 
                         g_cob_nodo = unary_union(sub_cob_nodo['geometry'].buffer(0))
 
