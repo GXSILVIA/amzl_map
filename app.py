@@ -432,13 +432,14 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     _RADIO_PROSPECCION_M = 750
     try:
         # Proyectar a métrico (Lambert México) para medir 750 m con precisión
-        _gdf_prox = gdf_mapa_cp_wgs84[['CP', '_UPSIDE_LIBRE', 'geometry']].copy()
+        _gdf_prox = gdf_mapa_cp_wgs84[['CP', 'VOLUMEN', 'geometry']].copy()
         _gdf_prox_m = _gdf_prox.to_crs("EPSG:6362")
         _cent_m = _gdf_prox_m.geometry.centroid
         _cx = _cent_m.x.to_numpy()
         _cy = _cent_m.y.to_numpy()
-        # ⚡ Usar UPSIDE LIBRE (disponible), no Volumen Total
-        _vol = pd.to_numeric(_gdf_prox_m['_UPSIDE_LIBRE'], errors='coerce').fillna(0).to_numpy(dtype=float)
+        # ⚡ Prospección sobre VOLUMEN TOTAL del CP (el volumen manda: si hay ≥32 de
+        #    volumen en 750m, cabe una zona — sin importar lo ya ocupado).
+        _vol = pd.to_numeric(_gdf_prox_m['VOLUMEN'], errors='coerce').fillna(0).to_numpy(dtype=float)
         _cps_arr = _gdf_prox_m['CP'].astype(str).to_numpy()
         _n = len(_cx)
         _vol_acum = np.zeros(_n, dtype=float)
@@ -512,7 +513,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         #    (Upside disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
         #    Esos datos de prospección ya se muestran en los círculos verdes del mapa.
         _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Partners:', 'Rango:']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside de Zona:', 'Upside Libre:', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
