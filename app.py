@@ -1365,6 +1365,16 @@ if st.session_state["authentication_status"]:
                             _limite_nodo_m = _Poly(_closed.exterior)
                         else:
                             _limite_nodo_m = _closed
+                        # 🔁 DOBLE LÍNEA: encoger el contorno ~50m hacia ADENTRO. En las
+                        #    fronteras compartidas, el borde de cada nodo queda ligeramente
+                        #    dentro de su territorio → las dos líneas (una por nodo, cada una
+                        #    de su color) NO caen en el mismo píxel y AMBAS se ven.
+                        try:
+                            _inset = _limite_nodo_m.buffer(-50)
+                            if _inset is not None and not _inset.is_empty and _inset.area > 0:
+                                _limite_nodo_m = _inset
+                        except Exception:
+                            pass
                         _limite_nodo_wgs = gpd.GeoSeries([_limite_nodo_m], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0]
                         _limite_geojson = _limite_nodo_wgs.__geo_interface__
                     except Exception:
