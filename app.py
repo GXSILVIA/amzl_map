@@ -1262,8 +1262,17 @@ if st.session_state["authentication_status"]:
                     if partners_del_nodo.empty:
                         continue
 
-                    masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
-                    centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
+                    # 🎯 CENTROIDE DEL NODO = centro de la ACUMULACIÓN de zonas:
+                    #    promedio de los CENTROS de los círculos del nodo (centro de masa
+                    #    de las posiciones de las zonas). NO el centroide del área unida
+                    #    (unary_union.centroid), que se sesga hacia círculos grandes o
+                    #    aglomerados. El promedio de centros refleja el centro geométrico
+                    #    real de dónde están acumuladas las zonas del nodo.
+                    _centros_zonas = partners_del_nodo['geometry'].centroid
+                    _mx = float(_centros_zonas.x.mean())
+                    _my = float(_centros_zonas.y.mean())
+                    from shapely.geometry import Point as _ShPoint
+                    centroide_acumulacion_nodo_m = _ShPoint(_mx, _my)
 
                     centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
 
