@@ -468,6 +468,21 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # flag booleano simple (0/1) para que el JS del botón lo lea fácil
     gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] = (gdf_mapa_cp_wgs84['_VOL_750M'] >= _UMBRAL_PROSPECCION).astype(int)
 
+    # 📍 Centroides (lat/lon WGS84) de los CPs factibles → para dibujar círculos verdes de 750m
+    _prosp_centros = []  # [(lat, lon, cp_str, vol_acum)]
+    try:
+        _fact = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] == 1]
+        if not _fact.empty:
+            _cent_wgs = _fact.geometry.centroid
+            for _cpv, _vacum, _cxy in zip(
+                _fact['CP'].astype(str).tolist(),
+                _fact['_VOL_750M'].tolist(),
+                _cent_wgs.tolist()
+            ):
+                _prosp_centros.append((_cxy.y, _cxy.x, _cpv, int(_vacum)))
+    except Exception:
+        _prosp_centros = []
+
     if not gdf_mapa_cp_wgs84.empty:
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
@@ -626,6 +641,27 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             ).add_to(fg_anillos)
     fg_anillos.add_to(m)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 📍 CAPA DE PROSPECCIÓN — círculos verdes de 750m en cada CP factible
+    #    (Volumen Total acumulado ≥ 32 en radio de 750m centroide-a-centroide).
+    #    Aparece como un check más en el control de capas (apagada por defecto).
+    #    Marca los espacios donde PODRÍA ingresar un nuevo VR o ampliar capacidad.
+    # ═══════════════════════════════════════════════════════════════
+    fg_prospeccion = folium.FeatureGroup(name="📍 Prospección (750m)", show=False)
+    for _plat, _plon, _pcp, _pvol in _prosp_centros:
+        folium.Circle(
+            location=[_plat, _plon],
+            radius=750,  # metros — mismo radio de la regla de negocio
+            color='#15803d',
+            weight=2,
+            fill=True,
+            fill_color='#22c55e',
+            fill_opacity=0.35,
+            tooltip=f"✅ Prospectable — CP {_pcp}<br>Vol. acumulado en 750m: {_pvol} (≥32)",
+            popup=folium.Popup(f"<b>✅ Zona prospectable</b><br>CP base: {_pcp}<br>Volumen acumulado en 750m: <b>{_pvol}</b> pqts<br>Umbral mínimo: 32<br><i>Cabe un nuevo VR o ampliar capacidad.</i>", max_width=300)
+        ).add_to(fg_prospeccion)
+    fg_prospeccion.add_to(m)
+
     folium.LayerControl(position='topright', collapsed=False).add_to(m)
 
     # ═══════════════════════════════════════════════════════════════
@@ -650,26 +686,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         <span id="cpResult" style="font-size:12px; max-width:350px;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
-    <!-- 🖱️ Botón de modo de información: Hover (pasar mouse) ⇄ Click (seleccionar) -->
-    <div id="ttModeBar" style="
-        position:fixed; top:58px; left:50%; transform:translateX(-50%); z-index:9999;
-        background:white; padding:6px 10px; border-radius:10px;
-        box-shadow:0 4px 16px rgba(0,0,0,0.25);
-        display:flex; align-items:center; gap:8px;
-        font-family:'Segoe UI',sans-serif;">
-        <span style="font-size:12px; color:#475569;">Info:</span>
-        <button id="ttModeBtn" onclick="toggleTooltipMode()"
-            style="background:#16a34a; color:white; border:none; border-radius:6px;
-            padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;">
-            🖱️ Hover (pasar mouse)</button>
-        <span id="ttModeHint" style="font-size:11px; color:#94a3b8;">Zonas encimadas → cambia a Click</span>
-        <span style="width:1px; height:22px; background:#e2e8f0; margin:0 4px;"></span>
-        <button id="prospBtn" onclick="toggleProspectar()"
-            style="background:#f59e0b; color:white; border:none; border-radius:6px;
-            padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;">
-            📍 ¿Dónde prospectar?</button>
-        <span id="prospHint" style="font-size:11px; color:#94a3b8;">Resalta CPs con ≥32 vol en 750m</span>
-    </div>
+    <!-- 🖱️ Botón de modo de información (Hover ⇄ Click) — se inyecta DENTRO del
+         control de capas de Leaflet (junto a CP/Zonas/Radio) vía JS en initCPSearch. -->
     <script>
     window.addEventListener('load', function() {
         setTimeout(function() { initCPSearch(); }, 1500);
@@ -835,6 +853,28 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             }
         });
 
+        // 🖱️ Inyectar el botón "Info: Hover/Click" DENTRO del control de capas
+        //    (junto a CP/Zonas/Radio/Prospección), como una fila más del panel.
+        try {
+            var _lc = document.querySelector('.leaflet-control-layers-list');
+            if (_lc && !document.getElementById('ttModeRow')) {
+                var _sep = document.createElement('div');
+                _sep.className = 'leaflet-control-layers-separator';
+                _lc.appendChild(_sep);
+                var _row = document.createElement('div');
+                _row.id = 'ttModeRow';
+                _row.style.cssText = 'padding:4px 2px; font-family:\\'Segoe UI\\',sans-serif;';
+                _row.innerHTML =
+                    '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
+                    'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
+                    'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
+                    '🖱️ Info: Hover</button>' +
+                    '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
+                    'Zonas encimadas → Click</div>';
+                _lc.appendChild(_row);
+            }
+        } catch(e) {}
+
         try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
     }
 
@@ -875,19 +915,26 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if (window._ttMode === 'hover') {
             // → Pasar a modo CLICK: desenlazar todos los tooltips (guardándolos)
             window._ttStore = [];
+            var _nOff = 0;
             _ttWalk(map, function(ly) {
+                // Caso 1: capa individual con tooltip propio
                 if (ly.getTooltip && ly.getTooltip()) {
                     var tt = ly.getTooltip();
                     window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
                     ly.unbindTooltip();
+                    _nOff++;
+                }
+                // Caso 2 (Canvas/GeoJson): bloquear el evento de tooltip a nivel capa
+                if (ly.off && ly.on) {
+                    try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {}
                 }
             });
             window._ttMode = 'click';
             if (btn) {
-                btn.innerHTML = '👆 Click (seleccionar)';
+                btn.innerHTML = '👆 Info: Click';
                 btn.style.background = '#2563eb';
             }
-            if (hint) hint.innerHTML = 'Clic en la zona para ver su info';
+            if (hint) hint.innerHTML = 'Clic para ver info';
         } else {
             // → Volver a modo HOVER: re-enlazar los tooltips guardados
             window._ttStore.forEach(function(rec) {
@@ -896,72 +943,13 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             window._ttStore = [];
             window._ttMode = 'hover';
             if (btn) {
-                btn.innerHTML = '🖱️ Hover (pasar mouse)';
+                btn.innerHTML = '🖱️ Info: Hover';
                 btn.style.background = '#16a34a';
             }
-            if (hint) hint.innerHTML = 'Zonas encimadas → cambia a Click';
+            if (hint) hint.innerHTML = 'Zonas encimadas → Click';
         }
     };
 
-    // ═══════════════════════════════════════════════════════════════
-    // 📍 ¿DÓNDE PROSPECTAR? — resalta los CPs con _PROSPECTAR_FLAG==1
-    //    (Volumen Total acumulado ≥ 32 en radio de 750 m centroide-a-centroide).
-    //    Al activar: CPs factibles con borde naranja grueso + relleno opaco;
-    //    el resto se atenúa. Al desactivar: restaura estilos originales.
-    // ═══════════════════════════════════════════════════════════════
-    window._prospMode = false;
-    window._prospStore = [];   // {layer, style original}
-
-    window.toggleProspectar = function() {
-        var map = _ttFindMap();
-        var btn = document.getElementById('prospBtn');
-        var hint = document.getElementById('prospHint');
-        if (!map) { return; }
-
-        if (!window._prospMode) {
-            // → ACTIVAR: recorrer capas CP y resaltar las factibles
-            window._prospStore = [];
-            var _nFact = 0;
-            _ttWalk(map, function(ly) {
-                if (ly.feature && ly.feature.properties && ('_PROSPECTAR_FLAG' in ly.feature.properties)) {
-                    // guardar estilo original para restaurar
-                    var o = ly.options || {};
-                    window._prospStore.push({
-                        layer: ly,
-                        fillColor: o.fillColor, fillOpacity: o.fillOpacity,
-                        color: o.color, weight: o.weight
-                    });
-                    var flag = parseInt(ly.feature.properties._PROSPECTAR_FLAG) || 0;
-                    if (flag === 1) {
-                        // CP factible → resaltar
-                        ly.setStyle({ color: '#ea580c', weight: 3.5, fillColor: '#f59e0b', fillOpacity: 0.75 });
-                        if (ly.bringToFront) ly.bringToFront();
-                        _nFact++;
-                    } else {
-                        // CP no factible → atenuar
-                        ly.setStyle({ fillOpacity: 0.08, weight: 0.5 });
-                    }
-                }
-            });
-            window._prospMode = true;
-            if (btn) { btn.innerHTML = '📍 Prospección: ON'; btn.style.background = '#ea580c'; }
-            if (hint) hint.innerHTML = _nFact + ' CPs factibles (≥32 en 750m)';
-        } else {
-            // → DESACTIVAR: restaurar estilos originales
-            window._prospStore.forEach(function(rec) {
-                try {
-                    rec.layer.setStyle({
-                        fillColor: rec.fillColor, fillOpacity: rec.fillOpacity,
-                        color: rec.color, weight: rec.weight
-                    });
-                } catch(e) {}
-            });
-            window._prospStore = [];
-            window._prospMode = false;
-            if (btn) { btn.innerHTML = '📍 ¿Dónde prospectar?'; btn.style.background = '#f59e0b'; }
-            if (hint) hint.innerHTML = 'Resalta CPs con ≥32 vol en 750m';
-        }
-    };
     </script>
     """
     m.get_root().html.add_child(folium.Element(search_html))
@@ -1385,6 +1373,31 @@ if st.session_state["authentication_status"]:
                 # ═══════════════════════════════════════════════════════════════
                 # 📊 DESGLOSE POR NODO (ZONA) — Territorio, Ocupado, Libre, Eficiencia
                 # ═══════════════════════════════════════════════════════════════
+                # 🔢 ZONAS POR NODO = nº de CÍRCULOS del SEGUNDO archivo (Zonas) que
+                #    caen en cada nodo. NO se usa la columna PARTNERS del primer archivo
+                #    (esos son posibles ingresos, no zonas operativas reales).
+                #    Se cuenta cada círculo UNA sola vez, asignándolo al nodo del CP
+                #    con mayor área de intersección (evita doble conteo entre nodos).
+                zonas_por_nodo = {}
+                try:
+                    _circ_cnt = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy()
+                    _circ_cnt['geometry'] = _circ_cnt.geometry.buffer(0)
+                    _cob_cnt = gdf_cobertura_m[['ZONA', 'geometry']].copy()
+                    _cob_cnt['geometry'] = _cob_cnt.geometry.buffer(0)
+                    _sj_cnt = gpd.sjoin(_circ_cnt, _cob_cnt, how='inner', predicate='intersects')
+                    # Para cada círculo (NOMBRE), elegir el nodo (ZONA) donde más intersecta.
+                    # Como sjoin no da área, asignamos por mayor nº de CPs del nodo tocados
+                    # (aproximación estable) — o el primero si hay empate.
+                    _asig = {}
+                    for _nom, _grp in _sj_cnt.groupby('NOMBRE'):
+                        _conteo = _grp['ZONA'].value_counts()
+                        _asig[_nom] = _conteo.index[0] if len(_conteo) else None
+                    for _nom, _nod in _asig.items():
+                        if _nod is not None:
+                            zonas_por_nodo[_nod] = zonas_por_nodo.get(_nod, 0) + 1
+                except Exception:
+                    zonas_por_nodo = {}
+
                 desglose_nodos = []
                 for nodo in nodos_unicos_maestro:
                     sub_cob_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
@@ -1411,9 +1424,10 @@ if st.session_state["authentication_status"]:
                         else:
                             eficiencia = 0.0
 
-                        # Volumen y Partners totales del nodo
+                        # Volumen total del nodo
                         vol_nodo = sub_cob_nodo['VOLUMEN'].sum() if 'VOLUMEN' in sub_cob_nodo.columns else 0
-                        partners_nodo = sub_cob_nodo['PARTNERS'].sum() if 'PARTNERS' in sub_cob_nodo.columns else 0
+                        # 🔢 Partners = nº de ZONAS/círculos del 2º archivo asignados a este nodo
+                        partners_nodo = int(zonas_por_nodo.get(nodo, 0))
                         num_cps_nodo = len(sub_cob_nodo)
 
                         desglose_nodos.append({
@@ -1421,7 +1435,7 @@ if st.session_state["authentication_status"]:
                             "Estado": estado_txt,
                             "CPs": num_cps_nodo,
                             "Volumen Total": int(vol_nodo),
-                            "Partners": int(partners_nodo),
+                            "Zonas (Partners)": int(partners_nodo),
                             "Territorio Cobertura Total (km²)": round(cob_km2, 2),
                             "Territorio Ocupado Total (km²)": round(ocu_km2, 2),
                             "Territorio Libre Total (km²)": round(lib_km2, 2),
@@ -1430,7 +1444,7 @@ if st.session_state["authentication_status"]:
 
                 df_desglose = pd.DataFrame(desglose_nodos)
                 if df_desglose.empty:
-                    df_desglose = pd.DataFrame(columns=["Nodo", "Estado", "CPs", "Volumen Total", "Partners", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
+                    df_desglose = pd.DataFrame(columns=["Nodo", "Estado", "CPs", "Volumen Total", "Zonas (Partners)", "Territorio Cobertura Total (km²)", "Territorio Ocupado Total (km²)", "Territorio Libre Total (km²)", "Eficiencia de Ocupación"])
 
                 nodos_validos = df_desglose['Nodo'].unique().tolist() if not df_desglose.empty else []
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ZONA'].isin(nodos_validos)] if nodos_validos else gdf_cobertura
