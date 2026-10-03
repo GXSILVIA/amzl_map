@@ -507,11 +507,31 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 if _k <= 0 or _geo_m is None or _geo_m.is_empty:
                     continue
                 _poly = _geo_m.buffer(0)
-                minx, miny, maxx, maxy = _poly.bounds
                 # Centros de zonas existentes CERCANAS a este CP (para no encimar)
                 _cx_cp, _cy_cp = _poly.centroid.x, _poly.centroid.y
                 _ocupados = [(zx, zy) for (zx, zy) in _zonas_centros
                              if (zx - _cx_cp)**2 + (zy - _cy_cp)**2 <= (3 * _R)**2]
+
+                # 📐 MARGEN INTERIOR: encoger el polígono hacia adentro para que los
+                #    CENTROS de los círculos queden alejados del borde → el círculo de
+                #    750m sobresale LO MÍNIMO. Se intenta un margen de ~1 radio; si el CP
+                #    es pequeño y el buffer negativo lo vacía, se reduce el margen
+                #    progresivamente y, en última instancia, se usa el polígono completo
+                #    (en CPs < 750m es físicamente imposible que el círculo no sobresalga).
+                _poly_centros = _poly
+                for _m_factor in (1.0, 0.75, 0.5, 0.25):
+                    try:
+                        _shrink = _poly.buffer(-_R * _m_factor)
+                        if _shrink is not None and not _shrink.is_empty and _shrink.area > 0:
+                            _poly_centros = _shrink
+                            break
+                    except Exception:
+                        continue
+                # Si ningún margen dejó área, usar un buffer interior mínimo o el centroide
+                if _poly_centros.is_empty or _poly_centros.area <= 0:
+                    _poly_centros = _poly
+
+                minx, miny, maxx, maxy = _poly_centros.bounds
 
                 # Candidatos: puntos repartidos UNIFORMEMENTE dentro del polígono del CP.
                 #    (Distribución simple: solo evitar que los círculos queden encimados;
@@ -522,11 +542,12 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 _NEED = max(400, _k * 200)
                 while len(_cand) < _NEED and _tries < _NEED * 8:
                     _px = _rng.uniform(minx, maxx); _py = _rng.uniform(miny, maxy)
-                    if _poly.contains(shapely.geometry.Point(_px, _py)):
+                    # Centros DENTRO del polígono encogido (alejados del borde)
+                    if _poly_centros.contains(shapely.geometry.Point(_px, _py)):
                         _cand.append((_px, _py))
                     _tries += 1
                 if not _cand:
-                    _c = _poly.representative_point(); _cand = [(_c.x, _c.y)]
+                    _c = _poly_centros.representative_point(); _cand = [(_c.x, _c.y)]
                 _cand = np.array(_cand)
                 # 🎯 FARTHEST-POINT SAMPLING: coloca cada círculo nuevo en el candidato
                 #    que MAXIMIZA la distancia mínima a todo lo ya colocado (zonas
