@@ -706,6 +706,49 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # ═══════════════════════════════════════════════════════════════
     fg_anillos = folium.FeatureGroup(name="Radios", show=mostrar_anillos)
     if 'anillos_por_estado' in res:
+        # 🎨 COLOREO POR ADYACENCIA: paleta de neutros BIEN DIFERENCIABLES entre sí.
+        #    Se detecta qué nodos son vecinos (sus límites se tocan/solapan) y se asignan
+        #    colores con greedy graph coloring, de modo que nodos ADYACENTES nunca
+        #    reciban el mismo color ni tonos confundibles.
+        _PAL_NEUTROS = [
+            '#374151',  # gris muy oscuro
+            '#9ca3af',  # gris claro
+            '#78350f',  # marrón oscuro
+            '#d6d3d1',  # beige/gris muy claro
+            '#1e293b',  # azul-gris oscuro
+            '#a8a29e',  # taupe
+            '#57534e',  # marrón-gris medio
+            '#64748b',  # gris-azulado medio
+        ]
+        import shapely as _shp
+        _nodos_lista = list(res['anillos_por_estado'].keys())
+        # Construir geometrías de límites para test de adyacencia
+        _geoms_lim = {}
+        for _nk in _nodos_lista:
+            _lg = res['anillos_por_estado'][_nk].get('limite_nodo')
+            if _lg is not None:
+                try:
+                    _geoms_lim[_nk] = _shp.geometry.shape(_lg)
+                except Exception:
+                    _geoms_lim[_nk] = None
+        # Grafo de adyacencia: dos nodos son vecinos si sus límites se tocan/intersectan
+        _adj = {nk: set() for nk in _nodos_lista}
+        _claves = [k for k in _nodos_lista if _geoms_lim.get(k) is not None]
+        for _a in range(len(_claves)):
+            for _b in range(_a + 1, len(_claves)):
+                _ka, _kb = _claves[_a], _claves[_b]
+                try:
+                    if _geoms_lim[_ka].intersects(_geoms_lim[_kb]):
+                        _adj[_ka].add(_kb); _adj[_kb].add(_ka)
+                except Exception:
+                    pass
+        # Greedy coloring: ordenar por nº de vecinos desc (más restringidos primero)
+        _color_de_nodo = {}
+        for _nk in sorted(_nodos_lista, key=lambda k: -len(_adj[k])):
+            _usados = {_color_de_nodo[v] for v in _adj[_nk] if v in _color_de_nodo}
+            _elegido = next((c for c in _PAL_NEUTROS if c not in _usados), _PAL_NEUTROS[0])
+            _color_de_nodo[_nk] = _elegido
+
         for nodo_key, anillos in res['anillos_por_estado'].items():
             folium.Marker(
                 location=[anillos['centro_lat'], anillos['centro_lon']],
@@ -719,12 +762,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             #    Marca hasta dónde llega el nodo. Solo CONTORNO EXTERIOR, color por nodo.
             _lim = anillos.get('limite_nodo')
             if _lim is not None:
-                # 🎨 Color NEUTRO distinto por nodo (grises/marrones/tonos apagados) para
-                #    distinguir nodos juntos sin colores llamativos que compitan con el mapa.
-                _paleta_nodos = ['#4b5563', '#6b7280', '#78716c', '#57534e', '#44403c',
-                                 '#525252', '#737373', '#5f6b7a', '#846c5b', '#6b6b47',
-                                 '#334155', '#8a7a6d']
-                _col_nodo = _paleta_nodos[abs(hash(str(nodo_key))) % len(_paleta_nodos)]
+                # 🎨 Color asignado por COLOREO DE ADYACENCIA (nodos vecinos ≠ color).
+                _col_nodo = _color_de_nodo.get(nodo_key, _PAL_NEUTROS[0])
                 folium.GeoJson(
                     _lim,
                     style_function=lambda x, col=_col_nodo: {'fillColor': 'transparent', 'fillOpacity': 0,
