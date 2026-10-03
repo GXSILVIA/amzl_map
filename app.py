@@ -247,9 +247,10 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
     """
     import shapely  # shapely 2.x: contains / intersects vectorizados nativos
 
-    # ⚡ 8K CPs: 800 puntos/CP mantiene precisión (~±1-2% en upside) y es 2.5x
-    #    más rápido que 2000. El reparto 1/k y la semilla fija conservan estabilidad.
-    N = 800  # puntos por CP (balance precisión/velocidad para 8K CPs)
+    # ⚡ 2000 puntos/CP → precisión completa en el upside. Con el gpd.overlay ya
+    #    optimizado, el cuello de botella principal desapareció, así que podemos
+    #    permitirnos la precisión alta sin disparar el tiempo total.
+    N = 2000  # puntos por CP (precisión alta)
     rng = np.random.default_rng(42)
 
     # Preparar lista de zonas con geometría proyectada
@@ -811,9 +812,21 @@ if st.session_state["authentication_status"]:
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
-            with st.spinner("Calculando cobertura: Albers (áreas) + Lambert (distancias)..."):
+            # ═══════════════════════════════════════════════════════════════
+            # 📊 BARRA DE PROGRESO — avance real por fase del procesamiento
+            # ═══════════════════════════════════════════════════════════════
+            _pbar = st.progress(0, text="⏳ Iniciando procesamiento...")
+            def _prog(pct, msg):
+                try:
+                    _pbar.progress(min(100, int(pct)), text=msg)
+                except Exception:
+                    pass
+            import time as _time
+            _t0 = _time.time()
+            if True:
                 # Limpiar caché para garantizar datos frescos en cada procesamiento
                 st.cache_data.clear()
+                _prog(5, "📂 Leyendo archivos Excel (cobertura y zonas)...")
 
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
@@ -870,6 +883,7 @@ if st.session_state["authentication_status"]:
                     gdf_cob = gdf_base.merge(df_poly_user, left_on=cp_col, right_on='CP', how='inner').set_crs("EPSG:4326", allow_override=True)
                     return gdf_cob
 
+                _prog(15, "🗺️ Cargando mapas GeoJSON y cruzando con CPs...")
                 gdf_cobertura = generar_mapa_base_cached(edo_sel, estados_disponibles, df_poly_user)
 
                 if gdf_cobertura.empty:
@@ -968,6 +982,7 @@ if st.session_state["authentication_status"]:
                 #    (Monte Carlo VECTORIZADO por CP con reparto 1/k en zonas traslapadas)
                 #    Se usa gdf_cobertura_m (Albers) para áreas precisas.
                 # ═══════════════════════════════════════════════════════════════
+                _prog(35, "📦 Calculando Upside por zona (Monte Carlo vectorizado)...")
                 upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp = calcular_upside_por_zona(
                     gdf_cobertura_m, gdf_circles_m_corr.to_crs(CRS_AREAS), nodos_unicos_maestro
                 )
@@ -980,11 +995,25 @@ if st.session_state["authentication_status"]:
                 # ═══════════════════════════════════════════════════════════════
                 # (A) % cobertura de CADA CP contra la UNIÓN de partners (vectorizado):
                 #     usamos area de intersección CP ∩ union_partners sin bucle Python.
+                #     ⚠️ IMPORTANTE: reparar geometrías inválidas con make_valid/buffer(0)
+                #     ANTES de intersectar — evita shapely.errors.GEOSException.
                 _cob_area = gdf_cobertura_m[['CP', 'geometry']].copy()
+                # Reparar geometrías de CPs (anillos auto-intersectados, etc.)
+                try:
+                    _cob_area['geometry'] = _cob_area.geometry.make_valid()
+                except Exception:
+                    _cob_area['geometry'] = _cob_area.geometry.buffer(0)
                 _cob_area['_area_cp'] = _cob_area.geometry.area
                 if union_total_partners_m is not None:
-                    _gs_union = gpd.GeoSeries([union_total_partners_m] * len(_cob_area), index=_cob_area.index, crs=gdf_cobertura_m.crs)
-                    _inter_area = _cob_area.geometry.intersection(_gs_union).area
+                    # Reparar también la unión de partners
+                    _union_fix = union_total_partners_m.buffer(0)
+                    try:
+                        _inter_area = _cob_area.geometry.intersection(_union_fix).area
+                    except Exception:
+                        # Fallback robusto: calcular por CP con manejo de errores individual
+                        _inter_area = _cob_area.geometry.apply(
+                            lambda g: g.buffer(0).intersection(_union_fix).area if g is not None and not g.is_empty else 0.0
+                        )
                 else:
                     _inter_area = pd.Series(0.0, index=_cob_area.index)
                 _pct_cob = (_inter_area / _cob_area['_area_cp'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
@@ -1006,11 +1035,20 @@ if st.session_state["authentication_status"]:
                 #     el doble bucle zona(3000)×cp). Devuelve todas las intersecciones
                 #     reales de una vez. Luego calculamos % = area_inter / area_cp.
                 _zonas_gdf = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy()
-                _zonas_gdf['geometry'] = _zonas_gdf.geometry.buffer(0)
                 _cps_gdf = gdf_cobertura_m[['CP', 'ZONA', 'geometry']].copy()
-                _cps_gdf['geometry'] = _cps_gdf.geometry.buffer(0)
+                # ⚠️ Reparar geometrías inválidas ANTES del overlay (make_valid → buffer(0) fallback)
+                try:
+                    _zonas_gdf['geometry'] = _zonas_gdf.geometry.make_valid()
+                    _cps_gdf['geometry'] = _cps_gdf.geometry.make_valid()
+                except Exception:
+                    _zonas_gdf['geometry'] = _zonas_gdf.geometry.buffer(0)
+                    _cps_gdf['geometry'] = _cps_gdf.geometry.buffer(0)
+                # Descartar geometrías vacías/nulas que romperían el overlay
+                _zonas_gdf = _zonas_gdf[~_zonas_gdf.geometry.is_empty & _zonas_gdf.geometry.notna()]
+                _cps_gdf = _cps_gdf[~_cps_gdf.geometry.is_empty & _cps_gdf.geometry.notna()]
                 _cps_gdf['_area_cp'] = _cps_gdf.geometry.area
                 _pares_zona_cp = {}  # (nodo, zona_nombre) -> list[(cp_str, pct)]
+                _prog(55, "🔗 Cruzando zonas × CPs (overlay vectorizado)...")
                 try:
                     _ov = gpd.overlay(_zonas_gdf, _cps_gdf, how='intersection', keep_geom_type=False)
                     if not _ov.empty:
@@ -1023,7 +1061,11 @@ if st.session_state["authentication_status"]:
                 except Exception:
                     _pares_zona_cp = {}
 
-                for nodo_iter in nodos_unicos_maestro:
+                _n_nodos = max(1, len(nodos_unicos_maestro))
+                _prog(60, f"📍 Generando reportes por nodo (0/{_n_nodos})...")
+                for _i_nodo, nodo_iter in enumerate(nodos_unicos_maestro, 1):
+                    # progreso 60→80% repartido entre los nodos
+                    _prog(60 + int(20 * _i_nodo / _n_nodos), f"📍 Generando reportes por nodo ({_i_nodo}/{_n_nodos})...")
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo_iter]
                     # Proyección Lambert del mismo subconjunto para cálculos de distancia
                     sub_cob_lambert = gdf_cobertura_lambert[gdf_cobertura_lambert['ZONA'] == nodo_iter]
@@ -1179,6 +1221,7 @@ if st.session_state["authentication_status"]:
                 # Usar RADIO original en metros para el Monte Carlo
                 gdf_circles_para_traslape['RADIO'] = gdf_circles_para_traslape['RADIO_ORIG']
 
+                _prog(85, "🎲 Calculando traslape entre zonas (Monte Carlo)...")
                 traslape_por_zona, resultados_mc = calcular_traslape_por_zona(
                     gdf_cobertura.to_crs("EPSG:4326"), gdf_circles_para_traslape, nodos_unicos_maestro
                 )
@@ -1264,12 +1307,18 @@ if st.session_state["authentication_status"]:
                 #    y guardar su HTML en session_state. En reruns (checkboxes,
                 #    descargas) NO se reconstruye el mapa → la app responde al instante.
                 # ═══════════════════════════════════════════════════════════════
+                _prog(92, "🗺️ Construyendo mapa (Canvas renderer)...")
                 _mapa_html = construir_mapa_html(
                     st.session_state.resultados,
                     gdf_cobertura,
                     st.session_state.get('mostrar_anillos', True)
                 )
                 st.session_state['mapa_descarga_html'] = _mapa_html
+
+                _elapsed = _time.time() - _t0
+                _prog(100, f"✅ Procesamiento completo en {_elapsed:.1f}s")
+                _time.sleep(0.4)
+                _pbar.empty()
 
 
 
