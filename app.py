@@ -472,37 +472,83 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # flag booleano simple (0/1) para que el JS del botón lo lea fácil
     gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] = (gdf_mapa_cp_wgs84['_VOL_750M'] >= _UMBRAL_PROSPECCION).astype(int)
 
-    # 📍 Centroides (lat/lon WGS84) de los CPs factibles → para dibujar círculos verdes de 750m
-    #    ⚡ DEDUPLICACIÓN: los CPs factibles se solapan mucho dentro de 750m, lo que
-    #       generaría cientos de círculos encimados. Usamos un algoritmo greedy:
-    #       ordenamos los CPs factibles por mayor upside acumulado, y por cada uno que
-    #       elegimos como centro de círculo, descartamos todos los demás factibles que
-    #       caen dentro de su radio de 750m. Resultado: pocos círculos representativos
-    #       sin solape excesivo, cada uno marcando una oportunidad distinta.
-    _prosp_centros = []  # [(lat, lon, cp_str, vol_acum)]
+    # 📍 CÍRCULOS DE PROSPECCIÓN por CP factible (Volumen Total ≥ 32).
+    #    Nº de círculos de un CP = su valor PARTNERS (1er archivo) → círculos nuevos
+    #    directos. Si PARTNERS = 0 → NO se dibuja nada (PARTNERS manda, aunque haya vol).
+    #    Los círculos se REPARTEN dentro del polígono del CP, separados entre sí y
+    #    EVITANDO las zonas existentes (del 2º archivo), para que no queden encimados.
+    _prosp_centros = []  # [(lat, lon, cp_str, idx_circulo, total_circulos)]
     try:
+        import shapely
+        _RADIO_SEP_M = float(_RADIO_PROSPECCION_M)  # separación objetivo entre círculos
         _fact = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] == 1].copy()
+        # Geometrías de las ZONAS existentes (del 2º archivo) en métrico, para evitarlas
+        try:
+            _zonas_exist_m = gdf_circles_m_corr.to_crs("EPSG:6362")
+            _zonas_union = unary_union(_zonas_exist_m.geometry.buffer(0))
+        except Exception:
+            _zonas_union = None
         if not _fact.empty:
-            # Centroides en métrico (Lambert) para medir 750m, y en WGS84 para dibujar
-            _fact_m = _fact.to_crs("EPSG:6362")
-            _cm = _fact_m.geometry.centroid
-            _fx = _cm.x.to_numpy(); _fy = _cm.y.to_numpy()
-            _cw = _fact.to_crs("EPSG:4326").geometry.centroid
-            _flat = _cw.y.to_numpy(); _flon = _cw.x.to_numpy()
-            _fcp = _fact['CP'].astype(str).tolist()
-            _fvol = _fact['_VOL_750M'].to_numpy()
-            # Ordenar índices por upside acumulado DESC (los más fuertes primero)
-            _orden = list(np.argsort(-_fvol))
-            _usado = np.zeros(len(_fx), dtype=bool)
-            _r2d = float(_RADIO_PROSPECCION_M) ** 2
-            for _idx in _orden:
-                if _usado[_idx]:
+            _fact_m = _fact.to_crs("EPSG:6362")  # métrico para medir distancias
+            for _geo_m, _cpv, _parts in zip(
+                _fact_m.geometry.tolist(),
+                _fact['CP'].astype(str).tolist(),
+                pd.to_numeric(_fact['PARTNERS'], errors='coerce').fillna(0).astype(int).tolist()
+            ):
+                # PARTNERS manda: 0 partners → 0 círculos
+                _k = int(_parts)
+                if _k <= 0 or _geo_m is None or _geo_m.is_empty:
                     continue
-                # elegir este CP como centro de un círculo de oportunidad
-                _prosp_centros.append((float(_flat[_idx]), float(_flon[_idx]), _fcp[_idx], int(_fvol[_idx])))
-                # descartar todos los factibles dentro de 750m de este centro
-                _dd = (_fx - _fx[_idx])**2 + (_fy - _fy[_idx])**2
-                _usado[_dd <= _r2d] = True
+                _poly = _geo_m.buffer(0)
+                # Área del CP "libre" de zonas existentes (donde tiene sentido prospectar)
+                _libre = _poly
+                if _zonas_union is not None:
+                    try:
+                        _libre = _poly.difference(_zonas_union)
+                        if _libre.is_empty:
+                            _libre = _poly  # si todo está ocupado, usar el polígono completo
+                    except Exception:
+                        _libre = _poly
+                # Generar _k puntos repartidos dentro de _libre, separados entre sí.
+                # Muestreo: muchos candidatos aleatorios dentro del bbox, filtrar los que
+                # caen dentro de _libre, y elegir greedy los más separados.
+                minx, miny, maxx, maxy = _libre.bounds
+                _rng = np.random.default_rng(42)
+                _cand = []
+                _tries = 0
+                _NEED = max(300, _k * 150)
+                while len(_cand) < _NEED and _tries < _NEED * 6:
+                    _px = _rng.uniform(minx, maxx)
+                    _py = _rng.uniform(miny, maxy)
+                    _pt = shapely.geometry.Point(_px, _py)
+                    if _libre.contains(_pt):
+                        _cand.append((_px, _py))
+                    _tries += 1
+                if not _cand:
+                    # fallback: usar el centroide del área libre
+                    _c = _libre.representative_point()
+                    _cand = [(_c.x, _c.y)]
+                _cand = np.array(_cand)
+                # Greedy: elegir el 1º (más cerca del centro del área libre), luego los
+                # que maximizan la distancia mínima a los ya elegidos (reparto uniforme).
+                _elegidos = []
+                _c0 = _libre.representative_point()
+                _d0 = (_cand[:, 0] - _c0.x)**2 + (_cand[:, 1] - _c0.y)**2
+                _elegidos.append(int(np.argmin(_d0)))
+                while len(_elegidos) < _k and len(_elegidos) < len(_cand):
+                    _sel = np.array(_elegidos)
+                    # distancia de cada candidato al elegido más cercano
+                    _dmin = np.min(
+                        (_cand[:, None, 0] - _cand[_sel, 0])**2 + (_cand[:, None, 1] - _cand[_sel, 1])**2,
+                        axis=1
+                    )
+                    _dmin[_sel] = -1  # no re-elegir
+                    _elegidos.append(int(np.argmax(_dmin)))
+                # Convertir los puntos elegidos a WGS84 para dibujar
+                _pts_m = [shapely.geometry.Point(_cand[i][0], _cand[i][1]) for i in _elegidos]
+                _gs = gpd.GeoSeries(_pts_m, crs="EPSG:6362").to_crs("EPSG:4326")
+                for _j, _pwgs in enumerate(_gs.tolist(), 1):
+                    _prosp_centros.append((float(_pwgs.y), float(_pwgs.x), _cpv, _j, _k))
     except Exception:
         _prosp_centros = []
 
@@ -674,7 +720,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     #    Marca los espacios donde PODRÍA ingresar un nuevo VR o ampliar capacidad.
     # ═══════════════════════════════════════════════════════════════
     fg_prospeccion = folium.FeatureGroup(name="📍 Prospección (750m)", show=False)
-    for _plat, _plon, _pcp, _pvol in _prosp_centros:
+    for _plat, _plon, _pcp, _pidx, _ptot in _prosp_centros:
         folium.Circle(
             location=[_plat, _plon],
             radius=750,  # metros — mismo radio de la regla de negocio
@@ -683,8 +729,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             fill=True,
             fill_color='#22c55e',
             fill_opacity=0.35,
-            tooltip=f"✅ Prospectable — CP {_pcp}<br>Upside disponible en 750m: {_pvol} (≥32)",
-            popup=folium.Popup(f"<b>✅ Zona prospectable</b><br>CP base: {_pcp}<br>Upside disponible en 750m: <b>{_pvol}</b> pqts<br>Umbral mínimo: 32<br><i>Cabe un nuevo VR o ampliar capacidad.</i>", max_width=300)
+            tooltip=f"✅ Prospectable — CP {_pcp}<br>Zona nueva {_pidx} de {_ptot} (según Partners)",
+            popup=folium.Popup(f"<b>✅ Zona prospectable</b><br>CP: {_pcp}<br>Zona nueva <b>{_pidx} de {_ptot}</b> (según Partners del CP)<br><i>Cabe un nuevo VR o ampliar capacidad aquí.</i>", max_width=300)
         ).add_to(fg_prospeccion)
     fg_prospeccion.add_to(m)
 
