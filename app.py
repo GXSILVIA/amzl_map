@@ -715,6 +715,18 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             c_lat = anillos['centro_lat']
             c_lon = anillos['centro_lon']
 
+            # 🔲 LÍMITE DEL NODO: contorno del territorio (CPs del 1er archivo disueltos)
+            #    Marca hasta dónde llega el nodo. Borde azul grueso, sin relleno.
+            _lim = anillos.get('limite_nodo')
+            if _lim is not None:
+                folium.GeoJson(
+                    _lim,
+                    style_function=lambda x: {'fillColor': 'transparent', 'fillOpacity': 0,
+                                              'color': '#1d4ed8', 'weight': 3},
+                    tooltip=f"Límite Nodo: {str(nodo_key).upper()}",
+                    interactive=True
+                ).add_to(fg_anillos)
+
             folium.GeoJson(
                 anillos['r15'],
                 style_function=lambda x: {'fillColor': 'transparent', 'color': '#e74c3c', 'weight': 2, 'dashArray': '5, 5'},
@@ -1268,11 +1280,11 @@ if st.session_state["authentication_status"]:
                     #    (unary_union.centroid), que se sesga hacia círculos grandes o
                     #    aglomerados. El promedio de centros refleja el centro geométrico
                     #    real de dónde están acumuladas las zonas del nodo.
+                    #    Se usa el promedio de los centros de TODOS los círculos del nodo.
                     _centros_zonas = partners_del_nodo['geometry'].centroid
                     _mx = float(_centros_zonas.x.mean())
                     _my = float(_centros_zonas.y.mean())
-                    from shapely.geometry import Point as _ShPoint
-                    centroide_acumulacion_nodo_m = _ShPoint(_mx, _my)
+                    centroide_acumulacion_nodo_m = Point(_mx, _my)
 
                     centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
 
@@ -1282,12 +1294,24 @@ if st.session_state["authentication_status"]:
                     b10 = centroide_acumulacion_nodo_m.buffer(10000)
                     b15 = centroide_acumulacion_nodo_m.buffer(15000)
 
+                    # 🔲 LÍMITE DEL NODO: contorno del conjunto de CPs (1er archivo) que
+                    #    forman este nodo → marca hasta dónde llega el territorio del nodo.
+                    #    Se disuelven todos los CPs del nodo en un solo polígono y se guarda
+                    #    su geometría (en WGS84) para dibujar su borde en el mapa.
+                    try:
+                        _limite_nodo_m = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
+                        _limite_nodo_wgs = gpd.GeoSeries([_limite_nodo_m], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0]
+                        _limite_geojson = _limite_nodo_wgs.__geo_interface__
+                    except Exception:
+                        _limite_geojson = None
+
                     anillos_por_estado[nodo] = {
                         'centro_lat': pt_gps.y,
                         'centro_lon': pt_gps.x,
                         'r5': gpd.GeoSeries([b5], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
                         'r10': gpd.GeoSeries([b10], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                        'r15': gpd.GeoSeries([b15], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__
+                        'r15': gpd.GeoSeries([b15], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
+                        'limite_nodo': _limite_geojson  # contorno del territorio del nodo (CPs disueltos)
                     }
 
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
