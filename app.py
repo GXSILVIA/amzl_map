@@ -508,8 +508,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     if not gdf_mapa_cp_wgs84.empty:
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
-        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', '_VOL_750M', '_PROSPECTAR', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Upside disp. en 750m:', '¿Prospectar? (≥32):', 'Partners:', 'Rango:']
+        # ⚠️ Se quitó '_UPSIDE_ZONAS' (Upside por Zona) del tooltip de CPs a pedido de la usuaria.
+        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_VOL_750M', '_PROSPECTAR', 'PARTNERS', '_rango_txt']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside disp. en 750m:', '¿Prospectar? (≥32):', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -1155,10 +1156,13 @@ if st.session_state["authentication_status"]:
 
                     partners_del_nodo = gdf_circles_m_lambert[gdf_circles_m_lambert['geometry'].intersects(g_cob_nodo_global)]
 
+                    # 🚫 REGLA: si el nodo NO tiene zonas (círculos del 2º archivo) encima,
+                    #    NO se calcula centroide ni anillos — el nodo se omite por completo.
+                    #    El centroide es "por acumulación de zonas": sin zonas no hay centroide.
+                    #    (Esto evita que un nodo sin zonas reales — p.ej. DXL9 en un estado
+                    #     vecino por CPs fronterizos — aparezca con centroide/anillos falsos.)
                     if partners_del_nodo.empty:
-                        centroide_temp_cob = g_cob_nodo_global.centroid
-                        distancias_a_partners = gdf_circles_m_lambert['geometry'].distance(centroide_temp_cob)
-                        partners_del_nodo = gdf_circles_m_lambert.loc[[distancias_a_partners.idxmin()]]
+                        continue
 
                     masa_partners_nodo_m = unary_union(partners_del_nodo['geometry'])
                     centroide_acumulacion_nodo_m = masa_partners_nodo_m.centroid
@@ -1423,7 +1427,12 @@ if st.session_state["authentication_status"]:
                 desglose_nodos = []
                 for nodo in nodos_unicos_maestro:
                     sub_cob_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
-                    if not sub_cob_nodo.empty:
+                    # 🚫 REGLA: solo se muestran nodos que TIENEN zonas (círculos del 2º
+                    #    archivo) encima. Si el nodo no tiene zonas asignadas, se omite
+                    #    por completo (no entra al desglose → sus CPs tampoco se dibujan,
+                    #    porque gdf_cobertura_filtrada se arma desde nodos_validos).
+                    _tiene_zonas = int(zonas_por_nodo.get(nodo, 0)) > 0
+                    if not sub_cob_nodo.empty and _tiene_zonas:
                         # 🗺️ Estado del nodo = VOTO POR MAYORÍA de sus CPs.
                         #    Un CP fronterizo puede venir del GeoJSON del estado vecino
                         #    (p.ej. un CP de Oaxaca que también existe en el archivo de
@@ -1512,7 +1521,9 @@ if st.session_state["authentication_status"]:
                 #    bloque de renderizado del mapa lo tenga disponible en
                 #    reruns posteriores (al descargar mapa/reporte).
                 # ═══════════════════════════════════════════════════════════════
-                st.session_state['gdf_cobertura_global'] = gdf_cobertura
+                # Guardar la cobertura FILTRADA (solo nodos con zonas) — así el mapa
+                # y los reruns no dibujan CPs de nodos sin zonas.
+                st.session_state['gdf_cobertura_global'] = gdf_cobertura_filtrada
 
                 # Integrar % Traslape individual de cada zona a tabla de CPs por Zona
                 if traslape_por_zona and not df_cp_por_zona.empty and 'Zona' in df_cp_por_zona.columns:
@@ -1574,7 +1585,7 @@ if st.session_state["authentication_status"]:
                 _prog(92, "🗺️ Construyendo mapa (Canvas renderer)...")
                 _mapa_html = construir_mapa_html(
                     st.session_state.resultados,
-                    gdf_cobertura,
+                    gdf_cobertura_filtrada,
                     st.session_state.get('mostrar_anillos', True)
                 )
                 st.session_state['mapa_descarga_html'] = _mapa_html
