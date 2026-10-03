@@ -512,7 +512,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 _cx_cp, _cy_cp = _poly.centroid.x, _poly.centroid.y
                 _ocupados = [(zx, zy) for (zx, zy) in _zonas_centros
                              if (zx - _cx_cp)**2 + (zy - _cy_cp)**2 <= (3 * _R)**2]
-                # Candidatos: puntos dentro del CP (bbox + contains)
+
+                # Candidatos: puntos repartidos UNIFORMEMENTE dentro del polígono del CP.
+                #    (Distribución simple: solo evitar que los círculos queden encimados;
+                #     cuando el CP tiene mucho espacio libre, quedan bien repartidos.)
                 _rng = np.random.default_rng(42)
                 _cand = []
                 _tries = 0
@@ -525,9 +528,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 if not _cand:
                     _c = _poly.representative_point(); _cand = [(_c.x, _c.y)]
                 _cand = np.array(_cand)
-                # Packing greedy con SEPARACIÓN DURA (~1 radio) entre centros nuevos y
-                # contra zonas existentes. Si no caben todos los PARTNERS con separación,
-                # se relaja progresivamente para colocar los restantes (último recurso).
+                # Ordenar candidatos desde el CENTROIDE del CP hacia afuera: el 1er círculo
+                # queda al centro y los demás se reparten alrededor sin encimarse.
+                _dcm = (_cand[:, 0] - _cx_cp)**2 + (_cand[:, 1] - _cy_cp)**2
+                _cand = _cand[np.argsort(_dcm)]
                 _colocados = list(_ocupados)  # arranca con las zonas existentes como "ocupadas"
                 _nuevos = []
                 # Relajación: empieza en 1.0 (no encimado, pueden estar cerca) y baja
