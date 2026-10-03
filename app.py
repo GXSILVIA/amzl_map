@@ -716,15 +716,22 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             c_lon = anillos['centro_lon']
 
             # 🔲 LÍMITE DEL NODO: contorno del territorio (CPs del 1er archivo disueltos)
-            #    Marca hasta dónde llega el nodo. Borde azul grueso, sin relleno.
+            #    Marca hasta dónde llega el nodo. Solo CONTORNO EXTERIOR, color por nodo.
             _lim = anillos.get('limite_nodo')
             if _lim is not None:
+                # 🎨 Color NEUTRO distinto por nodo (grises/marrones/tonos apagados) para
+                #    distinguir nodos juntos sin colores llamativos que compitan con el mapa.
+                _paleta_nodos = ['#4b5563', '#6b7280', '#78716c', '#57534e', '#44403c',
+                                 '#525252', '#737373', '#5f6b7a', '#846c5b', '#6b6b47',
+                                 '#334155', '#8a7a6d']
+                _col_nodo = _paleta_nodos[abs(hash(str(nodo_key))) % len(_paleta_nodos)]
                 folium.GeoJson(
                     _lim,
-                    style_function=lambda x: {'fillColor': 'transparent', 'fillOpacity': 0,
-                                              'color': '#1d4ed8', 'weight': 3},
-                    tooltip=f"Límite Nodo: {str(nodo_key).upper()}",
-                    interactive=True
+                    style_function=lambda x, col=_col_nodo: {'fillColor': 'transparent', 'fillOpacity': 0,
+                                              'color': col, 'weight': 3},
+                    # interactive=False → el límite NO captura el hover, así el tooltip del
+                    # CP de abajo SÍ se muestra al pasar el mouse.
+                    interactive=False
                 ).add_to(fg_anillos)
 
             folium.GeoJson(
@@ -1299,7 +1306,21 @@ if st.session_state["authentication_status"]:
                     #    Se disuelven todos los CPs del nodo en un solo polígono y se guarda
                     #    su geometría (en WGS84) para dibujar su borde en el mapa.
                     try:
-                        _limite_nodo_m = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
+                        # Disolver TODOS los CPs del nodo en un solo polígono y quedarnos
+                        # SOLO con el contorno EXTERIOR (sin fronteras internas entre CPs).
+                        # El buffer(+ε)→buffer(−ε) funde CPs adyacentes y borra líneas internas.
+                        _eps = 30  # metros
+                        _u = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
+                        _limite_nodo_m = _u.buffer(_eps).buffer(-_eps)
+                        # Quedarnos solo con el anillo exterior (descartar huecos internos)
+                        try:
+                            from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
+                            if isinstance(_limite_nodo_m, _MPoly):
+                                _limite_nodo_m = _MPoly([_Poly(p.exterior) for p in _limite_nodo_m.geoms])
+                            elif isinstance(_limite_nodo_m, _Poly):
+                                _limite_nodo_m = _Poly(_limite_nodo_m.exterior)
+                        except Exception:
+                            pass
                         _limite_nodo_wgs = gpd.GeoSeries([_limite_nodo_m], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0]
                         _limite_geojson = _limite_nodo_wgs.__geo_interface__
                     except Exception:
