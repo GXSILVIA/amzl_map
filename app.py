@@ -508,9 +508,11 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     if not gdf_mapa_cp_wgs84.empty:
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
-        # ⚠️ Se quitó '_UPSIDE_ZONAS' (Upside por Zona) del tooltip de CPs a pedido de la usuaria.
-        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_VOL_750M', '_PROSPECTAR', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside disp. en 750m:', '¿Prospectar? (≥32):', 'Partners:', 'Rango:']
+        # ⚠️ Tooltip de CPs: se quitaron '_UPSIDE_ZONAS' (Upside por Zona), '_VOL_750M'
+        #    (Upside disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
+        #    Esos datos de prospección ya se muestran en los círculos verdes del mapa.
+        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', 'PARTNERS', '_rango_txt']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -1062,9 +1064,14 @@ if st.session_state["authentication_status"]:
                 else:
                     df_poly_user = df_poly_user.drop_duplicates(subset=['CP'])
 
+                # 📑 Segundo archivo (Zonas/Círculos). Encabezados: NOMBRE, LATITUD,
+                #    LONGITUD, RADIO, VOLUMEN, NODO. Se normalizan a MAYÚSCULAS y se
+                #    incluye NODO (indica a qué nodo pertenece cada zona directamente).
                 df_zonas_user = pd.read_excel(f_zonas)
-                df_zonas_user.columns = df_zonas_user.columns.str.strip()
-                mapa_cols = {c: c.upper() for c in df_zonas_user.columns if c.upper() in ['NOMBRE', 'LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']}
+                df_zonas_user.columns = df_zonas_user.columns.astype(str).str.strip()
+                # Mapear encabezados conocidos a MAYÚSCULAS (incluye NODO)
+                mapa_cols = {c: c.upper() for c in df_zonas_user.columns
+                             if c.upper() in ['NOMBRE', 'LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN', 'NODO']}
                 df_zonas_user = df_zonas_user.rename(columns=mapa_cols)
 
                 @st.cache_data
@@ -1399,30 +1406,42 @@ if st.session_state["authentication_status"]:
                 # ═══════════════════════════════════════════════════════════════
                 # 📊 DESGLOSE POR NODO (ZONA) — Territorio, Ocupado, Libre, Eficiencia
                 # ═══════════════════════════════════════════════════════════════
-                # 🔢 ZONAS POR NODO = nº de CÍRCULOS del SEGUNDO archivo (Zonas) que
-                #    caen en cada nodo. NO se usa la columna PARTNERS del primer archivo
-                #    (esos son posibles ingresos, no zonas operativas reales).
-                #    Se cuenta cada círculo UNA sola vez, asignándolo al nodo del CP
-                #    con mayor área de intersección (evita doble conteo entre nodos).
+                # 🔢 ZONAS POR NODO = nº de CÍRCULOS del SEGUNDO archivo (Zonas) por nodo.
+                #    ✅ FUENTE DE VERDAD: la columna NODO del 2º archivo (asignación directa
+                #       y explícita de cada zona a su nodo). Si el archivo trae NODO, se
+                #       cuenta por esa columna — NO por intersección espacial (más preciso).
+                #    ↩️ Fallback: si el archivo NO trae NODO (formato antiguo), se usa el
+                #       método espacial (sjoin círculo↔CP) como antes.
                 zonas_por_nodo = {}
-                try:
-                    _circ_cnt = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy()
-                    _circ_cnt['geometry'] = _circ_cnt.geometry.buffer(0)
-                    _cob_cnt = gdf_cobertura_m[['ZONA', 'geometry']].copy()
-                    _cob_cnt['geometry'] = _cob_cnt.geometry.buffer(0)
-                    _sj_cnt = gpd.sjoin(_circ_cnt, _cob_cnt, how='inner', predicate='intersects')
-                    # Para cada círculo (NOMBRE), elegir el nodo (ZONA) donde más intersecta.
-                    # Como sjoin no da área, asignamos por mayor nº de CPs del nodo tocados
-                    # (aproximación estable) — o el primero si hay empate.
-                    _asig = {}
-                    for _nom, _grp in _sj_cnt.groupby('NOMBRE'):
-                        _conteo = _grp['ZONA'].value_counts()
-                        _asig[_nom] = _conteo.index[0] if len(_conteo) else None
-                    for _nom, _nod in _asig.items():
-                        if _nod is not None:
-                            zonas_por_nodo[_nod] = zonas_por_nodo.get(_nod, 0) + 1
-                except Exception:
-                    zonas_por_nodo = {}
+                if 'NODO' in df_zonas_user.columns:
+                    # Normalizar y contar zonas por NODO directamente del 2º archivo
+                    _nodo_series = df_zonas_user['NODO'].astype(str).str.strip().str.upper()
+                    zonas_por_nodo = _nodo_series.value_counts().to_dict()
+                else:
+                    try:
+                        _circ_cnt = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy()
+                        _circ_cnt['geometry'] = _circ_cnt.geometry.buffer(0)
+                        _cob_cnt = gdf_cobertura_m[['ZONA', 'geometry']].copy()
+                        _cob_cnt['geometry'] = _cob_cnt.geometry.buffer(0)
+                        _sj_cnt = gpd.sjoin(_circ_cnt, _cob_cnt, how='inner', predicate='intersects')
+                        _asig = {}
+                        for _nom, _grp in _sj_cnt.groupby('NOMBRE'):
+                            _conteo = _grp['ZONA'].value_counts()
+                            _asig[_nom] = _conteo.index[0] if len(_conteo) else None
+                        for _nom, _nod in _asig.items():
+                            if _nod is not None:
+                                zonas_por_nodo[_nod] = zonas_por_nodo.get(_nod, 0) + 1
+                    except Exception:
+                        zonas_por_nodo = {}
+
+                # 🎯 NODOS VÁLIDOS = los que vienen en la columna NODO del 2º archivo.
+                #    Solo se mostrarán los CPs de estos nodos (referencia: columna NODO).
+                if 'NODO' in df_zonas_user.columns:
+                    _nodos_del_segundo_archivo = set(
+                        df_zonas_user['NODO'].astype(str).str.strip().str.upper().dropna().tolist()
+                    )
+                else:
+                    _nodos_del_segundo_archivo = set(zonas_por_nodo.keys())
 
                 desglose_nodos = []
                 for nodo in nodos_unicos_maestro:
@@ -1431,7 +1450,10 @@ if st.session_state["authentication_status"]:
                     #    archivo) encima. Si el nodo no tiene zonas asignadas, se omite
                     #    por completo (no entra al desglose → sus CPs tampoco se dibujan,
                     #    porque gdf_cobertura_filtrada se arma desde nodos_validos).
-                    _tiene_zonas = int(zonas_por_nodo.get(nodo, 0)) > 0
+                    # ✅ Validar contra los NODOS del 2º archivo (comparación normalizada
+                    #    MAYÚSCULAS/strip, porque ZONA del 1er archivo puede diferir en caja).
+                    _nodo_norm = str(nodo).strip().upper()
+                    _tiene_zonas = _nodo_norm in _nodos_del_segundo_archivo
                     if not sub_cob_nodo.empty and _tiene_zonas:
                         # 🗺️ Estado del nodo = VOTO POR MAYORÍA de sus CPs.
                         #    Un CP fronterizo puede venir del GeoJSON del estado vecino
@@ -1463,7 +1485,7 @@ if st.session_state["authentication_status"]:
                         # Volumen total del nodo
                         vol_nodo = sub_cob_nodo['VOLUMEN'].sum() if 'VOLUMEN' in sub_cob_nodo.columns else 0
                         # 🔢 Partners = nº de ZONAS/círculos del 2º archivo asignados a este nodo
-                        partners_nodo = int(zonas_por_nodo.get(nodo, 0))
+                        partners_nodo = int(zonas_por_nodo.get(_nodo_norm, zonas_por_nodo.get(nodo, 0)))
                         num_cps_nodo = len(sub_cob_nodo)
 
                         desglose_nodos.append({
