@@ -1323,15 +1323,27 @@ if st.session_state["authentication_status"]:
                         continue
 
                     # 🎯 CENTROIDE DEL NODO = centro de la ACUMULACIÓN de zonas:
-                    #    promedio de los CENTROS de los círculos del nodo (centro de masa
-                    #    de las posiciones de las zonas). NO el centroide del área unida
-                    #    (unary_union.centroid), que se sesga hacia círculos grandes o
-                    #    aglomerados. El promedio de centros refleja el centro geométrico
-                    #    real de dónde están acumuladas las zonas del nodo.
-                    #    Se usa el promedio de los centros de TODOS los círculos del nodo.
+                    #    ⚠️ Se usa la MEDIANA de los centros (no el promedio). Algunos nodos
+                    #    tienen 1-2 zonas OUTLIER con el NODO correcto pero coordenadas en
+                    #    otra ciudad (errores de captura, p.ej. DMT4 tiene 46 zonas en
+                    #    Monterrey + 1 en Guadalajara a ~700km). El promedio se desplaza al
+                    #    vacío por esos outliers; la MEDIANA es robusta y cae en el clúster
+                    #    real de acumulación de zonas.
                     _centros_zonas = partners_del_nodo['geometry'].centroid
-                    _mx = float(_centros_zonas.x.mean())
-                    _my = float(_centros_zonas.y.mean())
+                    _xs = _centros_zonas.x.to_numpy()
+                    _ys = _centros_zonas.y.to_numpy()
+                    _mx = float(np.median(_xs))
+                    _my = float(np.median(_ys))
+                    # Refinar: promediar SOLO las zonas cercanas a la mediana (dentro de
+                    # ~25km), descartando outliers → centro más exacto del clúster real.
+                    try:
+                        _dist_med = np.sqrt((_xs - _mx)**2 + (_ys - _my)**2)
+                        _cerca = _dist_med <= 25000  # 25 km en metros (CRS Lambert)
+                        if _cerca.sum() >= 1:
+                            _mx = float(_xs[_cerca].mean())
+                            _my = float(_ys[_cerca].mean())
+                    except Exception:
+                        pass
                     centroide_acumulacion_nodo_m = Point(_mx, _my)
 
                     centroides_nodos_globales.append(centroide_acumulacion_nodo_m)
