@@ -762,7 +762,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             #    Marca hasta dónde llega el nodo. Solo CONTORNO EXTERIOR, color por nodo.
             _lim = anillos.get('limite_nodo')
             if _lim is not None:
-                # 🎨 Color asignado por COLOREO DE ADYACENCIA (nodos vecinos ≠ color).
+                # 🎨 Color por COLOREO DE ADYACENCIA (nodos vecinos ≠ color). Cada nodo
+                #    delinea TODO su contorno completo; en límites compartidos aparecen
+                #    líneas dobles (el borde de cada nodo con su propio color) — es lo esperado.
                 _col_nodo = _color_de_nodo.get(nodo_key, _PAL_NEUTROS[0])
                 folium.GeoJson(
                     _lim,
