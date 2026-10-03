@@ -1110,6 +1110,9 @@ if st.session_state["authentication_status"]:
                 df_zonas_user = df_zonas_user.dropna(subset=['LATITUD', 'LONGITUD', 'RADIO'])
                 pts = [Point(xy) for xy in zip(df_zonas_user['LONGITUD'], df_zonas_user['LATITUD'])]
                 gdf_circles = gpd.GeoDataFrame(df_zonas_user, geometry=pts, crs="EPSG:4326")
+                # Normalizar NODO del 2º archivo (MAYÚSCULAS/strip) para comparar con ZONA del 1º
+                if 'NODO' in gdf_circles.columns:
+                    gdf_circles['NODO'] = gdf_circles['NODO'].astype(str).str.strip().str.upper()
 
                 # ═══════════════════════════════════════════════════════════════
                 # 📐 DOBLE PROYECCIÓN: Albers (áreas) + Lambert (distancias)
@@ -1161,13 +1164,21 @@ if st.session_state["authentication_status"]:
 
                     g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
 
-                    partners_del_nodo = gdf_circles_m_lambert[gdf_circles_m_lambert['geometry'].intersects(g_cob_nodo_global)]
+                    # 🎯 ZONAS DEL NODO = las que tienen NODO == este nodo en el 2º archivo
+                    #    (fuente de verdad explícita). NO por intersección espacial —así no
+                    #    salen centroides de nodos cuyas zonas en realidad son de otro nodo.
+                    _nodo_norm = str(nodo).strip().upper()
+                    if 'NODO' in gdf_circles_m_lambert.columns:
+                        partners_del_nodo = gdf_circles_m_lambert[
+                            gdf_circles_m_lambert['NODO'].astype(str).str.strip().str.upper() == _nodo_norm
+                        ]
+                    else:
+                        # Fallback (archivo antiguo sin NODO): intersección espacial
+                        partners_del_nodo = gdf_circles_m_lambert[gdf_circles_m_lambert['geometry'].intersects(g_cob_nodo_global)]
 
-                    # 🚫 REGLA: si el nodo NO tiene zonas (círculos del 2º archivo) encima,
-                    #    NO se calcula centroide ni anillos — el nodo se omite por completo.
+                    # 🚫 REGLA: si el nodo NO tiene zonas asignadas en el 2º archivo,
+                    #    NO se calcula centroide ni anillos — se omite por completo.
                     #    El centroide es "por acumulación de zonas": sin zonas no hay centroide.
-                    #    (Esto evita que un nodo sin zonas reales — p.ej. DXL9 en un estado
-                    #     vecino por CPs fronterizos — aparezca con centroide/anillos falsos.)
                     if partners_del_nodo.empty:
                         continue
 
