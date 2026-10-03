@@ -416,14 +416,63 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if not lst:
             return "Ninguna"
         lst = sorted(lst, key=lambda t: t[1], reverse=True)
-        return ", ".join([f"{nom}: {up}" for nom, up in lst])
+        # 📋 Formato LISTA con viñetas (una zona por renglón) para el tooltip/popup del CP
+        return "<br>".join([f"&nbsp;&nbsp;• {nom}: {up} pqts" for nom, up in lst])
     gdf_mapa_cp_wgs84['_UPSIDE_ZONAS'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(_fmt_zonas_cp)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 📍 FACTIBILIDAD DE PROSPECCIÓN ("¿Dónde prospectar?")
+    #    Un CP es PROSPECTABLE si su Volumen Total, sumado al de los CPs
+    #    vecinos cuyos CENTROIDES caen dentro de 750 m, alcanza ≥ 32.
+    #    (Regla de negocio: para ingresar un VR nuevo o ampliar capacidad.)
+    # ═══════════════════════════════════════════════════════════════
+    _UMBRAL_PROSPECCION = 32
+    _RADIO_PROSPECCION_M = 750
+    try:
+        # Proyectar a métrico (Lambert México) para medir 750 m con precisión
+        _gdf_prox = gdf_mapa_cp_wgs84[['CP', 'VOLUMEN', 'geometry']].copy()
+        _gdf_prox_m = _gdf_prox.to_crs("EPSG:6362")
+        _cent_m = _gdf_prox_m.geometry.centroid
+        _cx = _cent_m.x.to_numpy()
+        _cy = _cent_m.y.to_numpy()
+        _vol = pd.to_numeric(_gdf_prox_m['VOLUMEN'], errors='coerce').fillna(0).to_numpy(dtype=float)
+        _cps_arr = _gdf_prox_m['CP'].astype(str).to_numpy()
+        _n = len(_cx)
+        _vol_acum = np.zeros(_n, dtype=float)
+        _r2 = float(_RADIO_PROSPECCION_M) ** 2
+        # Para cada CP: sumar volumen de todos los CPs (incluido él) con centroide dentro de 750 m.
+        # Vectorizado por filas (n×n solo si n es manejable; si n es grande, se hace por bloques).
+        if _n <= 12000:
+            for _i in range(_n):
+                _d2 = (_cx - _cx[_i])**2 + (_cy - _cy[_i])**2
+                _vol_acum[_i] = _vol[_d2 <= _r2].sum()
+        else:
+            # fallback por bloques para no agotar memoria
+            _blk = 2000
+            for _s in range(0, _n, _blk):
+                _e = min(_n, _s + _blk)
+                _dx = _cx[_s:_e, None] - _cx[None, :]
+                _dy = _cy[_s:_e, None] - _cy[None, :]
+                _mask = (_dx*_dx + _dy*_dy) <= _r2
+                _vol_acum[_s:_e] = (_mask * _vol[None, :]).sum(axis=1)
+        _acum_por_cp = dict(zip(_cps_arr, _vol_acum))
+    except Exception:
+        _acum_por_cp = {}
+
+    gdf_mapa_cp_wgs84['_VOL_750M'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(
+        lambda c: int(round(_acum_por_cp.get(str(c), 0)))
+    )
+    gdf_mapa_cp_wgs84['_PROSPECTAR'] = gdf_mapa_cp_wgs84['_VOL_750M'].apply(
+        lambda v: "✅ SÍ" if v >= _UMBRAL_PROSPECCION else "❌ No"
+    )
+    # flag booleano simple (0/1) para que el JS del botón lo lea fácil
+    gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] = (gdf_mapa_cp_wgs84['_VOL_750M'] >= _UMBRAL_PROSPECCION).astype(int)
 
     if not gdf_mapa_cp_wgs84.empty:
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
-        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Partners:', 'Rango:']
+        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', '_UPSIDE_ZONAS', '_VOL_750M', '_PROSPECTAR', 'PARTNERS', '_rango_txt']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside Ocupado (zonas):', 'Upside Libre:', 'Upside por Zona:', 'Vol. en 750m (acum):', '¿Prospectar? (≥32):', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -601,6 +650,26 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         <span id="cpResult" style="font-size:12px; max-width:350px;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
+    <!-- 🖱️ Botón de modo de información: Hover (pasar mouse) ⇄ Click (seleccionar) -->
+    <div id="ttModeBar" style="
+        position:fixed; top:58px; left:50%; transform:translateX(-50%); z-index:9999;
+        background:white; padding:6px 10px; border-radius:10px;
+        box-shadow:0 4px 16px rgba(0,0,0,0.25);
+        display:flex; align-items:center; gap:8px;
+        font-family:'Segoe UI',sans-serif;">
+        <span style="font-size:12px; color:#475569;">Info:</span>
+        <button id="ttModeBtn" onclick="toggleTooltipMode()"
+            style="background:#16a34a; color:white; border:none; border-radius:6px;
+            padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;">
+            🖱️ Hover (pasar mouse)</button>
+        <span id="ttModeHint" style="font-size:11px; color:#94a3b8;">Zonas encimadas → cambia a Click</span>
+        <span style="width:1px; height:22px; background:#e2e8f0; margin:0 4px;"></span>
+        <button id="prospBtn" onclick="toggleProspectar()"
+            style="background:#f59e0b; color:white; border:none; border-radius:6px;
+            padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;">
+            📍 ¿Dónde prospectar?</button>
+        <span id="prospHint" style="font-size:11px; color:#94a3b8;">Resalta CPs con ≥32 vol en 750m</span>
+    </div>
     <script>
     window.addEventListener('load', function() {
         setTimeout(function() { initCPSearch(); }, 1500);
@@ -768,6 +837,131 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
         try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (solo popup)
+    //    Ideal para ZONAS ENCIMADAS: en modo Click el hover deja de dispararse
+    //    y la info solo aparece al seleccionar, evitando el caos de tooltips.
+    // ═══════════════════════════════════════════════════════════════
+    window._ttMode = 'hover';   // estado inicial
+    window._ttStore = [];       // guarda {layer, content, options} para re-enlazar
+
+    function _ttFindMap() {
+        for (var k in window) {
+            try {
+                if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k];
+            } catch(e) {}
+        }
+        for (var k2 in window) {
+            try {
+                if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2];
+            } catch(e) {}
+        }
+        return null;
+    }
+
+    function _ttWalk(layer, cb) {
+        cb(layer);
+        if (layer.eachLayer) layer.eachLayer(function(sub){ _ttWalk(sub, cb); });
+        if (layer._layers) { for (var id in layer._layers) _ttWalk(layer._layers[id], cb); }
+    }
+
+    window.toggleTooltipMode = function() {
+        var map = _ttFindMap();
+        var btn = document.getElementById('ttModeBtn');
+        var hint = document.getElementById('ttModeHint');
+        if (!map) { return; }
+
+        if (window._ttMode === 'hover') {
+            // → Pasar a modo CLICK: desenlazar todos los tooltips (guardándolos)
+            window._ttStore = [];
+            _ttWalk(map, function(ly) {
+                if (ly.getTooltip && ly.getTooltip()) {
+                    var tt = ly.getTooltip();
+                    window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
+                    ly.unbindTooltip();
+                }
+            });
+            window._ttMode = 'click';
+            if (btn) {
+                btn.innerHTML = '👆 Click (seleccionar)';
+                btn.style.background = '#2563eb';
+            }
+            if (hint) hint.innerHTML = 'Clic en la zona para ver su info';
+        } else {
+            // → Volver a modo HOVER: re-enlazar los tooltips guardados
+            window._ttStore.forEach(function(rec) {
+                try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
+            });
+            window._ttStore = [];
+            window._ttMode = 'hover';
+            if (btn) {
+                btn.innerHTML = '🖱️ Hover (pasar mouse)';
+                btn.style.background = '#16a34a';
+            }
+            if (hint) hint.innerHTML = 'Zonas encimadas → cambia a Click';
+        }
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // 📍 ¿DÓNDE PROSPECTAR? — resalta los CPs con _PROSPECTAR_FLAG==1
+    //    (Volumen Total acumulado ≥ 32 en radio de 750 m centroide-a-centroide).
+    //    Al activar: CPs factibles con borde naranja grueso + relleno opaco;
+    //    el resto se atenúa. Al desactivar: restaura estilos originales.
+    // ═══════════════════════════════════════════════════════════════
+    window._prospMode = false;
+    window._prospStore = [];   // {layer, style original}
+
+    window.toggleProspectar = function() {
+        var map = _ttFindMap();
+        var btn = document.getElementById('prospBtn');
+        var hint = document.getElementById('prospHint');
+        if (!map) { return; }
+
+        if (!window._prospMode) {
+            // → ACTIVAR: recorrer capas CP y resaltar las factibles
+            window._prospStore = [];
+            var _nFact = 0;
+            _ttWalk(map, function(ly) {
+                if (ly.feature && ly.feature.properties && ('_PROSPECTAR_FLAG' in ly.feature.properties)) {
+                    // guardar estilo original para restaurar
+                    var o = ly.options || {};
+                    window._prospStore.push({
+                        layer: ly,
+                        fillColor: o.fillColor, fillOpacity: o.fillOpacity,
+                        color: o.color, weight: o.weight
+                    });
+                    var flag = parseInt(ly.feature.properties._PROSPECTAR_FLAG) || 0;
+                    if (flag === 1) {
+                        // CP factible → resaltar
+                        ly.setStyle({ color: '#ea580c', weight: 3.5, fillColor: '#f59e0b', fillOpacity: 0.75 });
+                        if (ly.bringToFront) ly.bringToFront();
+                        _nFact++;
+                    } else {
+                        // CP no factible → atenuar
+                        ly.setStyle({ fillOpacity: 0.08, weight: 0.5 });
+                    }
+                }
+            });
+            window._prospMode = true;
+            if (btn) { btn.innerHTML = '📍 Prospección: ON'; btn.style.background = '#ea580c'; }
+            if (hint) hint.innerHTML = _nFact + ' CPs factibles (≥32 en 750m)';
+        } else {
+            // → DESACTIVAR: restaurar estilos originales
+            window._prospStore.forEach(function(rec) {
+                try {
+                    rec.layer.setStyle({
+                        fillColor: rec.fillColor, fillOpacity: rec.fillOpacity,
+                        color: rec.color, weight: rec.weight
+                    });
+                } catch(e) {}
+            });
+            window._prospStore = [];
+            window._prospMode = false;
+            if (btn) { btn.innerHTML = '📍 ¿Dónde prospectar?'; btn.style.background = '#f59e0b'; }
+            if (hint) hint.innerHTML = 'Resalta CPs con ≥32 vol en 750m';
+        }
+    };
     </script>
     """
     m.get_root().html.add_child(folium.Element(search_html))
@@ -1032,11 +1226,12 @@ if st.session_state["authentication_status"]:
                 _dist_por_cp = dict(zip(_cob_lam['CP'].astype(str), _dist_min))
 
                 # (C) Pares zona×CP con % de cobertura — UN SOLO gpd.overlay (reemplaza
-                #     el doble bucle zona(3000)×cp). Devuelve todas las intersecciones
-                #     reales de una vez. Luego calculamos % = area_inter / area_cp.
-                _zonas_gdf = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy()
-                _cps_gdf = gdf_cobertura_m[['CP', 'ZONA', 'geometry']].copy()
-                # ⚠️ Reparar geometrías inválidas ANTES del overlay (make_valid → buffer(0) fallback)
+                #     el doble bucle zona(3000)×cp). Devuelve todas las intersecciones reales.
+                #     ⚠️ Usamos nombres de columna NO conflictivos (_ZNOM/_CPCP/_CPZONA) para
+                #        que gpd.overlay NO los renombre con sufijos _1/_2 y la tabla no quede vacía.
+                _zonas_gdf = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy().rename(columns={'NOMBRE': '_ZNOM'})
+                _cps_gdf = gdf_cobertura_m[['CP', 'ZONA', 'geometry']].copy().rename(columns={'CP': '_CPCP', 'ZONA': '_CPZONA'})
+                # Reparar geometrías inválidas ANTES del overlay (make_valid → buffer(0) fallback)
                 try:
                     _zonas_gdf['geometry'] = _zonas_gdf.geometry.make_valid()
                     _cps_gdf['geometry'] = _cps_gdf.geometry.make_valid()
@@ -1046,20 +1241,48 @@ if st.session_state["authentication_status"]:
                 # Descartar geometrías vacías/nulas que romperían el overlay
                 _zonas_gdf = _zonas_gdf[~_zonas_gdf.geometry.is_empty & _zonas_gdf.geometry.notna()]
                 _cps_gdf = _cps_gdf[~_cps_gdf.geometry.is_empty & _cps_gdf.geometry.notna()]
-                _cps_gdf['_area_cp'] = _cps_gdf.geometry.area
+                _cps_gdf['_AREACP'] = _cps_gdf.geometry.area
                 _pares_zona_cp = {}  # (nodo, zona_nombre) -> list[(cp_str, pct)]
                 _prog(55, "🔗 Cruzando zonas × CPs (overlay vectorizado)...")
+                _overlay_ok = False
                 try:
                     _ov = gpd.overlay(_zonas_gdf, _cps_gdf, how='intersection', keep_geom_type=False)
                     if not _ov.empty:
                         _ov['_area_inter'] = _ov.geometry.area
-                        _ov['_pct'] = (_ov['_area_inter'] / _ov['_area_cp'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
+                        _ov['_pct'] = (_ov['_area_inter'] / _ov['_AREACP'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
                         _ov = _ov[_ov['_pct'].round() >= 1]
-                        for _row in _ov.itertuples(index=False):
-                            _key = (getattr(_row, 'ZONA'), getattr(_row, 'NOMBRE'))
-                            _pares_zona_cp.setdefault(_key, []).append((str(getattr(_row, 'CP')), float(getattr(_row, '_pct'))))
+                        # Iterar por columnas por NOMBRE (robusto, sin depender de itertuples)
+                        for _znom, _cpzona, _cpcp, _pctv in zip(
+                            _ov['_ZNOM'].tolist(), _ov['_CPZONA'].tolist(),
+                            _ov['_CPCP'].tolist(), _ov['_pct'].tolist()
+                        ):
+                            _pares_zona_cp.setdefault((_cpzona, _znom), []).append((str(_cpcp), float(_pctv)))
+                        _overlay_ok = len(_pares_zona_cp) > 0
                 except Exception:
                     _pares_zona_cp = {}
+
+                # ── FALLBACK robusto: si el overlay falló o quedó vacío, usar sjoin +
+                #    intersección por par para garantizar que la tabla NO quede vacía.
+                if not _overlay_ok:
+                    try:
+                        _pares_zona_cp = {}
+                        _sj = gpd.sjoin(_cps_gdf, _zonas_gdf, how='inner', predicate='intersects')
+                        _zgeom = dict(zip(_zonas_gdf['_ZNOM'].tolist(), _zonas_gdf.geometry.tolist()))
+                        _cpgeom = dict(zip(_cps_gdf['_CPCP'].tolist(), _cps_gdf.geometry.tolist()))
+                        _cparea = dict(zip(_cps_gdf['_CPCP'].tolist(), _cps_gdf['_AREACP'].tolist()))
+                        for _r in _sj.itertuples(index=False):
+                            _cpcp = getattr(_r, '_CPCP'); _cpzona = getattr(_r, '_CPZONA'); _znom = getattr(_r, '_ZNOM')
+                            _gcp = _cpgeom.get(_cpcp); _gz = _zgeom.get(_znom); _acp = _cparea.get(_cpcp, 0)
+                            if _gcp is not None and _gz is not None and _acp and _acp > 0:
+                                try:
+                                    _ai = _gcp.intersection(_gz).area
+                                    _pctv = min(100.0, (_ai / _acp) * 100)
+                                    if round(_pctv) >= 1:
+                                        _pares_zona_cp.setdefault((_cpzona, _znom), []).append((str(_cpcp), float(_pctv)))
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
 
                 _n_nodos = max(1, len(nodos_unicos_maestro))
                 _prog(60, f"📍 Generando reportes por nodo (0/{_n_nodos})...")
