@@ -952,12 +952,19 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         //    de click al dispararse por varias vías). Devuelve true para frenar reintentos.
         if (window._cpSearchInitDone) { return true; }
         var map = null;
-        // 🗺️ 1º: usar el nombre REAL inyectado desde Python (lo más fiable)
+        // 🗺️ 1º (LO MÁS FIABLE): el OBJETO MAPA REAL que Folium inyecta vía MacroElement
+        //    (window.__MAPA_OBJ__ = {{this._parent.get_name()}}). No depende de window[nombre].
         try {
-            var _nm = window.__MAPA_NOMBRE__;
-            if (_nm && window[_nm] && window[_nm].eachLayer) { map = window[_nm]; }
+            if (window.__MAPA_OBJ__ && window.__MAPA_OBJ__.eachLayer) { map = window.__MAPA_OBJ__; }
         } catch(e) {}
-        // 2º: fallback — buscar cualquier map_ en window
+        // 2º: por nombre inyectado
+        if (!map) {
+            try {
+                var _nm = window.__MAPA_NOMBRE__;
+                if (_nm && window[_nm] && window[_nm].eachLayer) { map = window[_nm]; }
+            } catch(e) {}
+        }
+        // 3º: buscar cualquier map_ en window
         if (!map) {
             for (var k in window) {
                 try {
@@ -967,7 +974,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 } catch(e) {}
             }
         }
-        // 3º: fallback — cualquier objeto Leaflet con _container
+        // 4º: cualquier objeto Leaflet con _container
         if (!map) {
             for (var k2 in window) {
                 try {
@@ -1457,7 +1464,22 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     </script>
     """
+    # 🔑 INYECCIÓN PROFESIONAL: el HTML (buscador + banner + divs) va al <body>,
+    #    y por separado inyectamos un MacroElement cuyo <script> Folium ejecuta
+    #    DENTRO de un addInitHook con el NOMBRE REAL del mapa resuelto por su motor
+    #    de plantillas ({{this._parent.get_name()}}). Así window.__MAPA_OBJ__ queda
+    #    con el objeto Leaflet REAL — sin depender del frágil loop 'for k in window'.
+    from branca.element import MacroElement as _MacroElement, Template as _Template
     m.get_root().html.add_child(folium.Element(search_html))
+
+    _bind_map = _MacroElement()
+    _bind_map._template = _Template(
+        "{% macro script(this, kwargs) %}"
+        "window.__MAPA_OBJ__ = {{this._parent.get_name()}};"
+        "try { if (typeof _lanzarInitCPSearch === 'function') _lanzarInitCPSearch(); } catch(e) {}"
+        "{% endmacro %}"
+    )
+    m.add_child(_bind_map)
 
     # ⚡ Un solo render del HTML standalone (sirve para mostrar y descargar).
     return m.get_root().render()
