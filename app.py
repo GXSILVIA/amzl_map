@@ -866,7 +866,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         display:flex; align-items:center; gap:8px;
         font-family:'Segoe UI',sans-serif;">
         <span style="font-size:16px">🔍</span>
-        <input id="cpInput" type="text" placeholder="Buscar CP o Zona..."
+        <input id="cpInput" type="text" placeholder="Buscar CP o Zona..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
             onkeyup="if(event.key==='Enter')buscarCP(this.value)"
             oninput="if(this.value.trim()==='')buscarCP('')"
             style="border:1px solid #e2e8f0; border-radius:6px; padding:6px 12px;
@@ -913,13 +913,26 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             setTimeout(_lanzarInitCPSearch, 500);  // reintentar cada 0.5s
         }
     }
-    window.addEventListener('load', function() {
-        setTimeout(_lanzarInitCPSearch, 800);
-    });
-    // Respaldo: si 'load' ya pasó, lanzar igualmente.
-    if (document.readyState === 'complete') { setTimeout(_lanzarInitCPSearch, 800); }
+    // 🚀 DISPARO A PRUEBA DE TODO (clave en el iframe de Streamlit components.html):
+    //    NO dependemos solo de 'load' (que dentro del iframe puede ya haber ocurrido
+    //    antes de que corra este <script>). Lanzamos por VARIAS vías; el reintentador
+    //    (_lanzarInitCPSearch) reintenta cada 0.5s hasta encontrar el mapa, así que
+    //    disparar de más es inofensivo (initCPSearch es idempotente).
+    //    1) Inmediato (el <script> está al final del body → el mapa casi siempre ya existe)
+    setTimeout(_lanzarInitCPSearch, 300);
+    //    2) En DOMContentLoaded (si el DOM aún no terminó)
+    document.addEventListener('DOMContentLoaded', function(){ setTimeout(_lanzarInitCPSearch, 300); });
+    //    3) En load (recurso de respaldo)
+    window.addEventListener('load', function(){ setTimeout(_lanzarInitCPSearch, 300); });
+    //    4) Si el documento YA está listo cuando corre este script, lanzar de una vez
+    if (document.readyState === 'interactive' || document.readyState === 'complete') {
+        setTimeout(_lanzarInitCPSearch, 300);
+    }
 
     function initCPSearch() {
+        // 🛡️ Guard: si ya se inicializó por completo, no repetir (evita doble handler
+        //    de click al dispararse por varias vías). Devuelve true para frenar reintentos.
+        if (window._cpSearchInitDone) { return true; }
         var map = null;
         for (var k in window) {
             try {
@@ -1098,6 +1111,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
         try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
 
+        window._cpSearchInitDone = true;  // marca init completa (guard anti-doble)
         return true;  // ✅ inicialización completa → el reintentador se detiene
     }
 
