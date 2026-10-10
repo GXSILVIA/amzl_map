@@ -861,10 +861,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     search_html = """
     <div id="versionBanner" style="
         position:fixed; bottom:8px; left:8px; z-index:99999;
-        background:#16a34a; color:white; padding:4px 10px; border-radius:6px;
+        background:#64748b; color:white; padding:4px 10px; border-radius:6px;
         font-family:'Segoe UI',sans-serif; font-size:11px; font-weight:700;
         box-shadow:0 2px 8px rgba(0,0,0,0.3); pointer-events:none;">
-        ✅ v2026-10-10 RobustJS
+        ⏳ v10-10 — cargando...
     </div>
     <div id="cpSearchBar" style="
         position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
@@ -886,6 +886,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
 
+    <script type="application/json" id="zonasDataJSON">""" + _ZONAS_DATA_JSON + """</script>
+
     <script>
     // 🔔 FIRMA DE VERSIÓN — si ves este mensaje en la consola, el navegador ejecuta
     //    la versión NUEVA del mapa. Si NO lo ves, está sirviendo una versión cacheada.
@@ -894,7 +896,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     //    del frágil loop 'for k in window' para localizar el mapa.
     window.__MAPA_NOMBRE__ = '" + m.get_name() + "';
     // 📦 Zonas inyectadas desde Python para el click acumulativo (centro+radio).
-    window._ZONAS_DATA = """ + _ZONAS_DATA_JSON + """;
+    try {
+        window._ZONAS_DATA = JSON.parse(document.getElementById('zonasDataJSON').textContent);
+    } catch(e) { window._ZONAS_DATA = []; console.error('Error parseando zonas:', e); }
 
     // 🛟 RESPALDO inmediato de buscarCP: disponible desde el primer instante, por si
     //    el usuario busca antes de que termine la inicialización del mapa. Si la versión
@@ -1146,6 +1150,15 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
 
         window._cpSearchInitDone = true;  // marca init completa (guard anti-doble)
+        // 🔔 Actualizar banner con DIAGNÓSTICO en vivo (visible en el mapa, sin consola)
+        try {
+            var _bn = document.getElementById('versionBanner');
+            if (_bn) {
+                _bn.style.background = '#16a34a';
+                _bn.innerHTML = '✅ v10-10 OK · ' + totalFeatures + ' CPs · ' +
+                    (window._ZONAS_DATA||[]).length + ' zonas';
+            }
+        } catch(e) {}
         return true;  // ✅ inicialización completa → el reintentador se detiene
     }
 
