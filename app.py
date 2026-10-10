@@ -880,6 +880,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     </div>
 
     <script>
+    // 🗺️ Nombre REAL del objeto mapa de Folium (inyectado desde Python). Evita depender
+    //    del frágil loop 'for k in window' para localizar el mapa.
+    window.__MAPA_NOMBRE__ = '" + m.get_name() + "';
     // 📦 Zonas inyectadas desde Python para el click acumulativo (centro+radio).
     window._ZONAS_DATA = """ + _ZONAS_DATA_JSON + """;
 
@@ -939,18 +942,27 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         //    de click al dispararse por varias vías). Devuelve true para frenar reintentos.
         if (window._cpSearchInitDone) { return true; }
         var map = null;
-        for (var k in window) {
-            try {
-                if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) {
-                    map = window[k]; break;
-                }
-            } catch(e) {}
-        }
+        // 🗺️ 1º: usar el nombre REAL inyectado desde Python (lo más fiable)
+        try {
+            var _nm = window.__MAPA_NOMBRE__;
+            if (_nm && window[_nm] && window[_nm].eachLayer) { map = window[_nm]; }
+        } catch(e) {}
+        // 2º: fallback — buscar cualquier map_ en window
         if (!map) {
             for (var k in window) {
                 try {
-                    if (window[k] && window[k]._leaflet_id && window[k]._container) {
+                    if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) {
                         map = window[k]; break;
+                    }
+                } catch(e) {}
+            }
+        }
+        // 3º: fallback — cualquier objeto Leaflet con _container
+        if (!map) {
+            for (var k2 in window) {
+                try {
+                    if (window[k2] && window[k2]._leaflet_id && window[k2]._container) {
+                        map = window[k2]; break;
                     }
                 } catch(e) {}
             }
