@@ -743,7 +743,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # ═══════════════════════════════════════════════════════════════
     # 3. ANILLOS DE FACTIBILIDAD — en FeatureGroup para toggle sin recargar
     # ═══════════════════════════════════════════════════════════════
-    fg_anillos = folium.FeatureGroup(name="Radios", show=mostrar_anillos)
+    fg_anillos = folium.FeatureGroup(name="Perímetros", show=mostrar_anillos)
     if 'anillos_por_estado' in res:
         _PAL_NEUTROS = [
             '#374151', '#9ca3af', '#78350f', '#d6d3d1',
@@ -877,9 +877,41 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     // 📦 Zonas inyectadas desde Python para el click acumulativo (centro+radio).
     window._ZONAS_DATA = """ + _ZONAS_DATA_JSON + """;
 
+    // 🛟 RESPALDO inmediato de buscarCP: disponible desde el primer instante, por si
+    //    el usuario busca antes de que termine la inicialización del mapa. Si la versión
+    //    real aún no está lista, fuerza la init y reintenta la búsqueda en breve.
+    window._buscarCPReady = false;
+    window.buscarCP = function(valor) {
+        if (window._buscarCPReady) return;  // la versión real ya tomó el control
+        var rd = document.getElementById('cpResult');
+        if (rd) { rd.innerHTML = '⏳ Preparando el buscador...'; rd.style.color = '#2563eb'; }
+        try { if (typeof _lanzarInitCPSearch === 'function') _lanzarInitCPSearch(); } catch(e) {}
+        // reintentar la búsqueda una vez que la versión real esté lista
+        var _val = valor;
+        var _intentos = 0;
+        var _t = setInterval(function() {
+            _intentos++;
+            if (window._buscarCPReady) { clearInterval(_t); try { window.buscarCP(_val); } catch(e) {} }
+            else if (_intentos > 20) { clearInterval(_t); if (rd) { rd.innerHTML = '⚠ El mapa aún se está cargando, intenta de nuevo'; rd.style.color = '#d97706'; } }
+        }, 400);
+    };
+
+    // 🔁 Disparo con REINTENTOS: el mapa (Leaflet) puede tardar en montarse dentro
+    //    del iframe de Streamlit. Reintentamos hasta encontrarlo (máx ~15s) para que
+    //    el buscador SIEMPRE quede inicializado y window.buscarCP disponible.
+    window._cpSearchTries = 0;
+    function _lanzarInitCPSearch() {
+        window._cpSearchTries++;
+        var ok = initCPSearch();
+        if (!ok && window._cpSearchTries < 30) {
+            setTimeout(_lanzarInitCPSearch, 500);  // reintentar cada 0.5s
+        }
+    }
     window.addEventListener('load', function() {
-        setTimeout(function() { initCPSearch(); }, 1500);
+        setTimeout(_lanzarInitCPSearch, 800);
     });
+    // Respaldo: si 'load' ya pasó, lanzar igualmente.
+    if (document.readyState === 'complete') { setTimeout(_lanzarInitCPSearch, 800); }
 
     function initCPSearch() {
         var map = null;
@@ -900,9 +932,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             }
         }
         if (!map) {
-            var rd = document.getElementById('cpResult');
-            if (rd) { rd.innerHTML = '⚠ Mapa no encontrado'; rd.style.color = '#d97706'; }
-            return;
+            // No romper: devolver false para que _lanzarInitCPSearch reintente.
+            return false;
         }
         window._MAPREF = map;
 
@@ -987,6 +1018,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             if (ly.openTooltip) ly.openTooltip();
         }
 
+        window._buscarCPReady = true;  // ✅ la versión real toma el control
         window.buscarCP = function(valor) {
             var rd = document.getElementById('cpResult');
             var raw = String(valor).trim();
@@ -1059,6 +1091,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         initSliderOpacidad();
 
         try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
+
+        return true;  // ✅ inicialización completa → el reintentador se detiene
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1248,6 +1282,25 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                     '<div style="font-size:10px; color:#94a3b8; margin-top:2px; text-align:center;">' +
                     'Baja la opacidad para ver los CPs de abajo</div>';
                 _lc.appendChild(_row);
+
+                // 🖱️ Botón de MODO DE INFORMACIÓN (Hover ⇄ Click) — como una fila más
+                //    del panel de capas, debajo del slider de opacidad.
+                if (!document.getElementById('ttModeRow')) {
+                    var _sep2 = document.createElement('div');
+                    _sep2.className = 'leaflet-control-layers-separator';
+                    _lc.appendChild(_sep2);
+                    var _rowTT = document.createElement('div');
+                    _rowTT.id = 'ttModeRow';
+                    _rowTT.style.cssText = 'padding:4px 2px; font-family:\'Segoe UI\',sans-serif;';
+                    _rowTT.innerHTML =
+                        '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
+                        'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
+                        'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
+                        '🖱️ Info: Hover</button>' +
+                        '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
+                        'Zonas encimadas → Click</div>';
+                    _lc.appendChild(_rowTT);
+                }
             }
         } catch(e) {}
     }
@@ -1275,6 +1328,57 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 });
             }
         } catch(e) {}
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (solo al seleccionar)
+    //    Para ZONAS ENCIMADAS: en modo Click el hover deja de disparar tooltips de
+    //    zona y la info solo aparece al hacer click (usando el click acumulativo),
+    //    evitando el caos de tooltips superpuestos. Afecta SOLO a las zonas.
+    // ═══════════════════════════════════════════════════════════════
+    window._ttMode = 'hover';
+    window._ttStore = [];
+
+    function _ttWalkZonas(cb) {
+        var capas = window._ZONA_LAYERS || [];
+        for (var i = 0; i < capas.length; i++) { cb(capas[i]); }
+        if (window._MAPREF) {
+            window._MAPREF.eachLayer(function _w(ly){
+                if (ly.feature && ly.feature.properties && ly.feature.properties._tt) cb(ly);
+                if (ly.eachLayer) ly.eachLayer(_w);
+            });
+        }
+    }
+
+    window.toggleTooltipMode = function() {
+        var btn = document.getElementById('ttModeBtn');
+        var hint = document.getElementById('ttModeHint');
+
+        if (window._ttMode === 'hover') {
+            window._ttStore = [];
+            var vistos = [];
+            _ttWalkZonas(function(ly) {
+                if (vistos.indexOf(ly) !== -1) return;
+                vistos.push(ly);
+                if (ly.getTooltip && ly.getTooltip()) {
+                    var tt = ly.getTooltip();
+                    window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
+                    try { ly.unbindTooltip(); } catch(e) {}
+                }
+                if (ly.off) { try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {} }
+            });
+            window._ttMode = 'click';
+            if (btn) { btn.innerHTML = '👆 Info: Click'; btn.style.background = '#2563eb'; }
+            if (hint) hint.innerHTML = 'Clic en la zona para ver info';
+        } else {
+            window._ttStore.forEach(function(rec) {
+                try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
+            });
+            window._ttStore = [];
+            window._ttMode = 'hover';
+            if (btn) { btn.innerHTML = '🖱️ Info: Hover'; btn.style.background = '#16a34a'; }
+            if (hint) hint.innerHTML = 'Zonas encimadas → Click';
+        }
     };
 
     </script>
@@ -1317,7 +1421,7 @@ if st.session_state["authentication_status"]:
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
 
-        mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
+        mostrar_factibilidad = st.checkbox("👁️ Mostrar Perímetros de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
