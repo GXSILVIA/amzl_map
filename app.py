@@ -721,6 +721,12 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     _zonas_fc = {"type": "FeatureCollection", "features": _zona_features}
     _zonas_js_json = _json.dumps(_ZONAS_JS, ensure_ascii=False)
+    # 🛡️ SANEAR para inyección segura dentro de <script> (evita cierre prematuro
+    #    por "</script>" y saltos de línea Unicode que romperían el JavaScript).
+    _zonas_js_json = (_zonas_js_json
+                      .replace("</", "<\\/")
+                      .replace("\u2028", "\\u2028")
+                      .replace("\u2029", "\\u2029"))
 
     # ⚡ FIX 2+3: UNA sola capa con color + tooltip + popup (sin duplicar).
     #    🖱️ El tooltip (hover) se mantiene para zonas sueltas; el CLICK ACUMULATIVO
@@ -1131,23 +1137,28 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     }
 
     function _htmlListaZonas(hits) {
-        // Lista de nombres clicables (modo múltiple)
-        var h = '<div style="font-family:\'Segoe UI\',sans-serif; min-width:230px; max-width:320px;">';
-        h += '<div style="font-weight:700; font-size:13px; color:#1e293b; margin-bottom:6px;">' +
+        // 📋 Lista de nombres clicables de TODAS las zonas encimadas en ese punto.
+        //    Con scroll cuando hay muchas, para no desbordar el popup.
+        var h = '<div style="font-family:\'Segoe UI\',sans-serif; min-width:240px; max-width:340px;">';
+        h += '<div style="font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;">' +
              '🔵 ' + hits.length + ' zonas encimadas aquí</div>' +
-             '<div style="font-size:11px; color:#64748b; margin-bottom:8px;">Selecciona una zona para ver su información:</div>';
+             '<div style="font-size:11px; color:#64748b; margin-bottom:8px;">Haz clic en una zona para ver su información (traslape, aumento, CPs):</div>';
+        // Contenedor con scroll: hasta ~260px de alto, luego scrollea
+        h += '<div style="max-height:260px; overflow-y:auto; padding-right:4px;">';
         for (var i = 0; i < hits.length; i++) {
             var z = hits[i];
             h += '<div onclick="_mostrarZonaDetalle(' + i + ')" ' +
                  'style="cursor:pointer; padding:7px 10px; margin:3px 0; border-radius:6px; ' +
                  'background:#f1f5f9; border-left:5px solid ' + (z.color||'#64748b') + '; ' +
-                 'font-size:12px; font-weight:600; color:#0f172a; display:flex; align-items:center; gap:6px; ' +
+                 'font-size:12px; font-weight:600; color:#0f172a; display:flex; align-items:center; gap:7px; ' +
                  'transition:background .12s;" ' +
                  'onmouseover="this.style.background=\'#e0e7ff\'" ' +
                  'onmouseout="this.style.background=\'#f1f5f9\'">' +
-                 '<span style="font-size:14px;">📍</span><span>' + z.nom + '</span></div>';
+                 '<span style="font-size:14px;">📍</span>' +
+                 '<span style="flex:1;">' + z.nom + '</span>' +
+                 '<span style="color:#94a3b8; font-size:14px;">›</span></div>';
         }
-        h += '</div>';
+        h += '</div></div>';
         return h;
     }
 
