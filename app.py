@@ -1316,53 +1316,65 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     //    Se inyecta como una fila más dentro del control de capas de Leaflet.
     // ═══════════════════════════════════════════════════════════════
     function initSliderOpacidad() {
-        // 🔁 El control de capas de Leaflet puede montarse DESPUÉS de que corre esta
-        //    función. Reintentamos hasta que exista '.leaflet-control-layers-list'
-        //    (máx ~10s). Sin esto, el slider/botón fallan en silencio y nunca aparecen.
-        window._sliderTries = (window._sliderTries || 0) + 1;
-        var _lcCheck = document.querySelector('.leaflet-control-layers-list');
-        if (!_lcCheck && window._sliderTries < 40) {
-            setTimeout(initSliderOpacidad, 300);
-            return;
-        }
-        if (document.getElementById('opacityRow')) { return; }  // ya se agregó
-        try {
-            var _lc = document.querySelector('.leaflet-control-layers-list');
-            if (_lc && !document.getElementById('opacityRow')) {
+        // Ya agregado → salir.
+        if (document.getElementById('opacityRow')) { return; }
+
+        // 🔧 El HTML del slider + botón (se usa tanto en el panel de capas como en el
+        //    panel flotante de respaldo).
+        var _innerHTML =
+            '<div style="font-size:12px; font-weight:600; color:#0f172a; margin-bottom:4px;">' +
+            '🎚️ Opacidad de Zonas: <span id="opacityVal">45%</span></div>' +
+            '<input id="opacitySlider" type="range" min="0" max="100" value="45" ' +
+            'oninput="aplicarOpacidadZonas(this.value)" ' +
+            'style="width:100%; cursor:pointer; accent-color:#2563eb;" />' +
+            '<div style="font-size:10px; color:#94a3b8; margin-top:2px; margin-bottom:6px; text-align:center;">' +
+            'Baja la opacidad para ver los CPs de abajo</div>' +
+            '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
+            'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
+            'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
+            '🖱️ Info: Hover</button>' +
+            '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
+            'Zonas encimadas → Click</div>';
+
+        // 🔍 Buscar el panel de capas de Leaflet con VARIOS selectores (la clase exacta
+        //    varía entre versiones de Leaflet). Si lo encuentra, inyecta ahí.
+        var _lc = document.querySelector('.leaflet-control-layers-list')
+               || document.querySelector('.leaflet-control-layers-overlays')
+               || document.querySelector('.leaflet-control-layers-expanded');
+
+        if (_lc) {
+            try {
                 var _sep = document.createElement('div');
                 _sep.className = 'leaflet-control-layers-separator';
                 _lc.appendChild(_sep);
                 var _row = document.createElement('div');
                 _row.id = 'opacityRow';
                 _row.style.cssText = 'padding:6px 4px; font-family:\'Segoe UI\',sans-serif;';
-                _row.innerHTML =
-                    '<div style="font-size:12px; font-weight:600; color:#0f172a; margin-bottom:4px;">' +
-                    '🎚️ Opacidad de Zonas: <span id="opacityVal">45%</span></div>' +
-                    '<input id="opacitySlider" type="range" min="0" max="100" value="45" ' +
-                    'oninput="aplicarOpacidadZonas(this.value)" ' +
-                    'style="width:100%; cursor:pointer; accent-color:#2563eb;" />' +
-                    '<div style="font-size:10px; color:#94a3b8; margin-top:2px; text-align:center;">' +
-                    'Baja la opacidad para ver los CPs de abajo</div>';
+                _row.innerHTML = _innerHTML;
                 _lc.appendChild(_row);
+                return;  // ✅ listo, agregado al panel de capas
+            } catch(e) {}
+        }
 
-                // 🖱️ Botón de MODO DE INFORMACIÓN (Hover ⇄ Click) — como una fila más
-                //    del panel de capas, debajo del slider de opacidad.
-                if (!document.getElementById('ttModeRow')) {
-                    var _sep2 = document.createElement('div');
-                    _sep2.className = 'leaflet-control-layers-separator';
-                    _lc.appendChild(_sep2);
-                    var _rowTT = document.createElement('div');
-                    _rowTT.id = 'ttModeRow';
-                    _rowTT.style.cssText = 'padding:4px 2px; font-family:\'Segoe UI\',sans-serif;';
-                    _rowTT.innerHTML =
-                        '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
-                        'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
-                        'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
-                        '🖱️ Info: Hover</button>' +
-                        '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
-                        'Zonas encimadas → Click</div>';
-                    _lc.appendChild(_rowTT);
-                }
+        // 🛟 RESPALDO: si tras varios intentos NO se encontró el panel de capas, crear
+        //    un PANEL FLOTANTE propio (independiente de Leaflet) para que el slider y
+        //    el botón SIEMPRE estén disponibles. Garantiza que el usuario los vea.
+        window._sliderTries = (window._sliderTries || 0) + 1;
+        if (window._sliderTries < 25) {
+            setTimeout(initSliderOpacidad, 300);  // seguir intentando el panel de capas
+            return;
+        }
+        // Último recurso: panel flotante propio (esquina superior derecha, bajo el control de capas)
+        try {
+            if (!document.getElementById('opacityRow')) {
+                var _float = document.createElement('div');
+                _float.id = 'opacityRow';
+                _float.style.cssText =
+                    'position:fixed; top:170px; right:10px; z-index:9999; width:190px; ' +
+                    'background:white; padding:10px; border-radius:8px; ' +
+                    'box-shadow:0 2px 10px rgba(0,0,0,0.25); font-family:\'Segoe UI\',sans-serif;';
+                _float.innerHTML = _innerHTML;
+                document.body.appendChild(_float);
             }
         } catch(e) {}
     }
