@@ -928,6 +928,11 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     if (document.readyState === 'interactive' || document.readyState === 'complete') {
         setTimeout(_lanzarInitCPSearch, 300);
     }
+    //    5) 🎚️ Disparo INDEPENDIENTE del slider+botón: aunque initCPSearch ya haya
+    //       completado, el control de capas de Leaflet puede montarse después. Este
+    //       disparo garantiza que initSliderOpacidad reintente por su cuenta hasta
+    //       encontrar el panel y agregar el slider y el botón Hover/Click.
+    setTimeout(function(){ try { initSliderOpacidad(); } catch(e) {} }, 1500);
 
     function initCPSearch() {
         // 🛡️ Guard: si ya se inicializó por completo, no repetir (evita doble handler
@@ -1289,6 +1294,16 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     //    Se inyecta como una fila más dentro del control de capas de Leaflet.
     // ═══════════════════════════════════════════════════════════════
     function initSliderOpacidad() {
+        // 🔁 El control de capas de Leaflet puede montarse DESPUÉS de que corre esta
+        //    función. Reintentamos hasta que exista '.leaflet-control-layers-list'
+        //    (máx ~10s). Sin esto, el slider/botón fallan en silencio y nunca aparecen.
+        window._sliderTries = (window._sliderTries || 0) + 1;
+        var _lcCheck = document.querySelector('.leaflet-control-layers-list');
+        if (!_lcCheck && window._sliderTries < 40) {
+            setTimeout(initSliderOpacidad, 300);
+            return;
+        }
+        if (document.getElementById('opacityRow')) { return; }  // ya se agregó
         try {
             var _lc = document.querySelector('.leaflet-control-layers-list');
             if (_lc && !document.getElementById('opacityRow')) {
