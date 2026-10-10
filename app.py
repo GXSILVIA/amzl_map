@@ -859,6 +859,13 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     _ZONAS_DATA_JSON = _zonas_js_json
 
     search_html = """
+    <div id="versionBanner" style="
+        position:fixed; bottom:8px; left:8px; z-index:99999;
+        background:#16a34a; color:white; padding:4px 10px; border-radius:6px;
+        font-family:'Segoe UI',sans-serif; font-size:11px; font-weight:700;
+        box-shadow:0 2px 8px rgba(0,0,0,0.3); pointer-events:none;">
+        ✅ v2026-10-10 RobustJS
+    </div>
     <div id="cpSearchBar" style="
         position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
         background:white; padding:8px 14px; border-radius:10px;
