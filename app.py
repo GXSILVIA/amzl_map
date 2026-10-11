@@ -898,7 +898,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 var props = layer.feature.properties;
                 var visible = esVisible(layer);
                 if ('CP' in props) {
-                    var cpVal = String(props.CP).replace(/\.0$/, '').trim();
+                    var cpVal = String(props.CP).replace(/\\.0$/, '').trim();
                     while (cpVal.length < 5) cpVal = '0' + cpVal;
                     if (!(cpVal in cpIdx) || visible) {
                         if (!(cpVal in cpIdx)) totalFeatures++;
@@ -965,10 +965,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
             if (hl && os) { try { hl.setStyle(os); } catch(e) {} }
 
-            var esCP = /^[0-9]+(\.0)?$/.test(raw);
+            var esCP = /^[0-9]+(\\.0)?$/.test(raw);
 
             if (esCP) {
-                var cp = raw.replace(/\.0$/, '');
+                var cp = raw.replace(/\\.0$/, '');
                 while (cp.length < 5) cp = '0' + cp;
                 var ly = cpIdx[cp];
                 if (ly) {
@@ -1028,7 +1028,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 _lc.appendChild(_sep);
                 var _row = document.createElement('div');
                 _row.id = 'ttModeRow';
-                _row.style.cssText = 'padding:4px 2px; font-family:\'Segoe UI\',sans-serif;';
+                _row.style.cssText = 'padding:4px 2px; font-family:\\'Segoe UI\\',sans-serif;';
                 _row.innerHTML =
                     '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
                     'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
@@ -1359,16 +1359,28 @@ if st.session_state["authentication_status"]:
                     #    Se disuelven todos los CPs del nodo en un solo polígono y se guarda
                     #    su geometría (en WGS84) para dibujar su borde en el mapa.
                     try:
+                        # Disolver TODOS los CPs del nodo en UN SOLO polígono = territorio
+                        # COMPLETO del nodo. Se funden CPs adyacentes (closing con ε grande
+                        # para cerrar micro-separaciones del GeoJSON) y se eliminan las
+                        # fronteras internas, pero SIN recortar el territorio: el contorno
+                        # llega hasta el borde real del conjunto de CPs (pegado al vecino).
                         from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
                         _eps = 60  # metros — cierra separaciones entre CPs vecinos sin deformar
                         _u = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
+                        # closing (+ε, −ε) para unir CPs casi-adyacentes y borrar líneas internas
                         _closed = _u.buffer(_eps).buffer(-_eps)
+                        # Rellenar huecos internos: quedarse SOLO con el contorno exterior de
+                        # cada pieza → el territorio del nodo queda sólido hasta su borde.
                         if isinstance(_closed, _MPoly):
                             _limite_nodo_m = _MPoly([_Poly(p.exterior) for p in _closed.geoms])
                         elif isinstance(_closed, _Poly):
                             _limite_nodo_m = _Poly(_closed.exterior)
                         else:
                             _limite_nodo_m = _closed
+                        # 🔁 DOBLE LÍNEA: encoger el contorno ~50m hacia ADENTRO. En las
+                        #    fronteras compartidas, el borde de cada nodo queda ligeramente
+                        #    dentro de su territorio → las dos líneas (una por nodo, cada una
+                        #    de su color) NO caen en el mismo píxel y AMBAS se ven.
                         try:
                             _inset = _limite_nodo_m.buffer(-50)
                             if _inset is not None and not _inset.is_empty and _inset.area > 0:
@@ -1386,27 +1398,45 @@ if st.session_state["authentication_status"]:
                         'r5': gpd.GeoSeries([b5], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
                         'r10': gpd.GeoSeries([b10], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
                         'r15': gpd.GeoSeries([b15], crs=CRS_DISTANCIAS).to_crs("EPSG:4326").iloc[0].__geo_interface__,
-                        'limite_nodo': _limite_geojson
+                        'limite_nodo': _limite_geojson  # contorno del territorio del nodo (CPs disueltos)
                     }
 
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
+                # ═══════════════════════════════════════════════════════════════
+                # 📦 CÁLCULO DE UPSIDE: paquetes capturables por zona sobre cada CP
+                #    (Monte Carlo VECTORIZADO por CP con reparto 1/k en zonas traslapadas)
+                #    Se usa gdf_cobertura_m (Albers) para áreas precisas.
+                # ═══════════════════════════════════════════════════════════════
                 _prog(35, "📦 Calculando Upside por zona (Monte Carlo vectorizado)...")
                 upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp = calcular_upside_por_zona(
                     gdf_cobertura_m, gdf_circles_m_corr.to_crs(CRS_AREAS), nodos_unicos_maestro
                 )
 
+                # ═══════════════════════════════════════════════════════════════
+                # ⚡ OPTIMIZACIÓN 8K CPs × 3K zonas — PRECÁLCULO VECTORIZADO
+                #    Reemplaza los dos bucles anidados (CP×union y zona×CP) por
+                #    operaciones vectorizadas de GeoPandas calculadas UNA sola vez.
+                #    Albers (CRS_AREAS) → áreas precisas.
+                # ═══════════════════════════════════════════════════════════════
+                # (A) % cobertura de CADA CP contra la UNIÓN de partners (vectorizado):
+                #     usamos area de intersección CP ∩ union_partners sin bucle Python.
+                #     ⚠️ IMPORTANTE: reparar geometrías inválidas con make_valid/buffer(0)
+                #     ANTES de intersectar — evita shapely.errors.GEOSException.
                 _cob_area = gdf_cobertura_m[['CP', 'geometry']].copy()
+                # Reparar geometrías de CPs (anillos auto-intersectados, etc.)
                 try:
                     _cob_area['geometry'] = _cob_area.geometry.make_valid()
                 except Exception:
                     _cob_area['geometry'] = _cob_area.geometry.buffer(0)
                 _cob_area['_area_cp'] = _cob_area.geometry.area
                 if union_total_partners_m is not None:
+                    # Reparar también la unión de partners
                     _union_fix = union_total_partners_m.buffer(0)
                     try:
                         _inter_area = _cob_area.geometry.intersection(_union_fix).area
                     except Exception:
+                        # Fallback robusto: calcular por CP con manejo de errores individual
                         _inter_area = _cob_area.geometry.apply(
                             lambda g: g.buffer(0).intersection(_union_fix).area if g is not None and not g.is_empty else 0.0
                         )
@@ -1415,6 +1445,7 @@ if st.session_state["authentication_status"]:
                 _pct_cob = (_inter_area / _cob_area['_area_cp'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
                 _pct_cob_por_cp = dict(zip(_cob_area['CP'].astype(str), _pct_cob))
 
+                # (B) Distancia radial de CADA CP al centroide de nodo más cercano (vectorizado, Lambert):
                 _cob_lam = gdf_cobertura_lambert[['CP', 'geometry']].copy()
                 _cent_lam = _cob_lam.geometry.centroid
                 if centroides_nodos_globales:
@@ -1426,18 +1457,24 @@ if st.session_state["authentication_status"]:
                     _dist_min = pd.Series(1e12, index=_cob_lam.index)
                 _dist_por_cp = dict(zip(_cob_lam['CP'].astype(str), _dist_min))
 
+                # (C) Pares zona×CP con % de cobertura — UN SOLO gpd.overlay (reemplaza
+                #     el doble bucle zona(3000)×cp). Devuelve todas las intersecciones reales.
+                #     ⚠️ Usamos nombres de columna NO conflictivos (_ZNOM/_CPCP/_CPZONA) para
+                #        que gpd.overlay NO los renombre con sufijos _1/_2 y la tabla no quede vacía.
                 _zonas_gdf = gdf_circles_m_corr[['NOMBRE', 'geometry']].copy().rename(columns={'NOMBRE': '_ZNOM'})
                 _cps_gdf = gdf_cobertura_m[['CP', 'ZONA', 'geometry']].copy().rename(columns={'CP': '_CPCP', 'ZONA': '_CPZONA'})
+                # Reparar geometrías inválidas ANTES del overlay (make_valid → buffer(0) fallback)
                 try:
                     _zonas_gdf['geometry'] = _zonas_gdf.geometry.make_valid()
                     _cps_gdf['geometry'] = _cps_gdf.geometry.make_valid()
                 except Exception:
                     _zonas_gdf['geometry'] = _zonas_gdf.geometry.buffer(0)
                     _cps_gdf['geometry'] = _cps_gdf.geometry.buffer(0)
+                # Descartar geometrías vacías/nulas que romperían el overlay
                 _zonas_gdf = _zonas_gdf[~_zonas_gdf.geometry.is_empty & _zonas_gdf.geometry.notna()]
                 _cps_gdf = _cps_gdf[~_cps_gdf.geometry.is_empty & _cps_gdf.geometry.notna()]
                 _cps_gdf['_AREACP'] = _cps_gdf.geometry.area
-                _pares_zona_cp = {}
+                _pares_zona_cp = {}  # (nodo, zona_nombre) -> list[(cp_str, pct)]
                 _prog(55, "🔗 Cruzando zonas × CPs (overlay vectorizado)...")
                 _overlay_ok = False
                 try:
@@ -1446,6 +1483,7 @@ if st.session_state["authentication_status"]:
                         _ov['_area_inter'] = _ov.geometry.area
                         _ov['_pct'] = (_ov['_area_inter'] / _ov['_AREACP'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
                         _ov = _ov[_ov['_pct'].round() >= 1]
+                        # Iterar por columnas por NOMBRE (robusto, sin depender de itertuples)
                         for _znom, _cpzona, _cpcp, _pctv in zip(
                             _ov['_ZNOM'].tolist(), _ov['_CPZONA'].tolist(),
                             _ov['_CPCP'].tolist(), _ov['_pct'].tolist()
@@ -1455,6 +1493,8 @@ if st.session_state["authentication_status"]:
                 except Exception:
                     _pares_zona_cp = {}
 
+                # ── FALLBACK robusto: si el overlay falló o quedó vacío, usar sjoin +
+                #    intersección por par para garantizar que la tabla NO quede vacía.
                 if not _overlay_ok:
                     try:
                         _pares_zona_cp = {}
@@ -1479,8 +1519,10 @@ if st.session_state["authentication_status"]:
                 _n_nodos = max(1, len(nodos_unicos_maestro))
                 _prog(60, f"📍 Generando reportes por nodo (0/{_n_nodos})...")
                 for _i_nodo, nodo_iter in enumerate(nodos_unicos_maestro, 1):
+                    # progreso 60→80% repartido entre los nodos
                     _prog(60 + int(20 * _i_nodo / _n_nodos), f"📍 Generando reportes por nodo ({_i_nodo}/{_n_nodos})...")
                     sub_cob = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo_iter]
+                    # Proyección Lambert del mismo subconjunto para cálculos de distancia
                     sub_cob_lambert = gdf_cobertura_lambert[gdf_cobertura_lambert['ZONA'] == nodo_iter]
                     if not sub_cob.empty:
 
@@ -1492,13 +1534,14 @@ if st.session_state["authentication_status"]:
                         cps_perimetro_gt10km = set()
 
                         for _, cp_row in sub_cob.iterrows():
-                            area_real_cp_fija = cp_row['geometry'].area
+                            area_real_cp_fija = cp_row['geometry'].area  # Albers → área precisa
                             if area_real_cp_fija <= 0:
                                 continue
 
                             cp_str = cp_row['CP']
                             zona_lbl = cp_row.get('ZONA', 'S/N')
 
+                            # ⚡ % cobertura precalculado vectorizado (dict). Sin intersección por CP.
                             porcentaje_cobertura = _pct_cob_por_cp.get(str(cp_str), 0.0)
                             if porcentaje_cobertura > 0.0:
                                 if porcentaje_cobertura >= 95:
@@ -1513,6 +1556,7 @@ if st.session_state["authentication_status"]:
                             else:
                                 cp_str = f"LIBRE - {cp_str}"
 
+                            # 📏 DISTANCIA RADIAL precalculada vectorizada (dict, Lambert).
                             distancia_al_centroide = _dist_por_cp.get(str(cp_row['CP']), 1e12)
                             if centroides_nodos_globales:
                                 if distancia_al_centroide <= 5000:
@@ -1542,6 +1586,9 @@ if st.session_state["authentication_status"]:
                         reporte_cp_por_estado.append({"Nodo": nodo_iter, "Estatus": "perimetro 5-10km", "CP": ", ".join(sorted(cps_p10_limpios)) if cps_p10_limpios else "Ninguno"})
                         reporte_cp_por_estado.append({"Nodo": nodo_iter, "Estatus": "perimetro 10-15km", "CP": ", ".join(sorted(cps_p15_limpios)) if cps_p15_limpios else "Ninguno"})
 
+                        # ⚡ Reemplazo del doble bucle zona(3000)×cp por lectura de los
+                        #    pares precalculados con gpd.overlay (_pares_zona_cp).
+                        #    Solo recorremos las zonas que realmente intersectan CPs de ESTE nodo.
                         _zonas_de_este_nodo = [k[1] for k in _pares_zona_cp.keys() if k[0] == nodo_iter]
                         for _zona_nom in sorted(set(_zonas_de_este_nodo)):
                             _pares = _pares_zona_cp.get((nodo_iter, _zona_nom), [])
@@ -1567,8 +1614,18 @@ if st.session_state["authentication_status"]:
                 if not df_cp_por_estado.empty:
                     df_cp_por_estado = df_cp_por_estado[["Nodo", "Estatus", "CP"]]
 
+                # ═══════════════════════════════════════════════════════════════
+                # 📊 DESGLOSE POR NODO (ZONA) — Territorio, Ocupado, Libre, Eficiencia
+                # ═══════════════════════════════════════════════════════════════
+                # 🔢 ZONAS POR NODO = nº de CÍRCULOS del SEGUNDO archivo (Zonas) por nodo.
+                #    ✅ FUENTE DE VERDAD: la columna NODO del 2º archivo (asignación directa
+                #       y explícita de cada zona a su nodo). Si el archivo trae NODO, se
+                #       cuenta por esa columna — NO por intersección espacial (más preciso).
+                #    ↩️ Fallback: si el archivo NO trae NODO (formato antiguo), se usa el
+                #       método espacial (sjoin círculo↔CP) como antes.
                 zonas_por_nodo = {}
                 if 'NODO' in df_zonas_user.columns:
+                    # Normalizar y contar zonas por NODO directamente del 2º archivo
                     _nodo_series = df_zonas_user['NODO'].astype(str).str.strip().str.upper()
                     zonas_por_nodo = _nodo_series.value_counts().to_dict()
                 else:
@@ -1588,6 +1645,8 @@ if st.session_state["authentication_status"]:
                     except Exception:
                         zonas_por_nodo = {}
 
+                # 🎯 NODOS VÁLIDOS = los que vienen en la columna NODO del 2º archivo.
+                #    Solo se mostrarán los CPs de estos nodos (referencia: columna NODO).
                 if 'NODO' in df_zonas_user.columns:
                     _nodos_del_segundo_archivo = set(
                         df_zonas_user['NODO'].astype(str).str.strip().str.upper().dropna().tolist()
@@ -1598,9 +1657,20 @@ if st.session_state["authentication_status"]:
                 desglose_nodos = []
                 for nodo in nodos_unicos_maestro:
                     sub_cob_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
+                    # 🚫 REGLA: solo se muestran nodos que TIENEN zonas (círculos del 2º
+                    #    archivo) encima. Si el nodo no tiene zonas asignadas, se omite
+                    #    por completo (no entra al desglose → sus CPs tampoco se dibujan,
+                    #    porque gdf_cobertura_filtrada se arma desde nodos_validos).
+                    # ✅ Validar contra los NODOS del 2º archivo (comparación normalizada
+                    #    MAYÚSCULAS/strip, porque ZONA del 1er archivo puede diferir en caja).
                     _nodo_norm = str(nodo).strip().upper()
                     _tiene_zonas = _nodo_norm in _nodos_del_segundo_archivo
                     if not sub_cob_nodo.empty and _tiene_zonas:
+                        # 🗺️ Estado del nodo = VOTO POR MAYORÍA de sus CPs.
+                        #    Un CP fronterizo puede venir del GeoJSON del estado vecino
+                        #    (p.ej. un CP de Oaxaca que también existe en el archivo de
+                        #    Veracruz). Para no mal-clasificar el nodo, lo asignamos al
+                        #    estado donde está la MAYORÍA de sus CPs.
                         _conteo_estados = sub_cob_nodo['ESTADO_PERTENECE'].value_counts()
                         _estado_dominante = _conteo_estados.index[0] if len(_conteo_estados) else "DESCONOCIDO"
                         estado_txt = str(_estado_dominante).upper()
@@ -1623,7 +1693,9 @@ if st.session_state["authentication_status"]:
                         else:
                             eficiencia = 0.0
 
+                        # Volumen total del nodo
                         vol_nodo = sub_cob_nodo['VOLUMEN'].sum() if 'VOLUMEN' in sub_cob_nodo.columns else 0
+                        # 🔢 Partners = nº de ZONAS/círculos del 2º archivo asignados a este nodo
                         partners_nodo = int(zonas_por_nodo.get(_nodo_norm, zonas_por_nodo.get(nodo, 0)))
                         num_cps_nodo = len(sub_cob_nodo)
 
@@ -1646,8 +1718,13 @@ if st.session_state["authentication_status"]:
                 nodos_validos = df_desglose['Nodo'].unique().tolist() if not df_desglose.empty else []
                 gdf_cobertura_filtrada = gdf_cobertura[gdf_cobertura['ZONA'].isin(nodos_validos)] if nodos_validos else gdf_cobertura
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🎲 MONTE CARLO: Calcular traslape entre zonas de cada nodo
+                # ═══════════════════════════════════════════════════════════════
+                # Preparar DataFrame de círculos con coordenadas GPS para Monte Carlo
                 gdf_circles_para_traslape = gdf_circles.copy()
                 gdf_circles_para_traslape['RADIO_ORIG'] = df_zonas_user['RADIO'].values
+                # Usar RADIO original en metros para el Monte Carlo
                 gdf_circles_para_traslape['RADIO'] = gdf_circles_para_traslape['RADIO_ORIG']
 
                 _prog(85, "🎲 Calculando traslape entre zonas (Monte Carlo)...")
@@ -1658,6 +1735,7 @@ if st.session_state["authentication_status"]:
                 if df_traslape_mc.empty:
                     df_traslape_mc = pd.DataFrame(columns=["Nodo", "% Traslape", "Nivel"])
 
+                # Integrar % Traslape y Nivel al desglose por nodo
                 if not df_traslape_mc.empty and not df_desglose.empty:
                     df_desglose = df_desglose.merge(
                         df_traslape_mc[['Nodo', '% Traslape', 'Nivel']],
@@ -1667,11 +1745,20 @@ if st.session_state["authentication_status"]:
                     df_desglose['Nivel'] = df_desglose['Nivel'].fillna('⚪ Sin datos')
                     df_desglose.rename(columns={'Nivel': 'Nivel Traslape'}, inplace=True)
                 else:
+                    # Si no hay datos de traslape, agregar columnas con valores por defecto
                     df_desglose['% Traslape'] = '0.00%'
                     df_desglose['Nivel Traslape'] = '⚪ Sin datos'
 
+                # ═══════════════════════════════════════════════════════════════
+                # 🔧 FIX: Guardar gdf_cobertura en session_state para que el
+                #    bloque de renderizado del mapa lo tenga disponible en
+                #    reruns posteriores (al descargar mapa/reporte).
+                # ═══════════════════════════════════════════════════════════════
+                # Guardar la cobertura FILTRADA (solo nodos con zonas) — así el mapa
+                # y los reruns no dibujan CPs de nodos sin zonas.
                 st.session_state['gdf_cobertura_global'] = gdf_cobertura_filtrada
 
+                # Integrar % Traslape individual de cada zona a tabla de CPs por Zona
                 if traslape_por_zona and not df_cp_por_zona.empty and 'Zona' in df_cp_por_zona.columns:
                     df_cp_por_zona['% Traslape'] = df_cp_por_zona['Zona'].apply(
                         lambda z: f"{traslape_por_zona[z]['pct']}%" if z in traslape_por_zona else "0.00%"
@@ -1680,6 +1767,11 @@ if st.session_state["authentication_status"]:
                         lambda z: traslape_por_zona[z]['nivel'] if z in traslape_por_zona else "⚪ Sin datos"
                     )
 
+                # ═══════════════════════════════════════════════════════════════
+                # 📦 Agregar columna "Upside Total (pqts)" al desglose por nodo
+                #    (suma del upside de todas las zonas asignadas a ese nodo)
+                # ═══════════════════════════════════════════════════════════════
+                # Mapear cada zona a su nodo vía traslape_por_zona
                 upside_por_nodo = {}
                 for zona_nom, info_tz in traslape_por_zona.items():
                     nodo_de_zona = info_tz.get('nodo')
@@ -1691,6 +1783,7 @@ if st.session_state["authentication_status"]:
                         lambda n: int(upside_por_nodo.get(n, 0))
                     )
 
+                # Construir df de detalle de zonas con Upside Total por zona
                 df_zonas_detalles_base = gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy()
                 df_zonas_detalles_base['Upside Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
                     lambda n: int(upside_por_zona.get(n, {}).get('total', 0))
@@ -1717,6 +1810,11 @@ if st.session_state["authentication_status"]:
                 }
                 st.session_state.procesado = True
 
+                # ═══════════════════════════════════════════════════════════════
+                # ⚡ FIX CLAVE: construir el mapa Folium UNA sola vez aquí (al procesar)
+                #    y guardar su HTML en session_state. En reruns (checkboxes,
+                #    descargas) NO se reconstruye el mapa → la app responde al instante.
+                # ═══════════════════════════════════════════════════════════════
                 _prog(92, "🗺️ Construyendo mapa (Canvas renderer)...")
                 _mapa_html = construir_mapa_html(
                     st.session_state.resultados,
@@ -1736,6 +1834,10 @@ if st.session_state["authentication_status"]:
         if st.session_state.procesado and st.session_state.resultados is not None:
             res = st.session_state.resultados
 
+            # ═══════════════════════════════════════════════════════════════
+            # ⚡ Mostrar el mapa cacheado. Si por algún motivo no existe (rerun
+            #    sin haber procesado el mapa), reconstruirlo una vez.
+            # ═══════════════════════════════════════════════════════════════
             _mapa_html = st.session_state.get('mapa_descarga_html', None)
             if _mapa_html is None:
                 gdf_cobertura = st.session_state.get('gdf_cobertura_global', None)
