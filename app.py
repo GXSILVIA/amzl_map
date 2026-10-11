@@ -212,12 +212,12 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 📦 AUMENTO: Paquetes adicionales que cada zona puede capturar de cada CP
+# 📦 UPSIDE: Paquetes adicionales que cada zona puede capturar de cada CP
 # ═══════════════════════════════════════════════════════════════════════
 
 def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_maestro):
     """
-    Calcula el AUMENTO (paquetes adicionales capturables) de cada ZONA sobre cada CP.
+    Calcula el UPSIDE (paquetes adicionales capturables) de cada ZONA sobre cada CP.
 
     ⚡ VERSIÓN VECTORIZADA (shapely 2.x): reemplaza el bucle Python punto-por-punto
        por operaciones NumPy vectorizadas con shapely.contains / shapely.intersects.
@@ -247,7 +247,7 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
     """
     import shapely  # shapely 2.x: contains / intersects vectorizados nativos
 
-    # ⚡ 2000 puntos/CP → precisión completa en el aumento. Con el gpd.overlay ya
+    # ⚡ 2000 puntos/CP → precisión completa en el upside. Con el gpd.overlay ya
     #    optimizado, el cuello de botella principal desapareció, así que podemos
     #    permitirnos la precisión alta sin disparar el tiempo total.
     N = 2000  # puntos por CP (precisión alta)
@@ -314,7 +314,7 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
         # peso total por zona = suma de (1/k) sobre los puntos que cubre
         peso_por_zona = (cubre * pesos_pt).sum(axis=1)     # (Z,)
 
-        # Aumento de cada zona sobre este CP
+        # Upside de cada zona sobre este CP
         for j, nom in enumerate(noms_cp_zonas):
             peso = float(peso_por_zona[j])
             if peso <= 0:
@@ -333,17 +333,16 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
                 "upside": upside_int
             })
             upside_por_cp_zona[(nom, cp_str)] = upside_int
-            # Acumular aumento ocupado total de este CP (suma de todas las zonas encima)
+            # Acumular upside ocupado total de este CP (suma de todas las zonas encima)
             upside_ocupado_por_cp[cp_str] = upside_ocupado_por_cp.get(cp_str, 0) + upside_int
 
     # Redondear totales a enteros
     for nom in upside_por_zona:
         upside_por_zona[nom]["total"] = int(round(upside_por_zona[nom]["total"]))
-        # Ordenar desglose por aumento desc
+        # Ordenar desglose por upside desc
         upside_por_zona[nom]["por_cp"].sort(key=lambda d: d["upside"], reverse=True)
 
     return upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp
-
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -353,21 +352,10 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
 #    (2) Capas únicas         → tooltip + popup en la MISMA capa (no duplicar)
 #    (3) Zonas en UNA capa    → un solo GeoJson con todos los círculos
 #    (4) simplify() de CPs    → ~25 m, reduce vértices ~80% sin diferencia visible
-#
-#    ✨ NUEVO (visualización de zonas encimadas):
-#    (A) 🖱️ CLICK ACUMULATIVO: al hacer click en un punto, se detectan TODAS las
-#        zonas (círculos) cuyo área contiene ese punto — por geometría (centro+radio),
-#        NO por el evento de Leaflet (que con canvas solo da la de encima). Si hay
-#        varias zonas encimadas, el popup muestra la LISTA de NOMBRES; al hacer click
-#        en un nombre se despliega su info completa (traslape, aumento, CPs). Si solo
-#        hay una zona, muestra su info directamente.
-#    (B) 🎚️ SLIDER DE OPACIDAD de zonas (0–100%) en el panel de capas, que ajusta en
-#        vivo la transparencia SOLO de los círculos de zona para ver los CPs de abajo.
 # ═══════════════════════════════════════════════════════════════════════
 
 def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     """Construye el mapa Folium completo (Canvas renderer) y devuelve su HTML standalone."""
-    import json as _json
     if not res['gdf_circles_wgs84'].empty:
         c_lat = res['gdf_circles_wgs84']['LATITUD'].mean()
         c_lon = res['gdf_circles_wgs84']['LONGITUD'].mean()
@@ -407,7 +395,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         gdf_mapa_cp_wgs84['PARTNERS'] = 0
     gdf_mapa_cp_wgs84['PARTNERS'] = pd.to_numeric(gdf_mapa_cp_wgs84['PARTNERS'], errors='coerce').fillna(0).astype(int)
 
-    # 📦 AUMENTO por CP: Ocupado (suma de zonas encima) y Libre
+    # 📦 UPSIDE por CP: Ocupado (suma de zonas encima) y Libre
     _upside_ocu_cp = res.get('upside_ocupado_por_cp', {})
     gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(
         lambda c: int(_upside_ocu_cp.get(str(c), 0))
@@ -416,7 +404,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         gdf_mapa_cp_wgs84['VOLUMEN'].astype(float) - gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO']
     ).clip(lower=0).round().astype(int)
 
-    # 📦 Desglose "Aumento por zona encima del CP"
+    # 📦 Desglose "Upside por zona encima del CP"
     _upside_zona_lookup_cp = res.get('upside_por_zona', {})
     _cp_to_zonas = {}
     for _znom, _zinfo in _upside_zona_lookup_cp.items():
@@ -434,10 +422,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     # ═══════════════════════════════════════════════════════════════
     # 📍 FACTIBILIDAD DE PROSPECCIÓN ("¿Dónde prospectar?")
-    #    Un CP es PROSPECTABLE si su AUMENTO LIBRE (volumen disponible que
-    #    NINGUNA zona cubre todavía), sumado al Aumento Libre de los CPs
+    #    Un CP es PROSPECTABLE si su UPSIDE LIBRE (volumen disponible que
+    #    NINGUNA zona cubre todavía), sumado al Upside Libre de los CPs
     #    vecinos cuyos CENTROIDES caen dentro de 750 m, alcanza ≥ 32.
-    #    Se usa Aumento Libre (no Volumen Total) porque solo se puede prospectar
+    #    Se usa Upside Libre (no Volumen Total) porque solo se puede prospectar
     #    sobre volumen DISPONIBLE — lo ya ocupado por zonas no cuenta.
     # ═══════════════════════════════════════════════════════════════
     _UMBRAL_PROSPECCION = 32
@@ -503,7 +491,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         _fact = gdf_mapa_cp_wgs84[gdf_mapa_cp_wgs84['_PROSPECTAR_FLAG'] == 1].copy()
         # Geometrías de las ZONAS existentes (del 2º archivo) en métrico, para evitarlas
         try:
-            _zonas_exist_m = res['gdf_circles_wgs84'].to_crs("EPSG:6362")
+            _zonas_exist_m = gdf_circles_m_corr.to_crs("EPSG:6362")
             _zonas_centros = [(g.centroid.x, g.centroid.y) for g in _zonas_exist_m.geometry if g is not None and not g.is_empty]
         except Exception:
             _zonas_centros = []
@@ -578,7 +566,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                     )
                 else:
                     _dmin = np.full(len(_cand), 1e18)
-                for _nn in range(_k):
+                for _n in range(_k):
                     _idx_best = int(np.argmax(_dmin))
                     # Si el mejor candidato no respeta ni el piso mínimo y YA colocamos
                     # algo, igual lo aceptamos (último recurso: no hay más espacio).
@@ -600,8 +588,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     if not gdf_mapa_cp_wgs84.empty:
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
-        # ⚠️ Tooltip de CPs: se quitaron '_UPSIDE_ZONAS' (Aumento por Zona), '_VOL_750M'
-        #    (Aumento disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
+        # ⚠️ Tooltip de CPs: se quitaron '_UPSIDE_ZONAS' (Upside por Zona), '_VOL_750M'
+        #    (Upside disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
         #    Esos datos de prospección ya se muestran en los círculos verdes del mapa.
         _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', 'PARTNERS', '_rango_txt']
         _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Aumento de Zona:', 'Aumento Libre:', 'Partners:', 'Rango:']
@@ -642,11 +630,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         _cps_por_circulo = {}
 
     # Construir UN SOLO GeoJSON FeatureCollection con todos los círculos.
-    # ✨ Y EN PARALELO, un arreglo _ZONAS_JS con {nom, lat, lon, rad_m, color, info_html}
-    #    de cada zona — es lo que el JS usa para la DETECCIÓN GEOMÉTRICA del click
-    #    acumulativo (qué zonas contienen el punto clicado) con zonas encimadas.
     _zona_features = []
-    _ZONAS_JS = []   # ← datos de círculos para el click acumulativo en JS
     for _pos, (_, r) in enumerate(res['gdf_circles_wgs84'].iterrows()):
         color_hex, r_text = obtener_color_rango_circulo(r['VOLUMEN'])
         geom_circulo = r['geometry']
@@ -699,43 +683,53 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             "geometry": geom_circulo.__geo_interface__
         })
 
-        # 📦 Registro para el click acumulativo en JS: centro GPS + radio en METROS.
-        #    (RADIO viene en metros en el archivo de zonas; es el radio operativo real.)
-        try:
-            _rad_m = float(r['RADIO'])
-        except Exception:
-            _rad_m = 0.0
-        try:
-            _zlat = float(r['LATITUD']); _zlon = float(r['LONGITUD'])
-        except Exception:
-            _c = geom_circulo.centroid
-            _zlat = float(_c.y); _zlon = float(_c.x)
-        _ZONAS_JS.append({
-            "nom": str(r['NOMBRE']),
-            "lat": _zlat,
-            "lon": _zlon,
-            "rad_m": _rad_m,
-            "color": color_hex,
-            "info": tt_c
-        })
-
     _zonas_fc = {"type": "FeatureCollection", "features": _zona_features}
-    _zonas_js_json = _json.dumps(_ZONAS_JS, ensure_ascii=False)
-    # 🛡️ SANEAR para inyección segura dentro de <script> (evita cierre prematuro
-    #    por "</script>" y saltos de línea Unicode que romperían el JavaScript).
-    _zonas_js_json = (_zonas_js_json
-                      .replace("</", "<\\/")
-                      .replace("\u2028", "\\u2028")
-                      .replace("\u2029", "\\u2029"))
 
-    # ⚡ FIX 2+3: UNA sola capa con color + tooltip + popup (sin duplicar).
-    #    🖱️ El tooltip (hover) se mantiene para zonas sueltas; el CLICK ACUMULATIVO
-    #       (abajo, en JS) se encarga de las zonas encimadas con selección por nombre.
+    # 📦 Datos de cada zona para el CLICK ACUMULATIVO (centro GPS + radio en metros
+    #    + info HTML). El JS usa esto para detectar GEOMÉTRICAMENTE qué zonas contienen
+    #    el punto clicado (zonas encimadas) y mostrar la info de TODAS las de abajo.
+    import json as _json
+    _ZONAS_JS = []
+    for _, r in res['gdf_circles_wgs84'].iterrows():
+        _ch, _rt = obtener_color_rango_circulo(r['VOLUMEN'])
+        _it = traslape_zona_lookup.get(r['NOMBRE'], {})
+        _iu = upside_zona_lookup.get(r['NOMBRE'], {})
+        _tl = [
+            f"<b>Zona Operativa: {r['NOMBRE']}</b>",
+            f"Rango: {_rt}",
+            f"Volumen: {r['VOLUMEN']}",
+            f"Radio Ope: {r['RADIO']}m",
+            f"<b>Traslape: {_it.get('pct', 0.0)}% — {_it.get('nivel', '⚪ Sin datos')}</b>",
+            f"<b>📦 Aumento Total: {_iu.get('total', 0)} pqts</b>"
+        ]
+        _ucp = _iu.get('por_cp', [])
+        if _ucp:
+            _tl.append("── Aumento por CP ──")
+            for _d in _ucp[:10]:
+                _tl.append(f"&nbsp;&nbsp;• CP {_d['CP']} ({_d['pct']}%): {_d['upside']} pqts")
+        _dt = _it.get('desglose', [])
+        if _dt:
+            _tl.append("── Detalle Traslape ──")
+            for _d in _dt:
+                _tl.append(f"&nbsp;&nbsp;• {_d['NOM']}: {_d['PCT']}%")
+        try:
+            _rm = float(r['RADIO'])
+        except Exception:
+            _rm = 0.0
+        try:
+            _la = float(r['LATITUD']); _lo = float(r['LONGITUD'])
+        except Exception:
+            _c = r['geometry'].centroid; _la = float(_c.y); _lo = float(_c.x)
+        _ZONAS_JS.append({"nom": str(r['NOMBRE']), "lat": _la, "lon": _lo,
+                          "rad_m": _rm, "color": _ch, "info": "<br>".join(_tl)})
+    _ZONAS_JSON = _json.dumps(_ZONAS_JS, ensure_ascii=False).replace("</", "<\\/")
+
+    # ⚡ UNA sola capa de zonas con color + tooltip (hover para zonas sueltas).
+    #    El click acumulativo (JS, más abajo) maneja las zonas encimadas.
     fg_zonas = folium.FeatureGroup(name="Zonas", show=True)
     if _zona_features:
         folium.GeoJson(
             _zonas_fc,
-            name="Zonas",
             style_function=lambda feat: {
                 'fillColor': feat['properties'].get('_color', '#9e9e9e'),
                 'color': 'black',
@@ -749,14 +743,25 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # ═══════════════════════════════════════════════════════════════
     # 3. ANILLOS DE FACTIBILIDAD — en FeatureGroup para toggle sin recargar
     # ═══════════════════════════════════════════════════════════════
-    fg_anillos = folium.FeatureGroup(name="Perímetros", show=mostrar_anillos)
+    fg_anillos = folium.FeatureGroup(name="Radios", show=mostrar_anillos)
     if 'anillos_por_estado' in res:
+        # 🎨 COLOREO POR ADYACENCIA: paleta de neutros BIEN DIFERENCIABLES entre sí.
+        #    Se detecta qué nodos son vecinos (sus límites se tocan/solapan) y se asignan
+        #    colores con greedy graph coloring, de modo que nodos ADYACENTES nunca
+        #    reciban el mismo color ni tonos confundibles.
         _PAL_NEUTROS = [
-            '#374151', '#9ca3af', '#78350f', '#d6d3d1',
-            '#1e293b', '#a8a29e', '#57534e', '#64748b',
+            '#374151',  # gris muy oscuro
+            '#9ca3af',  # gris claro
+            '#78350f',  # marrón oscuro
+            '#d6d3d1',  # beige/gris muy claro
+            '#1e293b',  # azul-gris oscuro
+            '#a8a29e',  # taupe
+            '#57534e',  # marrón-gris medio
+            '#64748b',  # gris-azulado medio
         ]
         import shapely as _shp
         _nodos_lista = list(res['anillos_por_estado'].keys())
+        # Construir geometrías de límites para test de adyacencia
         _geoms_lim = {}
         for _nk in _nodos_lista:
             _lg = res['anillos_por_estado'][_nk].get('limite_nodo')
@@ -765,6 +770,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                     _geoms_lim[_nk] = _shp.geometry.shape(_lg)
                 except Exception:
                     _geoms_lim[_nk] = None
+        # Grafo de adyacencia: dos nodos son vecinos si sus límites se tocan/intersectan
         _adj = {nk: set() for nk in _nodos_lista}
         _claves = [k for k in _nodos_lista if _geoms_lim.get(k) is not None]
         for _a in range(len(_claves)):
@@ -775,6 +781,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                         _adj[_ka].add(_kb); _adj[_kb].add(_ka)
                 except Exception:
                     pass
+        # Greedy coloring: ordenar por nº de vecinos desc (más restringidos primero)
         _color_de_nodo = {}
         for _nk in sorted(_nodos_lista, key=lambda k: -len(_adj[k])):
             _usados = {_color_de_nodo[v] for v in _adj[_nk] if v in _color_de_nodo}
@@ -790,13 +797,20 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             c_lat = anillos['centro_lat']
             c_lon = anillos['centro_lon']
 
+            # 🔲 LÍMITE DEL NODO: contorno del territorio (CPs del 1er archivo disueltos)
+            #    Marca hasta dónde llega el nodo. Solo CONTORNO EXTERIOR, color por nodo.
             _lim = anillos.get('limite_nodo')
             if _lim is not None:
+                # 🎨 Color por COLOREO DE ADYACENCIA (nodos vecinos ≠ color). Cada nodo
+                #    delinea TODO su contorno completo; en límites compartidos aparecen
+                #    líneas dobles (el borde de cada nodo con su propio color) — es lo esperado.
                 _col_nodo = _color_de_nodo.get(nodo_key, _PAL_NEUTROS[0])
                 folium.GeoJson(
                     _lim,
                     style_function=lambda x, col=_col_nodo: {'fillColor': 'transparent', 'fillOpacity': 0,
                                               'color': col, 'weight': 3},
+                    # interactive=False → el límite NO captura el hover, así el tooltip del
+                    # CP de abajo SÍ se muestra al pasar el mouse.
                     interactive=False
                 ).add_to(fg_anillos)
 
@@ -833,12 +847,15 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     # ═══════════════════════════════════════════════════════════════
     # 📍 CAPA DE PROSPECCIÓN — círculos verdes de 750m en cada CP factible
+    #    (Volumen Total acumulado ≥ 32 en radio de 750m centroide-a-centroide).
+    #    Aparece como un check más en el control de capas (apagada por defecto).
+    #    Marca los espacios donde PODRÍA ingresar un nuevo VR o ampliar capacidad.
     # ═══════════════════════════════════════════════════════════════
     fg_prospeccion = folium.FeatureGroup(name="📍 Prospección (750m)", show=False)
     for _plat, _plon, _pcp, _pidx, _ptot in _prosp_centros:
         folium.Circle(
             location=[_plat, _plon],
-            radius=750,
+            radius=750,  # metros — mismo radio de la regla de negocio
             color='#15803d',
             weight=2,
             fill=True,
@@ -852,20 +869,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     folium.LayerControl(position='topright', collapsed=False).add_to(m)
 
     # ═══════════════════════════════════════════════════════════════
-    # 🔍 BUSCADOR + 🖱️ CLICK ACUMULATIVO (selección por nombre) + 🎚️ SLIDER OPACIDAD
+    # 🔍 BUSCADOR DE CP + NOMBRE DE ZONA
     # ═══════════════════════════════════════════════════════════════
-    # 📦 Datos de las zonas (centro, radio en metros, color, info) para que el JS
-    #    detecte GEOMÉTRICAMENTE qué zonas contienen el punto clicado (zonas encimadas).
-    _ZONAS_DATA_JSON = _zonas_js_json
-
     search_html = """
-    <div id="versionBanner" style="
-        position:fixed; bottom:8px; left:8px; z-index:99999;
-        background:#64748b; color:white; padding:4px 10px; border-radius:6px;
-        font-family:'Segoe UI',sans-serif; font-size:11px; font-weight:700;
-        box-shadow:0 2px 8px rgba(0,0,0,0.3); pointer-events:none;">
-        ⏳ v10-10 — cargando...
-    </div>
     <div id="cpSearchBar" style="
         position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
         background:white; padding:8px 14px; border-radius:10px;
@@ -873,9 +879,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         display:flex; align-items:center; gap:8px;
         font-family:'Segoe UI',sans-serif;">
         <span style="font-size:16px">🔍</span>
-        <input id="cpInput" type="text" placeholder="Buscar CP o Zona..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+        <input id="cpInput" type="text" placeholder="Buscar CP o Zona..."
             onkeyup="if(event.key==='Enter')buscarCP(this.value)"
-            oninput="if(this.value.trim()==='')buscarCP('')"
             style="border:1px solid #e2e8f0; border-radius:6px; padding:6px 12px;
             font-size:14px; width:170px; outline:none;" />
         <button onclick="buscarCP(document.getElementById('cpInput').value)"
@@ -885,614 +890,256 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         <span id="cpResult" style="font-size:12px; max-width:350px;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
-
-    <script type="application/json" id="zonasDataJSON">""" + _ZONAS_DATA_JSON + """</script>
-
+    <!-- 🖱️ Botón de modo de información (Hover ⇄ Click) — se inyecta DENTRO del
+         control de capas de Leaflet (junto a CP/Zonas/Radio) vía JS en initCPSearch. -->
     <script>
-    // 🔔 FIRMA DE VERSIÓN — si ves este mensaje en la consola, el navegador ejecuta
-    //    la versión NUEVA del mapa. Si NO lo ves, está sirviendo una versión cacheada.
-    console.log('✅ MAPA AMZL v2026-10-10-RobustJS cargado. Nombre mapa:', '" + m.get_name() + "');
-    // 🗺️ Nombre REAL del objeto mapa de Folium (inyectado desde Python). Evita depender
-    //    del frágil loop 'for k in window' para localizar el mapa.
-    window.__MAPA_NOMBRE__ = '" + m.get_name() + "';
-    // 📦 Zonas inyectadas desde Python para el click acumulativo (centro+radio).
-    try {
-        window._ZONAS_DATA = JSON.parse(document.getElementById('zonasDataJSON').textContent);
-    } catch(e) { window._ZONAS_DATA = []; console.error('Error parseando zonas:', e); }
+    // 📦 Datos de zonas para el click acumulativo (inyectado desde Python).
+    window._ZONAS_DATA = """ + _ZONAS_JSON + """;
 
-    // 🛟 RESPALDO inmediato de buscarCP: disponible desde el primer instante, por si
-    //    el usuario busca antes de que termine la inicialización del mapa. Si la versión
-    //    real aún no está lista, fuerza la init y reintenta la búsqueda en breve.
-    window._buscarCPReady = false;
-    window.buscarCP = function(valor) {
-        if (window._buscarCPReady) return;  // la versión real ya tomó el control
-        var rd = document.getElementById('cpResult');
-        if (rd) { rd.innerHTML = '⏳ Preparando el buscador...'; rd.style.color = '#2563eb'; }
-        try { if (typeof _lanzarInitCPSearch === 'function') _lanzarInitCPSearch(); } catch(e) {}
-        // reintentar la búsqueda una vez que la versión real esté lista
-        var _val = valor;
-        var _intentos = 0;
-        var _t = setInterval(function() {
-            _intentos++;
-            if (window._buscarCPReady) { clearInterval(_t); try { window.buscarCP(_val); } catch(e) {} }
-            else if (_intentos > 20) { clearInterval(_t); if (rd) { rd.innerHTML = '⚠ El mapa aún se está cargando, intenta de nuevo'; rd.style.color = '#d97706'; } }
-        }, 400);
-    };
-
-    // 🔁 Disparo con REINTENTOS: el mapa (Leaflet) puede tardar en montarse dentro
-    //    del iframe de Streamlit. Reintentamos hasta encontrarlo (máx ~15s) para que
-    //    el buscador SIEMPRE quede inicializado y window.buscarCP disponible.
-    window._cpSearchTries = 0;
-    function _lanzarInitCPSearch() {
-        window._cpSearchTries++;
+    // 🚀 Disparo a prueba de todo dentro del iframe de Streamlit: varias vías + reintentos.
+    window._cpTries = 0;
+    function _lanzarInit() {
+        window._cpTries++;
         var ok = initCPSearch();
-        if (!ok && window._cpSearchTries < 30) {
-            setTimeout(_lanzarInitCPSearch, 500);  // reintentar cada 0.5s
-        }
+        if (!ok && window._cpTries < 40) setTimeout(_lanzarInit, 400);
     }
-    // 🚀 DISPARO A PRUEBA DE TODO (clave en el iframe de Streamlit components.html):
-    //    NO dependemos solo de 'load' (que dentro del iframe puede ya haber ocurrido
-    //    antes de que corra este <script>). Lanzamos por VARIAS vías; el reintentador
-    //    (_lanzarInitCPSearch) reintenta cada 0.5s hasta encontrar el mapa, así que
-    //    disparar de más es inofensivo (initCPSearch es idempotente).
-    //    1) Inmediato (el <script> está al final del body → el mapa casi siempre ya existe)
-    setTimeout(_lanzarInitCPSearch, 300);
-    //    2) En DOMContentLoaded (si el DOM aún no terminó)
-    document.addEventListener('DOMContentLoaded', function(){ setTimeout(_lanzarInitCPSearch, 300); });
-    //    3) En load (recurso de respaldo)
-    window.addEventListener('load', function(){ setTimeout(_lanzarInitCPSearch, 300); });
-    //    4) Si el documento YA está listo cuando corre este script, lanzar de una vez
-    if (document.readyState === 'interactive' || document.readyState === 'complete') {
-        setTimeout(_lanzarInitCPSearch, 300);
-    }
-    //    5) 🎚️ Disparo INDEPENDIENTE del slider+botón: aunque initCPSearch ya haya
-    //       completado, el control de capas de Leaflet puede montarse después. Este
-    //       disparo garantiza que initSliderOpacidad reintente por su cuenta hasta
-    //       encontrar el panel y agregar el slider y el botón Hover/Click.
-    setTimeout(function(){ try { initSliderOpacidad(); } catch(e) {} }, 1500);
+    setTimeout(_lanzarInit, 300);
+    document.addEventListener('DOMContentLoaded', function(){ setTimeout(_lanzarInit, 300); });
+    window.addEventListener('load', function(){ setTimeout(_lanzarInit, 300); });
+    if (document.readyState !== 'loading') setTimeout(_lanzarInit, 300);
 
     function initCPSearch() {
-        // 🛡️ Guard: si ya se inicializó por completo, no repetir (evita doble handler
-        //    de click al dispararse por varias vías). Devuelve true para frenar reintentos.
-        if (window._cpSearchInitDone) { return true; }
-        var map = null;
-        // 🗺️ 1º (LO MÁS FIABLE): el OBJETO MAPA REAL que Folium inyecta vía MacroElement
-        //    (window.__MAPA_OBJ__ = {{this._parent.get_name()}}). No depende de window[nombre].
-        try {
-            if (window.__MAPA_OBJ__ && window.__MAPA_OBJ__.eachLayer) { map = window.__MAPA_OBJ__; }
-        } catch(e) {}
-        // 2º: por nombre inyectado
-        if (!map) {
-            try {
-                var _nm = window.__MAPA_NOMBRE__;
-                if (_nm && window[_nm] && window[_nm].eachLayer) { map = window[_nm]; }
-            } catch(e) {}
-        }
-        // 3º: buscar cualquier map_ en window
+        if (window._cpInitDone) return true;
+        // Localizar el mapa Leaflet: objeto inyectado por Folium, o buscando en window.
+        var map = window.__MAPA_OBJ__ && window.__MAPA_OBJ__.eachLayer ? window.__MAPA_OBJ__ : null;
         if (!map) {
             for (var k in window) {
-                try {
-                    if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) {
-                        map = window[k]; break;
-                    }
-                } catch(e) {}
+                try { if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) { map = window[k]; break; } } catch(e) {}
             }
         }
-        // 4º: cualquier objeto Leaflet con _container
         if (!map) {
             for (var k2 in window) {
-                try {
-                    if (window[k2] && window[k2]._leaflet_id && window[k2]._container) {
-                        map = window[k2]; break;
-                    }
-                } catch(e) {}
+                try { if (window[k2] && window[k2]._leaflet_id && window[k2]._container) { map = window[k2]; break; } } catch(e) {}
             }
         }
-        if (!map) {
-            // No romper: devolver false para que _lanzarInitCPSearch reintente.
-            return false;
-        }
+        if (!map) return false;
         window._MAPREF = map;
 
-        var cpIdx = {};
-        var zonaIdx = {};
-        var totalFeatures = 0;
-        var totalZonas = 0;
-
+        // ── Indexar capas para el buscador (CP + nombre de zona) ──
+        var cpIdx = {}, zonaIdx = {}, totalFeatures = 0;
         function esVisible(layer) {
-            var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined')
-                     ? layer.options.fillOpacity : 0.45;
+            var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined') ? layer.options.fillOpacity : 0.45;
             return fo > 0;
         }
-
         function indexLayer(layer) {
             if (layer.feature && layer.feature.properties) {
                 var props = layer.feature.properties;
-                var visible = esVisible(layer);
                 if ('CP' in props) {
                     var cpVal = String(props.CP).replace(/\\.0$/, '').trim();
                     while (cpVal.length < 5) cpVal = '0' + cpVal;
-                    if (!(cpVal in cpIdx) || visible) {
-                        if (!(cpVal in cpIdx)) totalFeatures++;
-                        cpIdx[cpVal] = layer;
-                    }
+                    if (!(cpVal in cpIdx)) { totalFeatures++; }
+                    cpIdx[cpVal] = layer;
                 }
-                var zonaNom = props.name || props.NOMBRE || props.Name || null;
-                if (zonaNom) {
-                    var zk = String(zonaNom).trim().toUpperCase();
-                    if (!(zk in zonaIdx) || visible) {
-                        if (!(zk in zonaIdx)) totalZonas++;
-                        zonaIdx[zk] = layer;
-                    }
-                }
-                // 🎚️ Registrar capas de ZONA (círculos) para el slider de opacidad
-                if (zonaNom && (props._color || props._tt)) {
-                    window._ZONA_LAYERS = window._ZONA_LAYERS || [];
-                    window._ZONA_LAYERS.push(layer);
-                }
+                var zn = props.name || props.NOMBRE || props.Name || null;
+                if (zn) zonaIdx[String(zn).trim().toUpperCase()] = layer;
             }
-            if (layer.options && layer.options.name) {
-                var zk2 = String(layer.options.name).trim().toUpperCase();
-                if (!(zk2 in zonaIdx) || esVisible(layer)) {
-                    if (!(zk2 in zonaIdx)) totalZonas++;
-                    zonaIdx[zk2] = layer;
-                }
-            }
-            if (layer.eachLayer) {
-                layer.eachLayer(function(sub) { indexLayer(sub); });
-            }
-            if (layer._layers) {
-                for (var id in layer._layers) { indexLayer(layer._layers[id]); }
-            }
+            if (layer.eachLayer) layer.eachLayer(function(s){ indexLayer(s); });
+            if (layer._layers) { for (var id in layer._layers) indexLayer(layer._layers[id]); }
         }
-        window._ZONA_LAYERS = [];
-        map.eachLayer(function(layer) { indexLayer(layer); });
-        window._CP_IDX = cpIdx;
-        window._ZONA_IDX = zonaIdx;
+        map.eachLayer(function(l){ indexLayer(l); });
 
         var rd = document.getElementById('cpResult');
         if (rd && totalFeatures > 0) {
-            rd.innerHTML = totalFeatures + ' CPs y ' + Object.keys(zonaIdx).length + ' zonas indexados ✓';
+            rd.innerHTML = totalFeatures + ' CPs y ' + Object.keys(zonaIdx).length + ' zonas ✓';
             rd.style.color = '#16a34a';
-            setTimeout(function() { rd.innerHTML = ''; }, 3000);
-        } else if (rd) {
-            rd.innerHTML = '⚠ 0 CPs encontrados';
-            rd.style.color = '#d97706';
+            setTimeout(function(){ rd.innerHTML = ''; }, 3000);
         }
 
-        var hl = null, os = null;
-
-        function resaltarCapa(ly, rd, etiqueta) {
-            os = {
-                fillColor: ly.options.fillColor || '#9e9e9e',
-                fillOpacity: ly.options.fillOpacity || 0.45,
-                color: ly.options.color || '#ffffff',
-                weight: ly.options.weight || 1.5
-            };
+        var hl = null, osv = null;
+        function resaltar(ly) {
+            osv = { fillColor: ly.options.fillColor || '#9e9e9e', fillOpacity: ly.options.fillOpacity || 0.45,
+                    color: ly.options.color || '#ffffff', weight: ly.options.weight || 1.5 };
+            // 🔵 AZUL (en vez de rojo)
             ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#1d4ed8', weight:3 });
             hl = ly;
             if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
             if (ly.openTooltip) ly.openTooltip();
         }
 
-        window._buscarCPReady = true;  // ✅ la versión real toma el control
         window.buscarCP = function(valor) {
             var rd = document.getElementById('cpResult');
             var raw = String(valor).trim();
-            if (!raw) {
-                // 🔵 Buscador vacío → DESELECCIONAR: restaurar el estilo del resaltado activo
-                if (hl && os) { try { hl.setStyle(os); } catch(e) {} hl = null; os = null; }
-                if (rd) { rd.innerHTML = ''; rd.style.color = '#64748b'; }
-                return;
-            }
-
-            if (hl && os) { try { hl.setStyle(os); } catch(e) {} }
-
+            if (hl && osv) { try { hl.setStyle(osv); } catch(e) {} hl = null; osv = null; }
+            if (!raw) { if (rd) { rd.innerHTML = ''; } return; }
             var esCP = /^[0-9]+(\\.0)?$/.test(raw);
-
             if (esCP) {
                 var cp = raw.replace(/\\.0$/, '');
                 while (cp.length < 5) cp = '0' + cp;
                 var ly = cpIdx[cp];
-                if (ly) {
-                    resaltarCapa(ly, rd, 'CP');
-                    if (rd) {
-                        var p = ly.feature.properties;
-                        rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') +
-                            ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
-                        rd.style.color = '#16a34a';
-                    }
-                } else if (rd) {
-                    rd.innerHTML = '⚠ El CP ' + cp + ' no está dentro de la cobertura';
-                    rd.style.color = '#dc2626';
-                }
+                if (ly) { resaltar(ly);
+                    if (rd) { var p = ly.feature.properties;
+                        rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') + ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
+                        rd.style.color = '#16a34a'; }
+                } else if (rd) { rd.innerHTML = '⚠ CP ' + cp + ' no está en la cobertura'; rd.style.color = '#dc2626'; }
                 return;
             }
-
-            var clave = raw.toUpperCase();
-            var lyZona = zonaIdx[clave];
-
+            var clave = raw.toUpperCase(), lyZona = zonaIdx[clave];
             if (!lyZona) {
-                var candidatos = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
-                if (candidatos.length > 0) {
-                    lyZona = zonaIdx[candidatos[0]];
-                    clave = candidatos[0];
-                }
+                var cand = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
+                if (cand.length) { lyZona = zonaIdx[cand[0]]; clave = cand[0]; }
             }
-
-            if (lyZona) {
-                resaltarCapa(lyZona, rd, 'ZONA');
-                if (rd) {
-                    rd.innerHTML = '✔ Zona ' + clave + ' localizada';
-                    rd.style.color = '#16a34a';
-                }
-            } else if (rd) {
-                rd.innerHTML = '✘ No se encontró el CP ni la zona "' + raw + '"';
-                rd.style.color = '#dc2626';
-            }
+            if (lyZona) { resaltar(lyZona); if (rd) { rd.innerHTML = '✔ Zona ' + clave; rd.style.color = '#16a34a'; } }
+            else if (rd) { rd.innerHTML = '✘ No se encontró "' + raw + '"'; rd.style.color = '#dc2626'; }
         };
 
-        var pr = new URLSearchParams(window.location.search).get('cp');
-        if (pr) setTimeout(function() { buscarCP(pr); }, 500);
-
-        window.addEventListener('message', function(e) {
-            if (e.data && e.data.action === 'searchCP' && e.data.cp) {
-                buscarCP(e.data.cp);
-            }
-        });
-
-        // ═══════════════════════════════════════════════════════════
-        // 🖱️ CLICK ACUMULATIVO + 🎚️ SLIDER — inicializar sobre el mapa
-        // ═══════════════════════════════════════════════════════════
+        // ── CLICK ACUMULATIVO: muestra TODAS las zonas de abajo en zonas encimadas ──
         initClickAcumulativo(map);
-        initSliderOpacidad();
-
-        try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
-
-        window._cpSearchInitDone = true;  // marca init completa (guard anti-doble)
-        // 🔔 Actualizar banner con DIAGNÓSTICO en vivo (visible en el mapa, sin consola)
-        try {
-            var _bn = document.getElementById('versionBanner');
-            if (_bn) {
-                _bn.style.background = '#16a34a';
-                _bn.innerHTML = '✅ v10-10 OK · ' + totalFeatures + ' CPs · ' +
-                    (window._ZONAS_DATA||[]).length + ' zonas';
-            }
-        } catch(e) {}
-        return true;  // ✅ inicialización completa → el reintentador se detiene
+        initControles();
+        window._cpInitDone = true;
+        return true;
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // 🖱️ CLICK ACUMULATIVO DE ZONAS ENCIMADAS (detección por geometría)
-    //    Al hacer click en el mapa, se calcula la distancia del punto a cada
-    //    centro de zona y se listan TODAS las zonas cuyo radio contiene el punto.
-    //    • 1 zona  → se muestra su info directamente.
-    //    • N zonas → se muestra la LISTA de nombres; click en un nombre → su info.
-    //    Funciona con prefer_canvas=True porque NO depende del evento de la capa.
-    // ═══════════════════════════════════════════════════════════════
-    function _distMetros(lat1, lon1, lat2, lon2) {
-        // Haversine (metros)
-        var R = 6371000.0;
-        var dLat = (lat2 - lat1) * Math.PI / 180;
-        var dLon = (lon2 - lon1) * Math.PI / 180;
-        var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
-                Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*
-                Math.sin(dLon/2)*Math.sin(dLon/2);
-        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    // Detección geométrica: qué zonas contienen el punto (Haversine centro+radio).
+    function _distM(la1, lo1, la2, lo2) {
+        var R = 6371000, dLa = (la2-la1)*Math.PI/180, dLo = (lo2-lo1)*Math.PI/180;
+        var a = Math.sin(dLa/2)*Math.sin(dLa/2) + Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLo/2)*Math.sin(dLo/2);
+        return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
-
     function _zonasEnPunto(lat, lon) {
-        var hits = [];
-        var Z = window._ZONAS_DATA || [];
+        var hits = [], Z = window._ZONAS_DATA || [];
         for (var i = 0; i < Z.length; i++) {
             var z = Z[i];
-            if (!z || !isFinite(z.lat) || !isFinite(z.lon) || !(z.rad_m > 0)) continue;
-            var d = _distMetros(lat, lon, z.lat, z.lon);
-            if (d <= z.rad_m) {
-                hits.push({ nom: z.nom, info: z.info, color: z.color, dist: d, rad: z.rad_m, lat: z.lat, lon: z.lon });
-            }
+            if (!z || !isFinite(z.lat) || !(z.rad_m > 0)) continue;
+            var d = _distM(lat, lon, z.lat, z.lon);
+            if (d <= z.rad_m) hits.push({nom: z.nom, info: z.info, color: z.color, lat: z.lat, lon: z.lon, rad: z.rad_m, dist: d});
         }
-        // ordenar: la más "centrada" (menor dist/rad) primero
-        hits.sort(function(a, b){ return (a.dist/a.rad) - (b.dist/b.rad); });
+        hits.sort(function(a,b){ return (a.dist/a.rad) - (b.dist/b.rad); });
         return hits;
     }
-
-    function _htmlListaZonas(hits) {
-        // 📋 Lista de nombres clicables de TODAS las zonas encimadas en ese punto.
-        //    Con scroll cuando hay muchas, para no desbordar el popup.
-        var h = '<div style="font-family:\'Segoe UI\',sans-serif; min-width:240px; max-width:340px;">';
-        h += '<div style="font-weight:700; font-size:13px; color:#1e293b; margin-bottom:4px;">' +
-             '🔵 ' + hits.length + ' zonas encimadas aquí</div>' +
-             '<div style="font-size:11px; color:#64748b; margin-bottom:8px;">Haz clic en una zona para ver su información (traslape, aumento, CPs):</div>';
-        // Contenedor con scroll: hasta ~260px de alto, luego scrollea
-        h += '<div style="max-height:260px; overflow-y:auto; padding-right:4px;">';
+    function _htmlLista(hits) {
+        var h = '<div style="font-family:\'Segoe UI\',sans-serif; min-width:230px; max-width:330px;">';
+        h += '<div style="font-weight:700;font-size:13px;color:#1e293b;margin-bottom:4px;">🔵 ' + hits.length + ' zonas encimadas aquí</div>';
+        h += '<div style="font-size:11px;color:#64748b;margin-bottom:8px;">Haz clic en una zona para ver su información:</div>';
+        h += '<div style="max-height:260px;overflow-y:auto;padding-right:4px;">';
         for (var i = 0; i < hits.length; i++) {
             var z = hits[i];
-            h += '<div onclick="_mostrarZonaDetalle(' + i + ')" ' +
-                 'style="cursor:pointer; padding:7px 10px; margin:3px 0; border-radius:6px; ' +
-                 'background:#f1f5f9; border-left:5px solid ' + (z.color||'#64748b') + '; ' +
-                 'font-size:12px; font-weight:600; color:#0f172a; display:flex; align-items:center; gap:7px; ' +
-                 'transition:background .12s;" ' +
-                 'onmouseover="this.style.background=\'#e0e7ff\'" ' +
-                 'onmouseout="this.style.background=\'#f1f5f9\'">' +
-                 '<span style="font-size:14px;">📍</span>' +
-                 '<span style="flex:1;">' + z.nom + '</span>' +
-                 '<span style="color:#94a3b8; font-size:14px;">›</span></div>';
+            h += '<div onclick="_verZona(' + i + ')" style="cursor:pointer;padding:7px 10px;margin:3px 0;border-radius:6px;background:#f1f5f9;border-left:5px solid ' + (z.color||'#64748b') + ';font-size:12px;font-weight:600;color:#0f172a;display:flex;align-items:center;gap:7px;" onmouseover="this.style.background=\'#e0e7ff\'" onmouseout="this.style.background=\'#f1f5f9\'"><span>📍</span><span style="flex:1;">' + z.nom + '</span><span style="color:#94a3b8;">›</span></div>';
         }
         h += '</div></div>';
         return h;
     }
-
-    function _htmlDetalleZona(z, conVolver) {
-        var h = '<div style="font-family:\'Segoe UI\',sans-serif; min-width:230px; max-width:340px; font-size:12px; line-height:1.5;">';
-        if (conVolver) {
-            h += '<div onclick="_volverListaZonas()" style="cursor:pointer; color:#2563eb; ' +
-                 'font-size:12px; font-weight:600; margin-bottom:6px; user-select:none;">← Volver a la lista</div>';
-        }
-        h += '<div style="border-left:5px solid ' + (z.color||'#64748b') + '; padding-left:8px;">' + z.info + '</div>';
-        h += '</div>';
+    function _htmlDet(z, volver) {
+        var h = '<div style="font-family:\'Segoe UI\',sans-serif;min-width:230px;max-width:340px;font-size:12px;line-height:1.5;">';
+        if (volver) h += '<div onclick="_volver()" style="cursor:pointer;color:#2563eb;font-size:12px;font-weight:600;margin-bottom:6px;">← Volver a la lista</div>';
+        h += '<div style="border-left:5px solid ' + (z.color||'#64748b') + ';padding-left:8px;">' + z.info + '</div></div>';
         return h;
     }
-
     function initClickAcumulativo(map) {
-        window._ultimoClickLatLng = null;
-        window._ultimoHits = [];
-
         map.on('click', function(e) {
-            var lat = e.latlng.lat, lon = e.latlng.lng;
-            var hits = _zonasEnPunto(lat, lon);
-            window._ultimoClickLatLng = e.latlng;
-            window._ultimoHits = hits;
-
-            // 🔵 Nuevo click → limpiar cualquier resaltado de zona anterior
-            _quitarResaltadoZona();
-
-            if (hits.length === 0) {
-                return; // sin zonas aquí → dejar pasar (el popup de CP de Folium sigue funcionando)
-            }
-
-            var contenido;
-            if (hits.length === 1) {
-                contenido = _htmlDetalleZona(hits[0], false);
-                // Una sola zona → resaltarla directamente
-                _resaltarZona(hits[0]);
-            } else {
-                contenido = _htmlListaZonas(hits);
-            }
-
-            if (!window._popupZonas) {
-                window._popupZonas = L.popup({ maxWidth: 360, autoPan: true });
-            }
-            window._popupZonas
-                .setLatLng(e.latlng)
-                .setContent(contenido)
-                .openOn(map);
+            var hits = _zonasEnPunto(e.latlng.lat, e.latlng.lng);
+            window._hits = hits; window._clickLL = e.latlng;
+            _quitarResaltado();
+            if (!hits.length) return;
+            var cont = hits.length === 1 ? _htmlDet(hits[0], false) : _htmlLista(hits);
+            if (hits.length === 1) _resaltarZona(hits[0]);
+            if (!window._pz) window._pz = L.popup({maxWidth: 360, autoPan: true});
+            window._pz.setLatLng(e.latlng).setContent(cont).openOn(map);
         });
-
-        // 🔵 Al cerrar el popup de zonas → quitar el resaltado del mapa
-        map.on('popupclose', function(ev) {
-            if (window._popupZonas && ev.popup === window._popupZonas) {
-                _quitarResaltadoZona();
-            }
-        });
+        map.on('popupclose', function(ev){ if (window._pz && ev.popup === window._pz) _quitarResaltado(); });
     }
-
-    // 🔵 RESALTAR la zona seleccionada en el mapa: dibuja un círculo azul grueso
-    //    temporal sobre el círculo de la zona (usa su centro+radio reales). Se quita
-    //    el resaltado anterior antes de pintar el nuevo.
-    window._capaResaltadaZona = null;
-    function _quitarResaltadoZona() {
-        try {
-            if (window._capaResaltadaZona && window._MAPREF) {
-                window._MAPREF.removeLayer(window._capaResaltadaZona);
-            }
-        } catch(e) {}
-        window._capaResaltadaZona = null;
+    window._capaRes = null;
+    function _quitarResaltado() {
+        try { if (window._capaRes && window._MAPREF) window._MAPREF.removeLayer(window._capaRes); } catch(e) {}
+        window._capaRes = null;
     }
-    function _resaltarZona(hit) {
-        var map = window._MAPREF;
-        if (!map || !hit || !isFinite(hit.lat) || !isFinite(hit.lon)) return;
-        _quitarResaltadoZona();
+    function _resaltarZona(z) {
+        if (!window._MAPREF || !z || !isFinite(z.lat)) return;
+        _quitarResaltado();
         try {
-            window._capaResaltadaZona = L.circle([hit.lat, hit.lon], {
-                radius: hit.rad,            // metros — mismo radio operativo de la zona
-                color: '#1d4ed8',           // borde azul
-                weight: 4,
-                opacity: 1,
-                fill: true,
-                fillColor: '#2563eb',       // relleno azul
-                fillOpacity: 0.25,
-                interactive: false          // no robar clicks al mapa
-            }).addTo(map);
+            window._capaRes = L.circle([z.lat, z.lon], {radius: z.rad, color:'#1d4ed8', weight:4, opacity:1,
+                fill:true, fillColor:'#2563eb', fillOpacity:0.25, interactive:false}).addTo(window._MAPREF);
         } catch(e) {}
     }
-
-    // Click en un nombre de la lista → mostrar su detalle
-    window._mostrarZonaDetalle = function(idx) {
-        var hits = window._ultimoHits || [];
-        if (!hits[idx]) return;
-        var map = window._MAPREF;
-        var conVolver = hits.length > 1;
-        if (window._popupZonas && window._ultimoClickLatLng) {
-            window._popupZonas.setContent(_htmlDetalleZona(hits[idx], conVolver)).openOn(map);
-        }
-        // 🔵 Resaltar en el mapa la zona que se acaba de seleccionar
+    window._verZona = function(idx) {
+        var hits = window._hits || []; if (!hits[idx]) return;
+        if (window._pz && window._clickLL) window._pz.setContent(_htmlDet(hits[idx], hits.length > 1)).openOn(window._MAPREF);
         _resaltarZona(hits[idx]);
     };
-
-    // Botón "← Volver" → regresar a la lista de nombres
-    window._volverListaZonas = function() {
-        var hits = window._ultimoHits || [];
-        var map = window._MAPREF;
-        // 🔵 Al volver a la lista, quitar el resaltado de la zona anterior
-        _quitarResaltadoZona();
-        if (hits.length > 1 && window._popupZonas && window._ultimoClickLatLng) {
-            window._popupZonas.setContent(_htmlListaZonas(hits)).openOn(map);
-        }
+    window._volver = function() {
+        var hits = window._hits || []; _quitarResaltado();
+        if (hits.length > 1 && window._pz && window._clickLL) window._pz.setContent(_htmlLista(hits)).openOn(window._MAPREF);
     };
 
-    // ═══════════════════════════════════════════════════════════════
-    // 🎚️ SLIDER DE OPACIDAD — ajusta en vivo SOLO los círculos de zona
-    //    Se inyecta como una fila más dentro del control de capas de Leaflet.
-    // ═══════════════════════════════════════════════════════════════
-    function initSliderOpacidad() {
-        // Ya agregado → salir.
-        if (document.getElementById('opacityRow')) { return; }
-
-        // 🔧 El HTML del slider + botón (se usa tanto en el panel de capas como en el
-        //    panel flotante de respaldo).
-        var _innerHTML =
-            '<div style="font-size:12px; font-weight:600; color:#0f172a; margin-bottom:4px;">' +
-            '🎚️ Opacidad de Zonas: <span id="opacityVal">45%</span></div>' +
-            '<input id="opacitySlider" type="range" min="0" max="100" value="45" ' +
-            'oninput="aplicarOpacidadZonas(this.value)" ' +
-            'style="width:100%; cursor:pointer; accent-color:#2563eb;" />' +
-            '<div style="font-size:10px; color:#94a3b8; margin-top:2px; margin-bottom:6px; text-align:center;">' +
-            'Baja la opacidad para ver los CPs de abajo</div>' +
-            '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
-            'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
-            'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
-            '🖱️ Info: Hover</button>' +
-            '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
-            'Zonas encimadas → Click</div>';
-
-        // 🔍 Buscar el panel de capas de Leaflet con VARIOS selectores (la clase exacta
-        //    varía entre versiones de Leaflet). Si lo encuentra, inyecta ahí.
-        var _lc = document.querySelector('.leaflet-control-layers-list')
-               || document.querySelector('.leaflet-control-layers-overlays')
-               || document.querySelector('.leaflet-control-layers-expanded');
-
-        if (_lc) {
-            try {
-                var _sep = document.createElement('div');
-                _sep.className = 'leaflet-control-layers-separator';
-                _lc.appendChild(_sep);
-                var _row = document.createElement('div');
-                _row.id = 'opacityRow';
-                _row.style.cssText = 'padding:6px 4px; font-family:\'Segoe UI\',sans-serif;';
-                _row.innerHTML = _innerHTML;
-                _lc.appendChild(_row);
-                return;  // ✅ listo, agregado al panel de capas
-            } catch(e) {}
+    // ── Slider de opacidad de zonas + botón Hover/Click en el control de capas ──
+    function initControles() {
+        if (document.getElementById('ctrlZonasRow')) return;
+        var html =
+            '<div style="font-size:12px;font-weight:600;color:#0f172a;margin-bottom:4px;">🎚️ Opacidad de Zonas: <span id="opVal">45%</span></div>' +
+            '<input id="opSlider" type="range" min="0" max="100" value="45" oninput="aplicarOpacidad(this.value)" style="width:100%;cursor:pointer;accent-color:#2563eb;" />' +
+            '<div style="font-size:10px;color:#94a3b8;margin:2px 0 6px;text-align:center;">Baja la opacidad para ver los CPs</div>' +
+            '<button id="ttBtn" onclick="toggleTooltipMode()" style="width:100%;background:#16a34a;color:white;border:none;border-radius:5px;padding:5px 8px;font-size:12px;font-weight:600;cursor:pointer;">🖱️ Info: Hover</button>' +
+            '<div id="ttHint" style="font-size:10px;color:#94a3b8;margin-top:3px;text-align:center;">Zonas encimadas → Click</div>';
+        var lc = document.querySelector('.leaflet-control-layers-list') || document.querySelector('.leaflet-control-layers-expanded');
+        if (lc) {
+            var sep = document.createElement('div'); sep.className = 'leaflet-control-layers-separator'; lc.appendChild(sep);
+            var row = document.createElement('div'); row.id = 'ctrlZonasRow'; row.style.cssText = 'padding:6px 4px;font-family:\'Segoe UI\',sans-serif;'; row.innerHTML = html; lc.appendChild(row);
+        } else {
+            window._ctrlTries = (window._ctrlTries || 0) + 1;
+            if (window._ctrlTries < 25) { setTimeout(initControles, 300); return; }
+            var fl = document.createElement('div'); fl.id = 'ctrlZonasRow';
+            fl.style.cssText = 'position:fixed;top:170px;right:10px;z-index:9999;width:190px;background:white;padding:10px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.25);font-family:\'Segoe UI\',sans-serif;';
+            fl.innerHTML = html; document.body.appendChild(fl);
         }
-
-        // 🛟 RESPALDO: si tras varios intentos NO se encontró el panel de capas, crear
-        //    un PANEL FLOTANTE propio (independiente de Leaflet) para que el slider y
-        //    el botón SIEMPRE estén disponibles. Garantiza que el usuario los vea.
-        window._sliderTries = (window._sliderTries || 0) + 1;
-        if (window._sliderTries < 25) {
-            setTimeout(initSliderOpacidad, 300);  // seguir intentando el panel de capas
-            return;
-        }
-        // Último recurso: panel flotante propio (esquina superior derecha, bajo el control de capas)
-        try {
-            if (!document.getElementById('opacityRow')) {
-                var _float = document.createElement('div');
-                _float.id = 'opacityRow';
-                _float.style.cssText =
-                    'position:fixed; top:170px; right:10px; z-index:9999; width:190px; ' +
-                    'background:white; padding:10px; border-radius:8px; ' +
-                    'box-shadow:0 2px 10px rgba(0,0,0,0.25); font-family:\'Segoe UI\',sans-serif;';
-                _float.innerHTML = _innerHTML;
-                document.body.appendChild(_float);
-            }
-        } catch(e) {}
     }
-
-    // Aplicar opacidad (0-100) a todas las capas de zona registradas
-    window.aplicarOpacidadZonas = function(val) {
-        var pct = parseInt(val, 10);
-        var fo = pct / 100.0;
-        var lbl = document.getElementById('opacityVal');
-        if (lbl) lbl.innerHTML = pct + '%';
-        var capas = window._ZONA_LAYERS || [];
-        for (var i = 0; i < capas.length; i++) {
-            try {
-                capas[i].setStyle({ fillOpacity: fo });
-            } catch(e) {}
-        }
-        // GeoJson padre: setStyle propaga a los hijos
-        try {
-            if (window._MAPREF) {
-                window._MAPREF.eachLayer(function(ly){
-                    if (ly.setStyle && ly.feature && ly.feature.properties &&
-                        (ly.feature.properties._color || ly.feature.properties._tt)) {
-                        ly.setStyle({ fillOpacity: fo });
-                    }
-                });
+    window.aplicarOpacidad = function(val) {
+        var fo = parseInt(val,10)/100, lbl = document.getElementById('opVal');
+        if (lbl) lbl.innerHTML = val + '%';
+        if (window._MAPREF) window._MAPREF.eachLayer(function(ly){
+            if (ly.setStyle && ly.feature && ly.feature.properties && (ly.feature.properties._color || ly.feature.properties._tt)) {
+                try { ly.setStyle({fillOpacity: fo}); } catch(e) {}
             }
-        } catch(e) {}
+        });
     };
-
-    // ═══════════════════════════════════════════════════════════════
-    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (solo al seleccionar)
-    //    Para ZONAS ENCIMADAS: en modo Click el hover deja de disparar tooltips de
-    //    zona y la info solo aparece al hacer click (usando el click acumulativo),
-    //    evitando el caos de tooltips superpuestos. Afecta SOLO a las zonas.
-    // ═══════════════════════════════════════════════════════════════
-    window._ttMode = 'hover';
-    window._ttStore = [];
-
-    function _ttWalkZonas(cb) {
-        var capas = window._ZONA_LAYERS || [];
-        for (var i = 0; i < capas.length; i++) { cb(capas[i]); }
-        if (window._MAPREF) {
-            window._MAPREF.eachLayer(function _w(ly){
-                if (ly.feature && ly.feature.properties && ly.feature.properties._tt) cb(ly);
-                if (ly.eachLayer) ly.eachLayer(_w);
-            });
-        }
-    }
-
+    window._ttMode = 'hover'; window._ttStore = [];
     window.toggleTooltipMode = function() {
-        var btn = document.getElementById('ttModeBtn');
-        var hint = document.getElementById('ttModeHint');
-
+        var btn = document.getElementById('ttBtn'), hint = document.getElementById('ttHint');
+        if (!window._MAPREF) return;
         if (window._ttMode === 'hover') {
             window._ttStore = [];
-            var vistos = [];
-            _ttWalkZonas(function(ly) {
-                if (vistos.indexOf(ly) !== -1) return;
-                vistos.push(ly);
-                if (ly.getTooltip && ly.getTooltip()) {
+            window._MAPREF.eachLayer(function _w(ly){
+                if (ly.feature && ly.feature.properties && ly.feature.properties._tt && ly.getTooltip && ly.getTooltip()) {
                     var tt = ly.getTooltip();
-                    window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
+                    window._ttStore.push({layer: ly, content: tt.getContent(), options: tt.options});
                     try { ly.unbindTooltip(); } catch(e) {}
                 }
-                if (ly.off) { try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {} }
+                if (ly.eachLayer) ly.eachLayer(_w);
             });
             window._ttMode = 'click';
             if (btn) { btn.innerHTML = '👆 Info: Click'; btn.style.background = '#2563eb'; }
             if (hint) hint.innerHTML = 'Clic en la zona para ver info';
         } else {
-            window._ttStore.forEach(function(rec) {
-                try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
-            });
+            window._ttStore.forEach(function(rec){ try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {} });
             window._ttStore = [];
             window._ttMode = 'hover';
             if (btn) { btn.innerHTML = '🖱️ Info: Hover'; btn.style.background = '#16a34a'; }
             if (hint) hint.innerHTML = 'Zonas encimadas → Click';
         }
     };
-
     </script>
     """
-    # 🔑 INYECCIÓN PROFESIONAL: el HTML (buscador + banner + divs) va al <body>,
-    #    y por separado inyectamos un MacroElement cuyo <script> Folium ejecuta
-    #    DENTRO de un addInitHook con el NOMBRE REAL del mapa resuelto por su motor
-    #    de plantillas ({{this._parent.get_name()}}). Así window.__MAPA_OBJ__ queda
-    #    con el objeto Leaflet REAL — sin depender del frágil loop 'for k in window'.
-    from branca.element import MacroElement as _MacroElement, Template as _Template
     m.get_root().html.add_child(folium.Element(search_html))
 
-    _bind_map = _MacroElement()
-    _bind_map._template = _Template(
+    # 🔑 Inyectar el OBJETO MAPA REAL de Folium (window.__MAPA_OBJ__) vía MacroElement,
+    #    para que el JS no dependa de buscar el mapa en window (robusto en iframe Streamlit).
+    from branca.element import MacroElement as _ME, Template as _TP
+    _bind = _ME()
+    _bind._template = _TP(
         "{% macro script(this, kwargs) %}"
         "window.__MAPA_OBJ__ = {{this._parent.get_name()}};"
-        "try { if (typeof _lanzarInitCPSearch === 'function') _lanzarInitCPSearch(); } catch(e) {}"
+        "try { if (typeof _lanzarInit === 'function') _lanzarInit(); } catch(e) {}"
         "{% endmacro %}"
     )
-    m.add_child(_bind_map)
+    m.add_child(_bind)
 
     # ⚡ Un solo render del HTML standalone (sirve para mostrar y descargar).
     return m.get_root().render()
@@ -1530,7 +1177,7 @@ if st.session_state["authentication_status"]:
         f_poligonos = st.file_uploader("Archivo Cobertura (ZONA/CP/VOLUMEN)", type=["xlsx"])
         f_zonas = st.file_uploader("Archivo Zonas Círculos (Nombre/Latitud/Longitud/Radio/Volumen)", type=["xlsx"])
 
-        mostrar_factibilidad = st.checkbox("👁️ Mostrar Perímetros de Factibilidad (5, 10, 15 km)", value=True)
+        mostrar_factibilidad = st.checkbox("👁️ Mostrar Radios de Factibilidad (5, 10, 15 km)", value=True)
         st.session_state['mostrar_anillos'] = mostrar_factibilidad
 
         if st.button("🚀 Procesar Información", use_container_width=True, type="primary") and f_poligonos and f_zonas:
@@ -1679,25 +1326,41 @@ if st.session_state["authentication_status"]:
 
                     g_cob_nodo_global = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
 
+                    # 🎯 ZONAS DEL NODO = las que tienen NODO == este nodo en el 2º archivo
+                    #    (fuente de verdad explícita). NO por intersección espacial —así no
+                    #    salen centroides de nodos cuyas zonas en realidad son de otro nodo.
                     _nodo_norm = str(nodo).strip().upper()
                     if 'NODO' in gdf_circles_m_lambert.columns:
                         partners_del_nodo = gdf_circles_m_lambert[
                             gdf_circles_m_lambert['NODO'].astype(str).str.strip().str.upper() == _nodo_norm
                         ]
                     else:
+                        # Fallback (archivo antiguo sin NODO): intersección espacial
                         partners_del_nodo = gdf_circles_m_lambert[gdf_circles_m_lambert['geometry'].intersects(g_cob_nodo_global)]
 
+                    # 🚫 REGLA: si el nodo NO tiene zonas asignadas en el 2º archivo,
+                    #    NO se calcula centroide ni anillos — se omite por completo.
+                    #    El centroide es "por acumulación de zonas": sin zonas no hay centroide.
                     if partners_del_nodo.empty:
                         continue
 
+                    # 🎯 CENTROIDE DEL NODO = centro de la ACUMULACIÓN de zonas:
+                    #    ⚠️ Se usa la MEDIANA de los centros (no el promedio). Algunos nodos
+                    #    tienen 1-2 zonas OUTLIER con el NODO correcto pero coordenadas en
+                    #    otra ciudad (errores de captura, p.ej. DMT4 tiene 46 zonas en
+                    #    Monterrey + 1 en Guadalajara a ~700km). El promedio se desplaza al
+                    #    vacío por esos outliers; la MEDIANA es robusta y cae en el clúster
+                    #    real de acumulación de zonas.
                     _centros_zonas = partners_del_nodo['geometry'].centroid
                     _xs = _centros_zonas.x.to_numpy()
                     _ys = _centros_zonas.y.to_numpy()
                     _mx = float(np.median(_xs))
                     _my = float(np.median(_ys))
+                    # Refinar: promediar SOLO las zonas cercanas a la mediana (dentro de
+                    # ~25km), descartando outliers → centro más exacto del clúster real.
                     try:
                         _dist_med = np.sqrt((_xs - _mx)**2 + (_ys - _my)**2)
-                        _cerca = _dist_med <= 25000
+                        _cerca = _dist_med <= 25000  # 25 km en metros (CRS Lambert)
                         if _cerca.sum() >= 1:
                             _mx = float(_xs[_cerca].mean())
                             _my = float(_ys[_cerca].mean())
@@ -1713,9 +1376,13 @@ if st.session_state["authentication_status"]:
                     b10 = centroide_acumulacion_nodo_m.buffer(10000)
                     b15 = centroide_acumulacion_nodo_m.buffer(15000)
 
+                    # 🔲 LÍMITE DEL NODO: contorno del conjunto de CPs (1er archivo) que
+                    #    forman este nodo → marca hasta dónde llega el territorio del nodo.
+                    #    Se disuelven todos los CPs del nodo en un solo polígono y se guarda
+                    #    su geometría (en WGS84) para dibujar su borde en el mapa.
                     try:
                         from shapely.geometry import Polygon as _Poly, MultiPolygon as _MPoly
-                        _eps = 60
+                        _eps = 60  # metros — cierra separaciones entre CPs vecinos sin deformar
                         _u = unary_union(cob_nodo_completa['geometry'].to_crs(CRS_DISTANCIAS).buffer(0))
                         _closed = _u.buffer(_eps).buffer(-_eps)
                         if isinstance(_closed, _MPoly):
