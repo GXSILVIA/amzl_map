@@ -592,7 +592,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         #    (Upside disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
         #    Esos datos de prospección ya se muestran en los círculos verdes del mapa.
         _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Aumento de Zona:', 'Aumento Libre:', 'Partners:', 'Rango:']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside de Zona:', 'Upside Libre:', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -657,10 +657,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             f"Volumen: {r['VOLUMEN']}",
             f"Radio Ope: {r['RADIO']}m",
             f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>",
-            f"<b>📦 Aumento Total: {upside_total} pqts</b>"
+            f"<b>📦 Upside Total: {upside_total} pqts</b>"
         ]
         if upside_por_cp:
-            tt_lines.append("── Aumento por CP ──")
+            tt_lines.append("── Upside por CP ──")
             for d in upside_por_cp[:15]:
                 tt_lines.append(f"&nbsp;&nbsp;• CP {d['CP']} ({d['pct']}%): {d['upside']} pqts")
             if len(upside_por_cp) > 15:
@@ -685,47 +685,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     _zonas_fc = {"type": "FeatureCollection", "features": _zona_features}
 
-    # 📦 Datos de cada zona para el CLICK ACUMULATIVO (centro GPS + radio en metros
-    #    + info HTML). El JS usa esto para detectar GEOMÉTRICAMENTE qué zonas contienen
-    #    el punto clicado (zonas encimadas) y mostrar la info de TODAS las de abajo.
-    import json as _json
-    _ZONAS_JS = []
-    for _, r in res['gdf_circles_wgs84'].iterrows():
-        _ch, _rt = obtener_color_rango_circulo(r['VOLUMEN'])
-        _it = traslape_zona_lookup.get(r['NOMBRE'], {})
-        _iu = upside_zona_lookup.get(r['NOMBRE'], {})
-        _tl = [
-            f"<b>Zona Operativa: {r['NOMBRE']}</b>",
-            f"Rango: {_rt}",
-            f"Volumen: {r['VOLUMEN']}",
-            f"Radio Ope: {r['RADIO']}m",
-            f"<b>Traslape: {_it.get('pct', 0.0)}% — {_it.get('nivel', '⚪ Sin datos')}</b>",
-            f"<b>📦 Aumento Total: {_iu.get('total', 0)} pqts</b>"
-        ]
-        _ucp = _iu.get('por_cp', [])
-        if _ucp:
-            _tl.append("── Aumento por CP ──")
-            for _d in _ucp[:10]:
-                _tl.append(f"&nbsp;&nbsp;• CP {_d['CP']} ({_d['pct']}%): {_d['upside']} pqts")
-        _dt = _it.get('desglose', [])
-        if _dt:
-            _tl.append("── Detalle Traslape ──")
-            for _d in _dt:
-                _tl.append(f"&nbsp;&nbsp;• {_d['NOM']}: {_d['PCT']}%")
-        try:
-            _rm = float(r['RADIO'])
-        except Exception:
-            _rm = 0.0
-        try:
-            _la = float(r['LATITUD']); _lo = float(r['LONGITUD'])
-        except Exception:
-            _c = r['geometry'].centroid; _la = float(_c.y); _lo = float(_c.x)
-        _ZONAS_JS.append({"nom": str(r['NOMBRE']), "lat": _la, "lon": _lo,
-                          "rad_m": _rm, "color": _ch, "info": "<br>".join(_tl)})
-    _ZONAS_JSON = _json.dumps(_ZONAS_JS, ensure_ascii=False).replace("</", "<\\/")
-
-    # ⚡ UNA sola capa de zonas con color + tooltip (hover para zonas sueltas).
-    #    El click acumulativo (JS, más abajo) maneja las zonas encimadas.
+    # ⚡ FIX 2+3: UNA sola capa con color + tooltip + popup (sin duplicar).
     fg_zonas = folium.FeatureGroup(name="Zonas", show=True)
     if _zona_features:
         folium.GeoJson(
@@ -736,7 +696,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 'weight': 1,
                 'fillOpacity': 0.45
             },
-            tooltip=folium.GeoJsonTooltip(fields=['_tt'], aliases=[''], localize=True)
+            tooltip=folium.GeoJsonTooltip(fields=['_tt'], aliases=[''], localize=True),
+            popup=folium.GeoJsonPopup(fields=['_tt'], aliases=[''], max_width=360)
         ).add_to(fg_zonas)
     fg_zonas.add_to(m)
 
@@ -893,74 +854,102 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     <!-- 🖱️ Botón de modo de información (Hover ⇄ Click) — se inyecta DENTRO del
          control de capas de Leaflet (junto a CP/Zonas/Radio) vía JS en initCPSearch. -->
     <script>
-    // 📦 Datos de zonas para el click acumulativo (inyectado desde Python).
-    window._ZONAS_DATA = """ + _ZONAS_JSON + """;
-
-    // 🚀 Disparo a prueba de todo dentro del iframe de Streamlit: varias vías + reintentos.
-    window._cpTries = 0;
-    function _lanzarInit() {
-        window._cpTries++;
-        var ok = initCPSearch();
-        if (!ok && window._cpTries < 40) setTimeout(_lanzarInit, 400);
-    }
-    setTimeout(_lanzarInit, 300);
-    document.addEventListener('DOMContentLoaded', function(){ setTimeout(_lanzarInit, 300); });
-    window.addEventListener('load', function(){ setTimeout(_lanzarInit, 300); });
-    if (document.readyState !== 'loading') setTimeout(_lanzarInit, 300);
+    window.addEventListener('load', function() {
+        setTimeout(function() { initCPSearch(); }, 1500);
+    });
 
     function initCPSearch() {
-        if (window._cpInitDone) return true;
-        // Localizar el mapa Leaflet: objeto inyectado por Folium, o buscando en window.
-        var map = window.__MAPA_OBJ__ && window.__MAPA_OBJ__.eachLayer ? window.__MAPA_OBJ__ : null;
+        var map = null;
+        for (var k in window) {
+            try {
+                if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) {
+                    map = window[k]; break;
+                }
+            } catch(e) {}
+        }
         if (!map) {
             for (var k in window) {
-                try { if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) { map = window[k]; break; } } catch(e) {}
+                try {
+                    if (window[k] && window[k]._leaflet_id && window[k]._container) {
+                        map = window[k]; break;
+                    }
+                } catch(e) {}
             }
         }
         if (!map) {
-            for (var k2 in window) {
-                try { if (window[k2] && window[k2]._leaflet_id && window[k2]._container) { map = window[k2]; break; } } catch(e) {}
-            }
+            var rd = document.getElementById('cpResult');
+            if (rd) { rd.innerHTML = '⚠ Mapa no encontrado'; rd.style.color = '#d97706'; }
+            return;
         }
-        if (!map) return false;
-        window._MAPREF = map;
 
-        // ── Indexar capas para el buscador (CP + nombre de zona) ──
-        var cpIdx = {}, zonaIdx = {}, totalFeatures = 0;
+        var cpIdx = {};
+        var zonaIdx = {};
+        var totalFeatures = 0;
+        var totalZonas = 0;
+
         function esVisible(layer) {
-            var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined') ? layer.options.fillOpacity : 0.45;
+            var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined')
+                     ? layer.options.fillOpacity : 0.45;
             return fo > 0;
         }
+
         function indexLayer(layer) {
             if (layer.feature && layer.feature.properties) {
                 var props = layer.feature.properties;
+                var visible = esVisible(layer);
                 if ('CP' in props) {
-                    var cpVal = String(props.CP).replace(/\\.0$/, '').trim();
+                    var cpVal = String(props.CP).replace(/\.0$/, '').trim();
                     while (cpVal.length < 5) cpVal = '0' + cpVal;
-                    if (!(cpVal in cpIdx)) { totalFeatures++; }
-                    cpIdx[cpVal] = layer;
+                    if (!(cpVal in cpIdx) || visible) {
+                        if (!(cpVal in cpIdx)) totalFeatures++;
+                        cpIdx[cpVal] = layer;
+                    }
                 }
-                var zn = props.name || props.NOMBRE || props.Name || null;
-                if (zn) zonaIdx[String(zn).trim().toUpperCase()] = layer;
+                var zonaNom = props.name || props.NOMBRE || props.Name || null;
+                if (zonaNom) {
+                    var zk = String(zonaNom).trim().toUpperCase();
+                    if (!(zk in zonaIdx) || visible) {
+                        if (!(zk in zonaIdx)) totalZonas++;
+                        zonaIdx[zk] = layer;
+                    }
+                }
             }
-            if (layer.eachLayer) layer.eachLayer(function(s){ indexLayer(s); });
-            if (layer._layers) { for (var id in layer._layers) indexLayer(layer._layers[id]); }
+            if (layer.options && layer.options.name) {
+                var zk2 = String(layer.options.name).trim().toUpperCase();
+                if (!(zk2 in zonaIdx) || esVisible(layer)) {
+                    if (!(zk2 in zonaIdx)) totalZonas++;
+                    zonaIdx[zk2] = layer;
+                }
+            }
+            if (layer.eachLayer) {
+                layer.eachLayer(function(sub) { indexLayer(sub); });
+            }
+            if (layer._layers) {
+                for (var id in layer._layers) { indexLayer(layer._layers[id]); }
+            }
         }
-        map.eachLayer(function(l){ indexLayer(l); });
+        map.eachLayer(function(layer) { indexLayer(layer); });
 
         var rd = document.getElementById('cpResult');
         if (rd && totalFeatures > 0) {
-            rd.innerHTML = totalFeatures + ' CPs y ' + Object.keys(zonaIdx).length + ' zonas ✓';
+            rd.innerHTML = totalFeatures + ' CPs y ' + Object.keys(zonaIdx).length + ' zonas indexados ✓';
             rd.style.color = '#16a34a';
-            setTimeout(function(){ rd.innerHTML = ''; }, 3000);
+            setTimeout(function() { rd.innerHTML = ''; }, 3000);
+        } else if (rd) {
+            rd.innerHTML = '⚠ 0 CPs encontrados';
+            rd.style.color = '#d97706';
         }
 
-        var hl = null, osv = null;
-        function resaltar(ly) {
-            osv = { fillColor: ly.options.fillColor || '#9e9e9e', fillOpacity: ly.options.fillOpacity || 0.45,
-                    color: ly.options.color || '#ffffff', weight: ly.options.weight || 1.5 };
-            // 🔵 AZUL (en vez de rojo)
-            ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#1d4ed8', weight:3 });
+        var hl = null, os = null;
+
+        function resaltarCapa(ly, rd, etiqueta) {
+            os = {
+                fillColor: ly.options.fillColor || '#9e9e9e',
+                fillOpacity: ly.options.fillOpacity || 0.45,
+                color: ly.options.color || '#ffffff',
+                weight: ly.options.weight || 1.5
+            };
+            ly.setStyle({ fillColor:'#ff0000', fillOpacity:0.7, color:'#ff0000', weight:3 });
             hl = ly;
             if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
             if (ly.openTooltip) ly.openTooltip();
@@ -969,177 +958,166 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         window.buscarCP = function(valor) {
             var rd = document.getElementById('cpResult');
             var raw = String(valor).trim();
-            if (hl && osv) { try { hl.setStyle(osv); } catch(e) {} hl = null; osv = null; }
-            if (!raw) { if (rd) { rd.innerHTML = ''; } return; }
-            var esCP = /^[0-9]+(\\.0)?$/.test(raw);
-            if (esCP) {
-                var cp = raw.replace(/\\.0$/, '');
-                while (cp.length < 5) cp = '0' + cp;
-                var ly = cpIdx[cp];
-                if (ly) { resaltar(ly);
-                    if (rd) { var p = ly.feature.properties;
-                        rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') + ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
-                        rd.style.color = '#16a34a'; }
-                } else if (rd) { rd.innerHTML = '⚠ CP ' + cp + ' no está en la cobertura'; rd.style.color = '#dc2626'; }
+            if (!raw) {
+                if (rd) { rd.innerHTML = 'Escribe un CP o nombre de zona'; rd.style.color = '#64748b'; }
                 return;
             }
-            var clave = raw.toUpperCase(), lyZona = zonaIdx[clave];
-            if (!lyZona) {
-                var cand = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
-                if (cand.length) { lyZona = zonaIdx[cand[0]]; clave = cand[0]; }
+
+            if (hl && os) { try { hl.setStyle(os); } catch(e) {} }
+
+            var esCP = /^[0-9]+(\.0)?$/.test(raw);
+
+            if (esCP) {
+                var cp = raw.replace(/\.0$/, '');
+                while (cp.length < 5) cp = '0' + cp;
+                var ly = cpIdx[cp];
+                if (ly) {
+                    resaltarCapa(ly, rd, 'CP');
+                    if (rd) {
+                        var p = ly.feature.properties;
+                        rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') +
+                            ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
+                        rd.style.color = '#16a34a';
+                    }
+                } else if (rd) {
+                    rd.innerHTML = '⚠ El CP ' + cp + ' no está dentro de la cobertura';
+                    rd.style.color = '#dc2626';
+                }
+                return;
             }
-            if (lyZona) { resaltar(lyZona); if (rd) { rd.innerHTML = '✔ Zona ' + clave; rd.style.color = '#16a34a'; } }
-            else if (rd) { rd.innerHTML = '✘ No se encontró "' + raw + '"'; rd.style.color = '#dc2626'; }
+
+            var clave = raw.toUpperCase();
+            var lyZona = zonaIdx[clave];
+
+            if (!lyZona) {
+                var candidatos = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
+                if (candidatos.length > 0) {
+                    lyZona = zonaIdx[candidatos[0]];
+                    clave = candidatos[0];
+                }
+            }
+
+            if (lyZona) {
+                resaltarCapa(lyZona, rd, 'ZONA');
+                if (rd) {
+                    rd.innerHTML = '✔ Zona ' + clave + ' localizada';
+                    rd.style.color = '#16a34a';
+                }
+            } else if (rd) {
+                rd.innerHTML = '✘ No se encontró el CP ni la zona "' + raw + '"';
+                rd.style.color = '#dc2626';
+            }
         };
 
-        // ── CLICK ACUMULATIVO: muestra TODAS las zonas de abajo en zonas encimadas ──
-        initClickAcumulativo(map);
-        initControles();
-        window._cpInitDone = true;
-        return true;
-    }
+        var pr = new URLSearchParams(window.location.search).get('cp');
+        if (pr) setTimeout(function() { buscarCP(pr); }, 500);
 
-    // Detección geométrica: qué zonas contienen el punto (Haversine centro+radio).
-    function _distM(la1, lo1, la2, lo2) {
-        var R = 6371000, dLa = (la2-la1)*Math.PI/180, dLo = (lo2-lo1)*Math.PI/180;
-        var a = Math.sin(dLa/2)*Math.sin(dLa/2) + Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLo/2)*Math.sin(dLo/2);
-        return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    }
-    function _zonasEnPunto(lat, lon) {
-        var hits = [], Z = window._ZONAS_DATA || [];
-        for (var i = 0; i < Z.length; i++) {
-            var z = Z[i];
-            if (!z || !isFinite(z.lat) || !(z.rad_m > 0)) continue;
-            var d = _distM(lat, lon, z.lat, z.lon);
-            if (d <= z.rad_m) hits.push({nom: z.nom, info: z.info, color: z.color, lat: z.lat, lon: z.lon, rad: z.rad_m, dist: d});
-        }
-        hits.sort(function(a,b){ return (a.dist/a.rad) - (b.dist/b.rad); });
-        return hits;
-    }
-    function _htmlLista(hits) {
-        var h = '<div style="font-family:\'Segoe UI\',sans-serif; min-width:230px; max-width:330px;">';
-        h += '<div style="font-weight:700;font-size:13px;color:#1e293b;margin-bottom:4px;">🔵 ' + hits.length + ' zonas encimadas aquí</div>';
-        h += '<div style="font-size:11px;color:#64748b;margin-bottom:8px;">Haz clic en una zona para ver su información:</div>';
-        h += '<div style="max-height:260px;overflow-y:auto;padding-right:4px;">';
-        for (var i = 0; i < hits.length; i++) {
-            var z = hits[i];
-            h += '<div onclick="_verZona(' + i + ')" style="cursor:pointer;padding:7px 10px;margin:3px 0;border-radius:6px;background:#f1f5f9;border-left:5px solid ' + (z.color||'#64748b') + ';font-size:12px;font-weight:600;color:#0f172a;display:flex;align-items:center;gap:7px;" onmouseover="this.style.background=\'#e0e7ff\'" onmouseout="this.style.background=\'#f1f5f9\'"><span>📍</span><span style="flex:1;">' + z.nom + '</span><span style="color:#94a3b8;">›</span></div>';
-        }
-        h += '</div></div>';
-        return h;
-    }
-    function _htmlDet(z, volver) {
-        var h = '<div style="font-family:\'Segoe UI\',sans-serif;min-width:230px;max-width:340px;font-size:12px;line-height:1.5;">';
-        if (volver) h += '<div onclick="_volver()" style="cursor:pointer;color:#2563eb;font-size:12px;font-weight:600;margin-bottom:6px;">← Volver a la lista</div>';
-        h += '<div style="border-left:5px solid ' + (z.color||'#64748b') + ';padding-left:8px;">' + z.info + '</div></div>';
-        return h;
-    }
-    function initClickAcumulativo(map) {
-        map.on('click', function(e) {
-            var hits = _zonasEnPunto(e.latlng.lat, e.latlng.lng);
-            window._hits = hits; window._clickLL = e.latlng;
-            _quitarResaltado();
-            if (!hits.length) return;
-            var cont = hits.length === 1 ? _htmlDet(hits[0], false) : _htmlLista(hits);
-            if (hits.length === 1) _resaltarZona(hits[0]);
-            if (!window._pz) window._pz = L.popup({maxWidth: 360, autoPan: true});
-            window._pz.setLatLng(e.latlng).setContent(cont).openOn(map);
-        });
-        map.on('popupclose', function(ev){ if (window._pz && ev.popup === window._pz) _quitarResaltado(); });
-    }
-    window._capaRes = null;
-    function _quitarResaltado() {
-        try { if (window._capaRes && window._MAPREF) window._MAPREF.removeLayer(window._capaRes); } catch(e) {}
-        window._capaRes = null;
-    }
-    function _resaltarZona(z) {
-        if (!window._MAPREF || !z || !isFinite(z.lat)) return;
-        _quitarResaltado();
-        try {
-            window._capaRes = L.circle([z.lat, z.lon], {radius: z.rad, color:'#1d4ed8', weight:4, opacity:1,
-                fill:true, fillColor:'#2563eb', fillOpacity:0.25, interactive:false}).addTo(window._MAPREF);
-        } catch(e) {}
-    }
-    window._verZona = function(idx) {
-        var hits = window._hits || []; if (!hits[idx]) return;
-        if (window._pz && window._clickLL) window._pz.setContent(_htmlDet(hits[idx], hits.length > 1)).openOn(window._MAPREF);
-        _resaltarZona(hits[idx]);
-    };
-    window._volver = function() {
-        var hits = window._hits || []; _quitarResaltado();
-        if (hits.length > 1 && window._pz && window._clickLL) window._pz.setContent(_htmlLista(hits)).openOn(window._MAPREF);
-    };
-
-    // ── Slider de opacidad de zonas + botón Hover/Click en el control de capas ──
-    function initControles() {
-        if (document.getElementById('ctrlZonasRow')) return;
-        var html =
-            '<div style="font-size:12px;font-weight:600;color:#0f172a;margin-bottom:4px;">🎚️ Opacidad de Zonas: <span id="opVal">45%</span></div>' +
-            '<input id="opSlider" type="range" min="0" max="100" value="45" oninput="aplicarOpacidad(this.value)" style="width:100%;cursor:pointer;accent-color:#2563eb;" />' +
-            '<div style="font-size:10px;color:#94a3b8;margin:2px 0 6px;text-align:center;">Baja la opacidad para ver los CPs</div>' +
-            '<button id="ttBtn" onclick="toggleTooltipMode()" style="width:100%;background:#16a34a;color:white;border:none;border-radius:5px;padding:5px 8px;font-size:12px;font-weight:600;cursor:pointer;">🖱️ Info: Hover</button>' +
-            '<div id="ttHint" style="font-size:10px;color:#94a3b8;margin-top:3px;text-align:center;">Zonas encimadas → Click</div>';
-        var lc = document.querySelector('.leaflet-control-layers-list') || document.querySelector('.leaflet-control-layers-expanded');
-        if (lc) {
-            var sep = document.createElement('div'); sep.className = 'leaflet-control-layers-separator'; lc.appendChild(sep);
-            var row = document.createElement('div'); row.id = 'ctrlZonasRow'; row.style.cssText = 'padding:6px 4px;font-family:\'Segoe UI\',sans-serif;'; row.innerHTML = html; lc.appendChild(row);
-        } else {
-            window._ctrlTries = (window._ctrlTries || 0) + 1;
-            if (window._ctrlTries < 25) { setTimeout(initControles, 300); return; }
-            var fl = document.createElement('div'); fl.id = 'ctrlZonasRow';
-            fl.style.cssText = 'position:fixed;top:170px;right:10px;z-index:9999;width:190px;background:white;padding:10px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.25);font-family:\'Segoe UI\',sans-serif;';
-            fl.innerHTML = html; document.body.appendChild(fl);
-        }
-    }
-    window.aplicarOpacidad = function(val) {
-        var fo = parseInt(val,10)/100, lbl = document.getElementById('opVal');
-        if (lbl) lbl.innerHTML = val + '%';
-        if (window._MAPREF) window._MAPREF.eachLayer(function(ly){
-            if (ly.setStyle && ly.feature && ly.feature.properties && (ly.feature.properties._color || ly.feature.properties._tt)) {
-                try { ly.setStyle({fillOpacity: fo}); } catch(e) {}
+        window.addEventListener('message', function(e) {
+            if (e.data && e.data.action === 'searchCP' && e.data.cp) {
+                buscarCP(e.data.cp);
             }
         });
-    };
-    window._ttMode = 'hover'; window._ttStore = [];
+
+        // 🖱️ Inyectar el botón "Info: Hover/Click" DENTRO del control de capas
+        //    (junto a CP/Zonas/Radio/Prospección), como una fila más del panel.
+        try {
+            var _lc = document.querySelector('.leaflet-control-layers-list');
+            if (_lc && !document.getElementById('ttModeRow')) {
+                var _sep = document.createElement('div');
+                _sep.className = 'leaflet-control-layers-separator';
+                _lc.appendChild(_sep);
+                var _row = document.createElement('div');
+                _row.id = 'ttModeRow';
+                _row.style.cssText = 'padding:4px 2px; font-family:\'Segoe UI\',sans-serif;';
+                _row.innerHTML =
+                    '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
+                    'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
+                    'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
+                    '🖱️ Info: Hover</button>' +
+                    '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
+                    'Zonas encimadas → Click</div>';
+                _lc.appendChild(_row);
+            }
+        } catch(e) {}
+
+        try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (solo popup)
+    //    Ideal para ZONAS ENCIMADAS: en modo Click el hover deja de dispararse
+    //    y la info solo aparece al seleccionar, evitando el caos de tooltips.
+    // ═══════════════════════════════════════════════════════════════
+    window._ttMode = 'hover';   // estado inicial
+    window._ttStore = [];       // guarda {layer, content, options} para re-enlazar
+
+    function _ttFindMap() {
+        for (var k in window) {
+            try {
+                if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k];
+            } catch(e) {}
+        }
+        for (var k2 in window) {
+            try {
+                if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2];
+            } catch(e) {}
+        }
+        return null;
+    }
+
+    function _ttWalk(layer, cb) {
+        cb(layer);
+        if (layer.eachLayer) layer.eachLayer(function(sub){ _ttWalk(sub, cb); });
+        if (layer._layers) { for (var id in layer._layers) _ttWalk(layer._layers[id], cb); }
+    }
+
     window.toggleTooltipMode = function() {
-        var btn = document.getElementById('ttBtn'), hint = document.getElementById('ttHint');
-        if (!window._MAPREF) return;
+        var map = _ttFindMap();
+        var btn = document.getElementById('ttModeBtn');
+        var hint = document.getElementById('ttModeHint');
+        if (!map) { return; }
+
         if (window._ttMode === 'hover') {
+            // → Pasar a modo CLICK: desenlazar todos los tooltips (guardándolos)
             window._ttStore = [];
-            window._MAPREF.eachLayer(function _w(ly){
-                if (ly.feature && ly.feature.properties && ly.feature.properties._tt && ly.getTooltip && ly.getTooltip()) {
+            var _nOff = 0;
+            _ttWalk(map, function(ly) {
+                // Caso 1: capa individual con tooltip propio
+                if (ly.getTooltip && ly.getTooltip()) {
                     var tt = ly.getTooltip();
-                    window._ttStore.push({layer: ly, content: tt.getContent(), options: tt.options});
-                    try { ly.unbindTooltip(); } catch(e) {}
+                    window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
+                    ly.unbindTooltip();
+                    _nOff++;
                 }
-                if (ly.eachLayer) ly.eachLayer(_w);
+                // Caso 2 (Canvas/GeoJson): bloquear el evento de tooltip a nivel capa
+                if (ly.off && ly.on) {
+                    try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {}
+                }
             });
             window._ttMode = 'click';
-            if (btn) { btn.innerHTML = '👆 Info: Click'; btn.style.background = '#2563eb'; }
-            if (hint) hint.innerHTML = 'Clic en la zona para ver info';
+            if (btn) {
+                btn.innerHTML = '👆 Info: Click';
+                btn.style.background = '#2563eb';
+            }
+            if (hint) hint.innerHTML = 'Clic para ver info';
         } else {
-            window._ttStore.forEach(function(rec){ try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {} });
+            // → Volver a modo HOVER: re-enlazar los tooltips guardados
+            window._ttStore.forEach(function(rec) {
+                try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
+            });
             window._ttStore = [];
             window._ttMode = 'hover';
-            if (btn) { btn.innerHTML = '🖱️ Info: Hover'; btn.style.background = '#16a34a'; }
+            if (btn) {
+                btn.innerHTML = '🖱️ Info: Hover';
+                btn.style.background = '#16a34a';
+            }
             if (hint) hint.innerHTML = 'Zonas encimadas → Click';
         }
     };
+
     </script>
     """
     m.get_root().html.add_child(folium.Element(search_html))
-
-    # 🔑 Inyectar el OBJETO MAPA REAL de Folium (window.__MAPA_OBJ__) vía MacroElement,
-    #    para que el JS no dependa de buscar el mapa en window (robusto en iframe Streamlit).
-    from branca.element import MacroElement as _ME, Template as _TP
-    _bind = _ME()
-    _bind._template = _TP(
-        "{% macro script(this, kwargs) %}"
-        "window.__MAPA_OBJ__ = {{this._parent.get_name()}};"
-        "try { if (typeof _lanzarInit === 'function') _lanzarInit(); } catch(e) {}"
-        "{% endmacro %}"
-    )
-    m.add_child(_bind)
 
     # ⚡ Un solo render del HTML standalone (sirve para mostrar y descargar).
     return m.get_root().render()
@@ -1413,7 +1391,7 @@ if st.session_state["authentication_status"]:
 
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
-                _prog(35, "📦 Calculando Aumento por zona (Monte Carlo vectorizado)...")
+                _prog(35, "📦 Calculando Upside por zona (Monte Carlo vectorizado)...")
                 upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp = calcular_upside_por_zona(
                     gdf_cobertura_m, gdf_circles_m_corr.to_crs(CRS_AREAS), nodos_unicos_maestro
                 )
@@ -1573,15 +1551,15 @@ if st.session_state["authentication_status"]:
                             for _cp_str, _pct in _pares:
                                 up_val = upside_por_cp_zona.get((_zona_nom, _cp_str), 0)
                                 cps_actuales_zona_con_pct.append(
-                                    f"{_cp_str} ({round(_pct)}% → Aumento {up_val})"
+                                    f"{_cp_str} ({round(_pct)}% → Upside {up_val})"
                                 )
                             if cps_actuales_zona_con_pct:
                                 up_total_zona = upside_por_zona.get(_zona_nom, {}).get('total', 0)
                                 reporte_cp_por_zona.append({
                                     "Nodo": nodo_iter,
                                     "Zona": _zona_nom,
-                                    "CPs Cubiertos (% → Aumento pqts)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
-                                    "Aumento Total (pqts)": up_total_zona
+                                    "CPs Cubiertos (% → Upside pqts)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
+                                    "Upside Total (pqts)": up_total_zona
                                 })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
@@ -1709,12 +1687,12 @@ if st.session_state["authentication_status"]:
                     if nodo_de_zona:
                         upside_por_nodo[nodo_de_zona] = upside_por_nodo.get(nodo_de_zona, 0) + up_z
                 if not df_desglose.empty:
-                    df_desglose['Aumento Total (pqts)'] = df_desglose['Nodo'].map(
+                    df_desglose['Upside Total (pqts)'] = df_desglose['Nodo'].map(
                         lambda n: int(upside_por_nodo.get(n, 0))
                     )
 
                 df_zonas_detalles_base = gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy()
-                df_zonas_detalles_base['Aumento Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
+                df_zonas_detalles_base['Upside Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
                     lambda n: int(upside_por_zona.get(n, {}).get('total', 0))
                 )
                 df_zonas_detalles_base = df_zonas_detalles_base.rename(columns={
@@ -1781,7 +1759,7 @@ if st.session_state["authentication_status"]:
             st.markdown("### 📍 Cobertura por CPs por Nodo")
             st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
 
-            st.markdown("### ⭕ Cobertura Detallada por cada Zona (con Aumento de paquetes)")
+            st.markdown("### ⭕ Cobertura Detallada por cada Zona (con Upside de paquetes)")
             st.dataframe(res['df_cp_por_zona'], use_container_width=True, hide_index=True)
             st.write("---")
 
