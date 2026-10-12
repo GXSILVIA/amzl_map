@@ -212,12 +212,12 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 📦 UPSIDE: Paquetes adicionales que cada zona puede capturar de cada CP
+# 📦 AUMENTO: Paquetes adicionales que cada zona puede capturar de cada CP
 # ═══════════════════════════════════════════════════════════════════════
 
 def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_maestro):
     """
-    Calcula el UPSIDE (paquetes adicionales capturables) de cada ZONA sobre cada CP.
+    Calcula el AUMENTO (paquetes adicionales capturables) de cada ZONA sobre cada CP.
 
     ⚡ VERSIÓN VECTORIZADA (shapely 2.x): reemplaza el bucle Python punto-por-punto
        por operaciones NumPy vectorizadas con shapely.contains / shapely.intersects.
@@ -229,25 +229,25 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
       - Una zona que cubre X% del área del CP puede capturar X% del volumen de ese CP.
       - Cuando VARIAS zonas se traslapan sobre el mismo pedazo del CP, el volumen de
         ese pedazo se REPARTE equitativamente entre las zonas que lo cubren (reparto 1/k),
-        para que la suma de upsides nunca supere el volumen realmente cubierto.
+        para que la suma de aumentos nunca supere el volumen realmente cubierto.
 
     Método Monte Carlo por CP:
       - Se lanzan N puntos aleatorios dentro del bounding box del CP.
       - Se filtran los que caen dentro del polígono del CP (vectorizado).
       - Para cada punto se cuenta cuántas zonas (k) lo cubren.
       - Cada zona que cubre el punto recibe un peso de 1/k.
-      - Upside_zona_sobre_CP = VOLUMEN_CP × (suma_pesos_zona / puntos_dentro)
+      - Aumento_zona_sobre_CP = VOLUMEN_CP × (suma_pesos_zona / puntos_dentro)
 
     Todas las geometrías deben estar en el MISMO CRS proyectado (metros).
 
     Returns:
         upside_por_zona: {nombre_zona: {"total": int, "por_cp": [{"CP": str, "pct": float, "upside": int}]}}
         upside_por_cp_zona: {(nombre_zona, cp_str): upside_int}  (lookup auxiliar)
-        upside_ocupado_por_cp: {cp_str: upside_total_ocupado_int}  (suma de upsides de todas las zonas sobre el CP)
+        upside_ocupado_por_cp: {cp_str: upside_total_ocupado_int}  (suma de aumentos de todas las zonas sobre el CP)
     """
     import shapely  # shapely 2.x: contains / intersects vectorizados nativos
 
-    # ⚡ 2000 puntos/CP → precisión completa en el upside. Con el gpd.overlay ya
+    # ⚡ 2000 puntos/CP → precisión completa en el aumento. Con el gpd.overlay ya
     #    optimizado, el cuello de botella principal desapareció, así que podemos
     #    permitirnos la precisión alta sin disparar el tiempo total.
     N = 2000  # puntos por CP (precisión alta)
@@ -269,7 +269,7 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
     # Acumuladores
     upside_por_zona = {nom: {"total": 0.0, "por_cp": []} for nom in zona_noms}
     upside_por_cp_zona = {}
-    upside_ocupado_por_cp = {}  # cp_str -> suma de upsides de todas las zonas sobre ese CP
+    upside_ocupado_por_cp = {}  # cp_str -> suma de aumentos de todas las zonas sobre ese CP
 
     # Recorremos TODOS los CPs de la cobertura (de todos los nodos)
     for _, cp_row in gdf_cobertura_m.iterrows():
@@ -314,7 +314,7 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
         # peso total por zona = suma de (1/k) sobre los puntos que cubre
         peso_por_zona = (cubre * pesos_pt).sum(axis=1)     # (Z,)
 
-        # Upside de cada zona sobre este CP
+        # Aumento de cada zona sobre este CP
         for j, nom in enumerate(noms_cp_zonas):
             peso = float(peso_por_zona[j])
             if peso <= 0:
@@ -333,13 +333,13 @@ def calcular_upside_por_zona(gdf_cobertura_m, gdf_circles_m_corr, nodos_unicos_m
                 "upside": upside_int
             })
             upside_por_cp_zona[(nom, cp_str)] = upside_int
-            # Acumular upside ocupado total de este CP (suma de todas las zonas encima)
+            # Acumular aumento ocupado total de este CP (suma de todas las zonas encima)
             upside_ocupado_por_cp[cp_str] = upside_ocupado_por_cp.get(cp_str, 0) + upside_int
 
     # Redondear totales a enteros
     for nom in upside_por_zona:
         upside_por_zona[nom]["total"] = int(round(upside_por_zona[nom]["total"]))
-        # Ordenar desglose por upside desc
+        # Ordenar desglose por aumento desc
         upside_por_zona[nom]["por_cp"].sort(key=lambda d: d["upside"], reverse=True)
 
     return upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp
@@ -395,7 +395,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         gdf_mapa_cp_wgs84['PARTNERS'] = 0
     gdf_mapa_cp_wgs84['PARTNERS'] = pd.to_numeric(gdf_mapa_cp_wgs84['PARTNERS'], errors='coerce').fillna(0).astype(int)
 
-    # 📦 UPSIDE por CP: Ocupado (suma de zonas encima) y Libre
+    # 📦 AUMENTO por CP: Ocupado (suma de zonas encima) y Libre
     _upside_ocu_cp = res.get('upside_ocupado_por_cp', {})
     gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO'] = gdf_mapa_cp_wgs84['CP'].astype(str).map(
         lambda c: int(_upside_ocu_cp.get(str(c), 0))
@@ -404,7 +404,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         gdf_mapa_cp_wgs84['VOLUMEN'].astype(float) - gdf_mapa_cp_wgs84['_UPSIDE_OCUPADO']
     ).clip(lower=0).round().astype(int)
 
-    # 📦 Desglose "Upside por zona encima del CP"
+    # 📦 Desglose "Aumento por zona encima del CP"
     _upside_zona_lookup_cp = res.get('upside_por_zona', {})
     _cp_to_zonas = {}
     for _znom, _zinfo in _upside_zona_lookup_cp.items():
@@ -422,10 +422,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
     # ═══════════════════════════════════════════════════════════════
     # 📍 FACTIBILIDAD DE PROSPECCIÓN ("¿Dónde prospectar?")
-    #    Un CP es PROSPECTABLE si su UPSIDE LIBRE (volumen disponible que
-    #    NINGUNA zona cubre todavía), sumado al Upside Libre de los CPs
+    #    Un CP es PROSPECTABLE si su AUMENTO LIBRE (volumen disponible que
+    #    NINGUNA zona cubre todavía), sumado al Aumento Libre de los CPs
     #    vecinos cuyos CENTROIDES caen dentro de 750 m, alcanza ≥ 32.
-    #    Se usa Upside Libre (no Volumen Total) porque solo se puede prospectar
+    #    Se usa Aumento Libre (no Volumen Total) porque solo se puede prospectar
     #    sobre volumen DISPONIBLE — lo ya ocupado por zonas no cuenta.
     # ═══════════════════════════════════════════════════════════════
     _UMBRAL_PROSPECCION = 32
@@ -588,11 +588,11 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     if not gdf_mapa_cp_wgs84.empty:
         _cp_geojson_str = gdf_mapa_cp_wgs84.to_json()
 
-        # ⚠️ Tooltip de CPs: se quitaron '_UPSIDE_ZONAS' (Upside por Zona), '_VOL_750M'
-        #    (Upside disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
+        # ⚠️ Tooltip de CPs: se quitaron '_UPSIDE_ZONAS' (Aumento por Zona), '_VOL_750M'
+        #    (Aumento disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
         #    Esos datos de prospección ya se muestran en los círculos verdes del mapa.
         _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Upside de Zona:', 'Upside Libre:', 'Partners:', 'Rango:']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Aumento de Zona:', 'Libre:', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -655,12 +655,12 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             f"<b>Zona Operativa: {r['NOMBRE']}</b>",
             f"Rango: {r_text}",
             f"Volumen: {r['VOLUMEN']}",
-            f"Radio Ope: {r['RADIO']}m",
+            f"Perímetro Ope: {r['RADIO']}m",
             f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>",
-            f"<b>📦 Upside Total: {upside_total} pqts</b>"
+            f"<b>📦 Aumento Total: {upside_total} pqts</b>"
         ]
         if upside_por_cp:
-            tt_lines.append("── Upside por CP ──")
+            tt_lines.append("── Aumento por CP ──")
             for d in upside_por_cp[:15]:
                 tt_lines.append(f"&nbsp;&nbsp;• CP {d['CP']} ({d['pct']}%): {d['upside']} pqts")
             if len(upside_por_cp) > 15:
@@ -678,7 +678,12 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             "properties": {
                 "NOMBRE": str(r['NOMBRE']),
                 "_color": color_hex,
-                "_tt": tt_c
+                "_tt": tt_c,
+                # 📍 Centro GPS real + radio en metros → prueba punto-en-círculo en JS
+                #    (modo Click apilado de zonas encimadas).
+                "_clat": float(r['LATITUD']),
+                "_clon": float(r['LONGITUD']),
+                "_rad_m": float(r['RADIO'])
             },
             "geometry": geom_circulo.__geo_interface__
         })
@@ -704,7 +709,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # ═══════════════════════════════════════════════════════════════
     # 3. ANILLOS DE FACTIBILIDAD — en FeatureGroup para toggle sin recargar
     # ═══════════════════════════════════════════════════════════════
-    fg_anillos = folium.FeatureGroup(name="Radios", show=mostrar_anillos)
+    fg_anillos = folium.FeatureGroup(name="Perímetro", show=mostrar_anillos)
     if 'anillos_por_estado' in res:
         # 🎨 COLOREO POR ADYACENCIA: paleta de neutros BIEN DIFERENCIABLES entre sí.
         #    Se detecta qué nodos son vecinos (sus límites se tocan/solapan) y se asignan
@@ -852,7 +857,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
     <!-- 🖱️ Botón de modo de información (Hover ⇄ Click) — se inyecta DENTRO del
-         control de capas de Leaflet (junto a CP/Zonas/Radio) vía JS en initCPSearch. -->
+         control de capas de Leaflet (junto a CP/Zonas/Perímetro) vía JS en initCPSearch. -->
     <script>
     window.addEventListener('load', function() {
         setTimeout(function() { initCPSearch(); }, 1500);
@@ -949,7 +954,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 color: ly.options.color || '#ffffff',
                 weight: ly.options.weight || 1.5
             };
-            ly.setStyle({ fillColor:'#ff0000', fillOpacity:0.7, color:'#ff0000', weight:3 });
+            ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 });
             hl = ly;
             if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
             if (ly.openTooltip) ly.openTooltip();
@@ -1019,7 +1024,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         });
 
         // 🖱️ Inyectar el botón "Info: Hover/Click" DENTRO del control de capas
-        //    (junto a CP/Zonas/Radio/Prospección), como una fila más del panel.
+        //    (junto a CP/Zonas/Perímetro/Prospección), como una fila más del panel.
         try {
             var _lc = document.querySelector('.leaflet-control-layers-list');
             if (_lc && !document.getElementById('ttModeRow')) {
@@ -1044,12 +1049,15 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (solo popup)
+    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (popup apilado)
     //    Ideal para ZONAS ENCIMADAS: en modo Click el hover deja de dispararse
-    //    y la info solo aparece al seleccionar, evitando el caos de tooltips.
+    //    y, al hacer clic sobre un punto, se abre UN popup con la info de TODAS
+    //    las zonas que están debajo de ese punto, apiladas.
     // ═══════════════════════════════════════════════════════════════
     window._ttMode = 'hover';   // estado inicial
     window._ttStore = [];       // guarda {layer, content, options} para re-enlazar
+    window._zonasGeom = [];     // centros+radios+tooltip de TODAS las zonas (apilar encimadas)
+    window._clickHandler = null;// handler del clic en modo Click (para quitarlo al volver a Hover)
 
     function _ttFindMap() {
         for (var k in window) {
@@ -1071,6 +1079,81 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if (layer._layers) { for (var id in layer._layers) _ttWalk(layer._layers[id], cb); }
     }
 
+    // 📍 Recolecta de TODAS las capas de zona su centro (_clat/_clon), radio (_rad_m)
+    //    y tooltip completo (_tt). Se usa para detectar, a mano, qué zonas contienen
+    //    el punto donde se hizo clic — incluidas las que quedan DEBAJO de otras.
+    function _recolectarZonas(map) {
+        window._zonasGeom = [];
+        _ttWalk(map, function(ly) {
+            try {
+                if (ly.feature && ly.feature.properties &&
+                    typeof ly.feature.properties._clat !== 'undefined' &&
+                    typeof ly.feature.properties._rad_m !== 'undefined') {
+                    var p = ly.feature.properties;
+                    window._zonasGeom.push({
+                        nom: p.NOMBRE || '',
+                        lat: parseFloat(p._clat),
+                        lon: parseFloat(p._clon),
+                        rad: parseFloat(p._rad_m),
+                        tt: p._tt || ''
+                    });
+                }
+            } catch(e) {}
+        });
+    }
+
+    // 📏 Distancia Haversine en metros entre dos puntos lat/lon.
+    function _distMetros(lat1, lon1, lat2, lon2) {
+        var R = 6371000;
+        var dLat = (lat2 - lat1) * Math.PI / 180;
+        var dLon = (lon2 - lon1) * Math.PI / 180;
+        var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    // 🖱️ Al hacer clic en el mapa (modo Click): buscar TODAS las zonas cuyo círculo
+    //    contiene el punto clicado y abrir UN popup con el tooltip completo de cada una,
+    //    apiladas y separadas por una línea divisoria. Así se ve la info de las que
+    //    están encimadas/debajo, no solo la de arriba.
+    function _onMapClickApilado(e) {
+        var map = _ttFindMap();
+        if (!map) return;
+        var lat = e.latlng.lat, lon = e.latlng.lng;
+        var encontradas = [];
+        for (var i = 0; i < window._zonasGeom.length; i++) {
+            var z = window._zonasGeom[i];
+            if (isNaN(z.lat) || isNaN(z.lon) || isNaN(z.rad)) continue;
+            var d = _distMetros(lat, lon, z.lat, z.lon);
+            if (d <= z.rad) {
+                encontradas.push({ z: z, d: d });
+            }
+        }
+        if (encontradas.length === 0) return;  // clic en vacío → no abrir nada
+
+        // Ordenar: la zona cuyo centro está MÁS CERCA del clic va primero.
+        encontradas.sort(function(a, b){ return a.d - b.d; });
+
+        var html;
+        if (encontradas.length === 1) {
+            html = encontradas[0].z.tt;
+        } else {
+            var partes = ['<div style="font-weight:bold;color:#2563eb;margin-bottom:4px;">' +
+                          '🔎 ' + encontradas.length + ' zonas encimadas aquí</div>'];
+            for (var j = 0; j < encontradas.length; j++) {
+                partes.push(encontradas[j].z.tt);
+            }
+            // Separador visible entre cada zona apilada
+            html = partes.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">');
+        }
+
+        L.popup({ maxWidth: 380, maxHeight: 420, autoPan: true })
+         .setLatLng(e.latlng)
+         .setContent('<div style="max-height:400px;overflow-y:auto;font-size:12px;">' + html + '</div>')
+         .openOn(map);
+    }
+
     window.toggleTooltipMode = function() {
         var map = _ttFindMap();
         var btn = document.getElementById('ttModeBtn');
@@ -1078,30 +1161,37 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if (!map) { return; }
 
         if (window._ttMode === 'hover') {
-            // → Pasar a modo CLICK: desenlazar todos los tooltips (guardándolos)
+            // → Pasar a modo CLICK: desenlazar tooltips (guardándolos) y activar
+            //   el clic apilado que muestra TODAS las zonas bajo el punto.
+            _recolectarZonas(map);           // 📍 capturar geometría de zonas AHORA
             window._ttStore = [];
-            var _nOff = 0;
             _ttWalk(map, function(ly) {
-                // Caso 1: capa individual con tooltip propio
                 if (ly.getTooltip && ly.getTooltip()) {
                     var tt = ly.getTooltip();
                     window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
                     ly.unbindTooltip();
-                    _nOff++;
                 }
-                // Caso 2 (Canvas/GeoJson): bloquear el evento de tooltip a nivel capa
                 if (ly.off && ly.on) {
                     try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {}
                 }
             });
+            // Activar handler de clic apilado
+            window._clickHandler = _onMapClickApilado;
+            map.on('click', window._clickHandler);
+
             window._ttMode = 'click';
             if (btn) {
-                btn.innerHTML = '👆 Info: Click';
+                btn.innerHTML = '👆 Info: Click (apilado)';
                 btn.style.background = '#2563eb';
             }
-            if (hint) hint.innerHTML = 'Clic para ver info';
+            if (hint) hint.innerHTML = 'Clic → TODAS las encimadas';
         } else {
-            // → Volver a modo HOVER: re-enlazar los tooltips guardados
+            // → Volver a modo HOVER: re-enlazar tooltips y quitar el clic apilado.
+            if (window._clickHandler) {
+                try { map.off('click', window._clickHandler); } catch(e) {}
+                window._clickHandler = null;
+            }
+            map.closePopup();
             window._ttStore.forEach(function(rec) {
                 try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
             });
@@ -1404,11 +1494,11 @@ if st.session_state["authentication_status"]:
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
                 # ═══════════════════════════════════════════════════════════════
-                # 📦 CÁLCULO DE UPSIDE: paquetes capturables por zona sobre cada CP
+                # 📦 CÁLCULO DE AUMENTO: paquetes capturables por zona sobre cada CP
                 #    (Monte Carlo VECTORIZADO por CP con reparto 1/k en zonas traslapadas)
                 #    Se usa gdf_cobertura_m (Albers) para áreas precisas.
                 # ═══════════════════════════════════════════════════════════════
-                _prog(35, "📦 Calculando Upside por zona (Monte Carlo vectorizado)...")
+                _prog(35, "📦 Calculando Aumento por zona (Monte Carlo vectorizado)...")
                 upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp = calcular_upside_por_zona(
                     gdf_cobertura_m, gdf_circles_m_corr.to_crs(CRS_AREAS), nodos_unicos_maestro
                 )
@@ -1598,15 +1688,15 @@ if st.session_state["authentication_status"]:
                             for _cp_str, _pct in _pares:
                                 up_val = upside_por_cp_zona.get((_zona_nom, _cp_str), 0)
                                 cps_actuales_zona_con_pct.append(
-                                    f"{_cp_str} ({round(_pct)}% → Upside {up_val})"
+                                    f"{_cp_str} ({round(_pct)}% → Aumento {up_val})"
                                 )
                             if cps_actuales_zona_con_pct:
                                 up_total_zona = upside_por_zona.get(_zona_nom, {}).get('total', 0)
                                 reporte_cp_por_zona.append({
                                     "Nodo": nodo_iter,
                                     "Zona": _zona_nom,
-                                    "CPs Cubiertos (% → Upside pqts)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
-                                    "Upside Total (pqts)": up_total_zona
+                                    "CPs Cubiertos (% → Aumento pqts)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
+                                    "Aumento Total (pqts)": up_total_zona
                                 })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
@@ -1768,8 +1858,8 @@ if st.session_state["authentication_status"]:
                     )
 
                 # ═══════════════════════════════════════════════════════════════
-                # 📦 Agregar columna "Upside Total (pqts)" al desglose por nodo
-                #    (suma del upside de todas las zonas asignadas a ese nodo)
+                # 📦 Agregar columna "Aumento Total (pqts)" al desglose por nodo
+                #    (suma del aumento de todas las zonas asignadas a ese nodo)
                 # ═══════════════════════════════════════════════════════════════
                 # Mapear cada zona a su nodo vía traslape_por_zona
                 upside_por_nodo = {}
@@ -1779,18 +1869,18 @@ if st.session_state["authentication_status"]:
                     if nodo_de_zona:
                         upside_por_nodo[nodo_de_zona] = upside_por_nodo.get(nodo_de_zona, 0) + up_z
                 if not df_desglose.empty:
-                    df_desglose['Upside Total (pqts)'] = df_desglose['Nodo'].map(
+                    df_desglose['Aumento Total (pqts)'] = df_desglose['Nodo'].map(
                         lambda n: int(upside_por_nodo.get(n, 0))
                     )
 
-                # Construir df de detalle de zonas con Upside Total por zona
+                # Construir df de detalle de zonas con Aumento Total por zona
                 df_zonas_detalles_base = gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy()
-                df_zonas_detalles_base['Upside Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
+                df_zonas_detalles_base['Aumento Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
                     lambda n: int(upside_por_zona.get(n, {}).get('total', 0))
                 )
                 df_zonas_detalles_base = df_zonas_detalles_base.rename(columns={
                     'NOMBRE': 'Nombre de la Zona',
-                    'RADIO': 'Radio (m)',
+                    'RADIO': 'Perímetro (m)',
                     'AREA_KM2': 'Territorio'
                 })
 
@@ -1861,7 +1951,7 @@ if st.session_state["authentication_status"]:
             st.markdown("### 📍 Cobertura por CPs por Nodo")
             st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
 
-            st.markdown("### ⭕ Cobertura Detallada por cada Zona (con Upside de paquetes)")
+            st.markdown("### ⭕ Cobertura Detallada por cada Zona (con Aumento de paquetes)")
             st.dataframe(res['df_cp_por_zona'], use_container_width=True, hide_index=True)
             st.write("---")
 
@@ -1872,7 +1962,7 @@ if st.session_state["authentication_status"]:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     res['df_desglose'].to_excel(writer, index=False, sheet_name='Resumen por Nodo')
-                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Radio (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalles')
+                    res['df_zonas_detalles'].rename(columns={'NOMBRE': 'Nombre de la Zona', 'RADIO': 'Perímetro (m)', 'VOLUMEN': 'Volumen Registrado', 'AREA_KM2': 'Territorio Ocupado Individual (km²)'}).to_excel(writer, index=False, sheet_name='Zonas Detalles')
                     res['df_cp_por_estado'].to_excel(writer, index=False, sheet_name='CPs por Nodo')
                     res['df_cp_por_zona'].to_excel(writer, index=False, sheet_name='CPs por Zona')
                     res['df_traslape_mc'].to_excel(writer, index=False, sheet_name='Traslape entre Zonas')
