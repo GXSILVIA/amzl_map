@@ -837,13 +837,26 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     # ═══════════════════════════════════════════════════════════════
     # 🔍 BUSCADOR DE CP + NOMBRE DE ZONA
     # ═══════════════════════════════════════════════════════════════
-    search_html = """
+    search_html = r"""
+    <style>
+      /* Estilos del selector de zonas encimadas (sin onmouseover inline → sin comillas frágiles) */
+      #cpSearchBar * { box-sizing:border-box; }
+      .api-zona-item {
+          padding:7px 9px; margin:3px 0; border:1px solid #e2e8f0; border-radius:6px;
+          cursor:pointer; background:#f8fafc; transition:background .15s;
+      }
+      .api-zona-item:hover { background:#e0edff; }
+      .api-volver {
+          display:inline-block; margin-bottom:8px; padding:5px 10px; background:#2563eb;
+          color:white; border-radius:6px; cursor:pointer; font-weight:600; font-size:12px;
+      }
+    </style>
     <div id="cpSearchBar" style="
         position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
         background:white; padding:8px 14px; border-radius:10px;
         box-shadow:0 4px 16px rgba(0,0,0,0.25);
         display:flex; align-items:center; gap:8px;
-        font-family:'Segoe UI',sans-serif;">
+        font-family:sans-serif;">
         <span style="font-size:16px">🔍</span>
         <input id="cpInput" type="text" placeholder="Buscar CP o Zona..."
             onkeyup="if(event.key==='Enter')buscarCP(this.value)"
@@ -856,41 +869,67 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         <span id="cpResult" style="font-size:12px; max-width:350px;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
-    <!-- 🖱️ Botón de modo de información (Hover ⇄ Click) — se inyecta DENTRO del
-         control de capas de Leaflet (junto a CP/Zonas/Perímetro) vía JS en initCPSearch. -->
+
     <script>
+    // ═══════════════════════════════════════════════════════════════
+    //  ARRANQUE: esperar a que Leaflet pinte el mapa, luego inicializar.
+    // ═══════════════════════════════════════════════════════════════
     window.addEventListener('load', function() {
         setTimeout(function() { initCPSearch(); }, 1500);
     });
 
-    function initCPSearch() {
-        var map = null;
+    // Localizar la instancia del mapa Leaflet creada por Folium.
+    function _findMap() {
         for (var k in window) {
-            try {
-                if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) {
-                    map = window[k]; break;
-                }
-            } catch(e) {}
+            try { if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
         }
-        if (!map) {
-            for (var k in window) {
-                try {
-                    if (window[k] && window[k]._leaflet_id && window[k]._container) {
-                        map = window[k]; break;
-                    }
-                } catch(e) {}
-            }
+        for (var k2 in window) {
+            try { if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2]; } catch(e) {}
         }
+        return null;
+    }
+
+    // Recorrer recursivamente todas las capas del mapa.
+    function _walk(layer, cb) {
+        cb(layer);
+        if (layer.eachLayer) layer.eachLayer(function(sub){ _walk(sub, cb); });
+        if (layer._layers) { for (var id in layer._layers) _walk(layer._layers[id], cb); }
+    }
+
+    // Distancia Haversine en metros entre dos puntos lat/lon.
+    function _distMetros(lat1, lon1, lat2, lon2) {
+        var R = 6371000;
+        var dLat = (lat2 - lat1) * Math.PI / 180;
+        var dLon = (lon2 - lon1) * Math.PI / 180;
+        var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    // Estado global
+    window._ttMode = 'hover';
+    window._ttStore = [];        // tooltips desenlazados (para re-enlazar en Hover)
+    window._popStore = [];       // popups nativos desenlazados (para re-enlazar en Hover)
+    window._zonasGeom = [];      // centro+radio+tooltip de cada zona (para apilado)
+    window._apiladas = [];       // zonas bajo el último clic (para el selector)
+    window._clickHandler = null; // handler de clic en el mapa
+
+    // ═══════════════════════════════════════════════════════════════
+    //  INIT: indexa CPs y zonas para el buscador e inyecta el botón de modo.
+    // ═══════════════════════════════════════════════════════════════
+    function initCPSearch() {
+        var map = _findMap();
         if (!map) {
-            var rd = document.getElementById('cpResult');
-            if (rd) { rd.innerHTML = '⚠ Mapa no encontrado'; rd.style.color = '#d97706'; }
+            var rd0 = document.getElementById('cpResult');
+            if (rd0) { rd0.innerHTML = '⚠ Mapa no encontrado'; rd0.style.color = '#d97706'; }
             return;
         }
+        window._map = map;
 
         var cpIdx = {};
         var zonaIdx = {};
         var totalFeatures = 0;
-        var totalZonas = 0;
 
         function esVisible(layer) {
             var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined')
@@ -903,37 +942,26 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 var props = layer.feature.properties;
                 var visible = esVisible(layer);
                 if ('CP' in props) {
-                    var cpVal = String(props.CP).replace(/\\.0$/, '').trim();
+                    var cpVal = String(props.CP).replace(/\.0$/, '').trim();
                     while (cpVal.length < 5) cpVal = '0' + cpVal;
                     if (!(cpVal in cpIdx) || visible) {
                         if (!(cpVal in cpIdx)) totalFeatures++;
                         cpIdx[cpVal] = layer;
                     }
                 }
-                var zonaNom = props.name || props.NOMBRE || props.Name || null;
+                var zonaNom = props.NOMBRE || props.name || props.Name || null;
                 if (zonaNom) {
                     var zk = String(zonaNom).trim().toUpperCase();
-                    if (!(zk in zonaIdx) || visible) {
-                        if (!(zk in zonaIdx)) totalZonas++;
-                        zonaIdx[zk] = layer;
-                    }
+                    if (!(zk in zonaIdx) || visible) zonaIdx[zk] = layer;
                 }
             }
-            if (layer.options && layer.options.name) {
-                var zk2 = String(layer.options.name).trim().toUpperCase();
-                if (!(zk2 in zonaIdx) || esVisible(layer)) {
-                    if (!(zk2 in zonaIdx)) totalZonas++;
-                    zonaIdx[zk2] = layer;
-                }
-            }
-            if (layer.eachLayer) {
-                layer.eachLayer(function(sub) { indexLayer(sub); });
-            }
-            if (layer._layers) {
-                for (var id in layer._layers) { indexLayer(layer._layers[id]); }
-            }
+            if (layer.eachLayer) layer.eachLayer(function(sub) { indexLayer(sub); });
+            if (layer._layers) { for (var id in layer._layers) indexLayer(layer._layers[id]); }
         }
         map.eachLayer(function(layer) { indexLayer(layer); });
+
+        window._cpIdx = cpIdx;
+        window._zonaIdx = zonaIdx;
 
         var rd = document.getElementById('cpResult');
         if (rd && totalFeatures > 0) {
@@ -945,86 +973,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             rd.style.color = '#d97706';
         }
 
-        var hl = null, os = null;
-
-        function resaltarCapa(ly, rd, etiqueta) {
-            os = {
-                fillColor: ly.options.fillColor || '#9e9e9e',
-                fillOpacity: ly.options.fillOpacity || 0.45,
-                color: ly.options.color || '#ffffff',
-                weight: ly.options.weight || 1.5
-            };
-            ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 });
-            hl = ly;
-            if (ly.getBounds) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
-            if (ly.openTooltip) ly.openTooltip();
-        }
-
-        window.buscarCP = function(valor) {
-            var rd = document.getElementById('cpResult');
-            var raw = String(valor).trim();
-            if (!raw) {
-                if (rd) { rd.innerHTML = 'Escribe un CP o nombre de zona'; rd.style.color = '#64748b'; }
-                return;
-            }
-
-            if (hl && os) { try { hl.setStyle(os); } catch(e) {} }
-
-            var esCP = /^[0-9]+(\\.0)?$/.test(raw);
-
-            if (esCP) {
-                var cp = raw.replace(/\\.0$/, '');
-                while (cp.length < 5) cp = '0' + cp;
-                var ly = cpIdx[cp];
-                if (ly) {
-                    resaltarCapa(ly, rd, 'CP');
-                    if (rd) {
-                        var p = ly.feature.properties;
-                        rd.innerHTML = '✔ CP ' + cp + ' — ' + (p.ESTADO_PERTENECE||'') +
-                            ' | Vol: ' + (p.VOLUMEN||0) + ' | Partners: ' + (p.PARTNERS||0);
-                        rd.style.color = '#16a34a';
-                    }
-                } else if (rd) {
-                    rd.innerHTML = '⚠ El CP ' + cp + ' no está dentro de la cobertura';
-                    rd.style.color = '#dc2626';
-                }
-                return;
-            }
-
-            var clave = raw.toUpperCase();
-            var lyZona = zonaIdx[clave];
-
-            if (!lyZona) {
-                var candidatos = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
-                if (candidatos.length > 0) {
-                    lyZona = zonaIdx[candidatos[0]];
-                    clave = candidatos[0];
-                }
-            }
-
-            if (lyZona) {
-                resaltarCapa(lyZona, rd, 'ZONA');
-                if (rd) {
-                    rd.innerHTML = '✔ Zona ' + clave + ' localizada';
-                    rd.style.color = '#16a34a';
-                }
-            } else if (rd) {
-                rd.innerHTML = '✘ No se encontró el CP ni la zona "' + raw + '"';
-                rd.style.color = '#dc2626';
-            }
-        };
-
-        var pr = new URLSearchParams(window.location.search).get('cp');
-        if (pr) setTimeout(function() { buscarCP(pr); }, 500);
-
-        window.addEventListener('message', function(e) {
-            if (e.data && e.data.action === 'searchCP' && e.data.cp) {
-                buscarCP(e.data.cp);
-            }
-        });
-
-        // 🖱️ Inyectar el botón "Info: Hover/Click" DENTRO del control de capas
-        //    (junto a CP/Zonas/Perímetro/Prospección), como una fila más del panel.
+        // Inyectar el botón de modo DENTRO del control de capas.
         try {
             var _lc = document.querySelector('.leaflet-control-layers-list');
             if (_lc && !document.getElementById('ttModeRow')) {
@@ -1049,45 +998,87 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🖱️ MODO DE INFORMACIÓN: Hover (tooltip al pasar) ⇄ Click (popup apilado)
-    //    Ideal para ZONAS ENCIMADAS: en modo Click el hover deja de dispararse
-    //    y, al hacer clic sobre un punto, se abre UN popup con la info de TODAS
-    //    las zonas que están debajo de ese punto, apiladas.
+    //  BUSCADOR: resalta en AZUL el CP o la zona encontrada.
     // ═══════════════════════════════════════════════════════════════
-    window._ttMode = 'hover';   // estado inicial
-    window._ttStore = [];       // guarda {layer, content, options} para re-enlazar
-    window._zonasGeom = [];     // centros+radios+tooltip de TODAS las zonas (apilar encimadas)
-    window._clickHandler = null;// handler del clic en modo Click (para quitarlo al volver a Hover)
-    window._popStore = [];      // guarda popups nativos de capa para re-enlazar al volver a Hover
-    window._apiladas = [];      // zonas encontradas bajo el clic (para el selector con lista)
-    window._apiPopup = null;    // referencia al popup del selector apilado
+    var _hl = null, _os = null;
 
-    function _ttFindMap() {
-        for (var k in window) {
-            try {
-                if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k];
-            } catch(e) {}
-        }
-        for (var k2 in window) {
-            try {
-                if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2];
-            } catch(e) {}
-        }
-        return null;
+    function _resaltarCapa(ly) {
+        var map = window._map || _findMap();
+        _os = {
+            fillColor: ly.options.fillColor || '#9e9e9e',
+            fillOpacity: ly.options.fillOpacity || 0.45,
+            color: ly.options.color || '#ffffff',
+            weight: ly.options.weight || 1.5
+        };
+        ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 });
+        _hl = ly;
+        if (ly.getBounds && map) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
+        if (ly.openTooltip) ly.openTooltip();
     }
 
-    function _ttWalk(layer, cb) {
-        cb(layer);
-        if (layer.eachLayer) layer.eachLayer(function(sub){ _ttWalk(sub, cb); });
-        if (layer._layers) { for (var id in layer._layers) _ttWalk(layer._layers[id], cb); }
-    }
+    window.buscarCP = function(valor) {
+        var rd = document.getElementById('cpResult');
+        var raw = String(valor).trim();
+        var cpIdx = window._cpIdx || {};
+        var zonaIdx = window._zonaIdx || {};
+        if (!raw) {
+            if (rd) { rd.innerHTML = 'Escribe un CP o nombre de zona'; rd.style.color = '#64748b'; }
+            return;
+        }
+        if (_hl && _os) { try { _hl.setStyle(_os); } catch(e) {} }
 
-    // 📍 Recolecta de TODAS las capas de zona su centro (_clat/_clon), radio (_rad_m)
-    //    y tooltip completo (_tt). Se usa para detectar, a mano, qué zonas contienen
-    //    el punto donde se hizo clic — incluidas las que quedan DEBAJO de otras.
+        var esCP = /^[0-9]+(\.0)?$/.test(raw);
+        if (esCP) {
+            var cp = raw.replace(/\.0$/, '');
+            while (cp.length < 5) cp = '0' + cp;
+            var ly = cpIdx[cp];
+            if (ly) {
+                _resaltarCapa(ly);
+                if (rd) {
+                    var pr = ly.feature.properties;
+                    rd.innerHTML = '✔ CP ' + cp + ' — ' + (pr.ESTADO_PERTENECE||'') +
+                        ' | Vol: ' + (pr.VOLUMEN||0) + ' | Partners: ' + (pr.PARTNERS||0);
+                    rd.style.color = '#16a34a';
+                }
+            } else if (rd) {
+                rd.innerHTML = '⚠ El CP ' + cp + ' no está dentro de la cobertura';
+                rd.style.color = '#dc2626';
+            }
+            return;
+        }
+
+        var clave = raw.toUpperCase();
+        var lyZona = zonaIdx[clave];
+        if (!lyZona) {
+            var cands = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
+            if (cands.length > 0) { lyZona = zonaIdx[cands[0]]; clave = cands[0]; }
+        }
+        if (lyZona) {
+            _resaltarCapa(lyZona);
+            if (rd) { rd.innerHTML = '✔ Zona ' + clave + ' localizada'; rd.style.color = '#16a34a'; }
+        } else if (rd) {
+            rd.innerHTML = '✘ No se encontró el CP ni la zona "' + raw + '"';
+            rd.style.color = '#dc2626';
+        }
+    };
+
+    // Soporte ?cp= en la URL y postMessage externo.
+    (function(){
+        var pr = new URLSearchParams(window.location.search).get('cp');
+        if (pr) setTimeout(function() { window.buscarCP(pr); }, 2000);
+    })();
+    window.addEventListener('message', function(e) {
+        if (e.data && e.data.action === 'searchCP' && e.data.cp) window.buscarCP(e.data.cp);
+    });
+
+    // ═══════════════════════════════════════════════════════════════
+    //  MODO Hover ⇄ Click. En Click: clic sobre zonas encimadas abre un
+    //  SELECTOR con la lista de todas las zonas bajo el punto; se elige una
+    //  y se ve su info completa, con botón para volver a la lista.
+    // ═══════════════════════════════════════════════════════════════
     function _recolectarZonas(map) {
         window._zonasGeom = [];
-        _ttWalk(map, function(ly) {
+        _walk(map, function(ly) {
             try {
                 if (ly.feature && ly.feature.properties &&
                     typeof ly.feature.properties._clat !== 'undefined' &&
@@ -1105,190 +1096,120 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         });
     }
 
-    // 📏 Distancia Haversine en metros entre dos puntos lat/lon.
-    function _distMetros(lat1, lon1, lat2, lon2) {
-        var R = 6371000;
-        var dLat = (lat2 - lat1) * Math.PI / 180;
-        var dLon = (lon2 - lon1) * Math.PI / 180;
-        var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
-                Math.sin(dLon/2) * Math.sin(dLon/2);
-        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    // Vista 1: lista de nombres (clase CSS .api-zona-item con :hover, sin inline).
+    function _vistaListaZonas() {
+        var arr = window._apiladas || [];
+        var out = ['<div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">🔎 ' +
+                   arr.length + ' zonas aquí — elige una:</div>'];
+        for (var i = 0; i < arr.length; i++) {
+            var nom = arr[i].nom || ('Zona ' + (i+1));
+            out.push('<div class="api-zona-item" data-idx="' + i + '">' +
+                     '<span style="color:#2563eb;font-weight:600;">▸</span> <b>' + nom + '</b></div>');
+        }
+        return out.join('');
     }
 
-    // 🖱️ Al hacer clic en el mapa (modo Click): buscar TODAS las zonas cuyo círculo
-    //    contiene el punto clicado y abrir UN popup con el tooltip completo de cada una,
-    //    apiladas y separadas por una línea divisoria. Así se ve la info de las que
-    //    están encimadas/debajo, no solo la de arriba.
-    // 🖱️ Handler de clic A NIVEL DE CAPA (para prefer_canvas): usa el latlng del
-    //    evento y DETIENE la propagación para que no se abra ningún popup nativo.
-    //    Reutiliza la misma lógica de apilado buscando TODAS las zonas bajo el punto.
-    function _onLayerClickApilado(e) {
-        if (e && e.originalEvent) { try { L.DomEvent.stopPropagation(e); } catch(ex) {} }
-        _mostrarApilado(e.latlng);
+    // Vista 2: info completa de la zona elegida + botón volver.
+    function _vistaDetalle(idx) {
+        var arr = window._apiladas || [];
+        if (idx < 0 || idx >= arr.length) return '';
+        return '<div class="api-volver" data-volver="1">← Volver a la lista</div>' +
+               '<div>' + (arr[idx].tt || '') + '</div>';
     }
 
-    function _onMapClickApilado(e) {
-        _mostrarApilado(e.latlng);
-    }
-
-    // Núcleo compartido: dado un latlng, busca TODAS las zonas cuyo círculo lo
-    // contiene y abre UN popup apilado con el tooltip completo de cada una.
+    // Núcleo: dado un latlng, buscar TODAS las zonas que lo contienen y abrir popup.
     function _mostrarApilado(latlng) {
-        var map = _ttFindMap();
+        var map = window._map || _findMap();
         if (!map) return;
-        var lat = latlng.lat, lon = latlng.lng;
         var encontradas = [];
         for (var i = 0; i < window._zonasGeom.length; i++) {
             var z = window._zonasGeom[i];
             if (isNaN(z.lat) || isNaN(z.lon) || isNaN(z.rad)) continue;
-            var d = _distMetros(lat, lon, z.lat, z.lon);
-            if (d <= z.rad) {
-                encontradas.push({ z: z, d: d });
-            }
+            if (_distMetros(latlng.lat, latlng.lng, z.lat, z.lon) <= z.rad) encontradas.push({z:z});
         }
-        if (encontradas.length === 0) return;  // clic en vacío → no abrir nada
-
-        // Ordenar: la zona cuyo centro está MÁS CERCA del clic va primero.
-        encontradas.sort(function(a, b){ return a.d - b.d; });
-
-        // 📋 SELECTOR CON LISTA: guardamos las zonas encontradas en una global para
-        //    que la función de selección (window._selZona) pueda leerlas desde el popup.
+        if (encontradas.length === 0) return;
         window._apiladas = encontradas.map(function(x){ return x.z; });
 
-        var html;
-        if (encontradas.length === 1) {
-            // Una sola zona → mostrar su info completa directamente (sin lista).
-            html = encontradas[0].z.tt;
-        } else {
-            // Varias zonas → mostrar la LISTA de nombres para que la usuaria ELIJA.
-            html = _vistaListaZonas();
-        }
-
-        window._apiPopup = L.popup({ maxWidth: 380, maxHeight: 440, autoPan: true })
+        var html = (encontradas.length === 1) ? encontradas[0].z.tt : _vistaListaZonas();
+        L.popup({ maxWidth: 380, maxHeight: 440, autoPan: true })
             .setLatLng(latlng)
             .setContent('<div id="apiBox" style="max-height:410px;overflow-y:auto;font-size:12px;">' + html + '</div>')
             .openOn(map);
     }
 
-    // 📋 Vista 1: LISTA de nombres de zonas encimadas (cada uno clicable).
-    function _vistaListaZonas() {
-        var arr = window._apiladas || [];
-        var out = ['<div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">' +
-                   '🔎 ' + arr.length + ' zonas aquí — elige una:</div>'];
-        for (var i = 0; i < arr.length; i++) {
-            var nom = arr[i].nom || ('Zona ' + (i+1));
-            out.push(
-                '<div onclick="window._selZona(' + i + ')" ' +
-                'style="padding:7px 9px;margin:3px 0;border:1px solid #e2e8f0;border-radius:6px;' +
-                'cursor:pointer;background:#f8fafc;transition:background .15s;" ' +
-                'onmouseover="this.style.background=\'#e0edff\'" ' +
-                'onmouseout="this.style.background=\'#f8fafc\'">' +
-                '<span style="color:#2563eb;font-weight:600;">▸</span> ' +
-                '<b>' + nom + '</b></div>'
-            );
-        }
-        return out.join('');
+    // Handlers de clic (mapa y capa).
+    function _onMapClick(e) { _mostrarApilado(e.latlng); }
+    function _onLayerClick(e) {
+        if (e && e.originalEvent) { try { L.DomEvent.stopPropagation(e); } catch(ex) {} }
+        _mostrarApilado(e.latlng);
     }
 
-    // 📋 Al elegir una zona de la lista: mostrar su info completa + botón "Volver".
-    window._selZona = function(idx) {
-        var arr = window._apiladas || [];
-        if (idx < 0 || idx >= arr.length) return;
-        var box = document.getElementById('apiBox');
-        if (!box) return;
-        var volver = '<div onclick="window._volverLista()" ' +
-            'style="display:inline-block;margin-bottom:8px;padding:5px 10px;background:#2563eb;' +
-            'color:white;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;">' +
-            '← Volver a la lista</div>';
-        box.innerHTML = volver + '<div>' + (arr[idx].tt || '') + '</div>';
-    };
-
-    // 📋 Volver a la lista de nombres desde la vista de una zona.
-    window._volverLista = function() {
-        var box = document.getElementById('apiBox');
-        if (box) box.innerHTML = _vistaListaZonas();
-    };
+    // Delegación de eventos para los clics DENTRO del popup (lista / volver).
+    document.addEventListener('click', function(ev) {
+        var t = ev.target;
+        while (t && t !== document) {
+            if (t.classList && t.classList.contains('api-zona-item')) {
+                var idx = parseInt(t.getAttribute('data-idx'), 10);
+                var box = document.getElementById('apiBox');
+                if (box) box.innerHTML = _vistaDetalle(idx);
+                return;
+            }
+            if (t.getAttribute && t.getAttribute('data-volver') === '1') {
+                var box2 = document.getElementById('apiBox');
+                if (box2) box2.innerHTML = _vistaListaZonas();
+                return;
+            }
+            t = t.parentNode;
+        }
+    });
 
     window.toggleTooltipMode = function() {
-        var map = _ttFindMap();
+        var map = window._map || _findMap();
         var btn = document.getElementById('ttModeBtn');
         var hint = document.getElementById('ttModeHint');
-        if (!map) { return; }
+        if (!map) return;
 
         if (window._ttMode === 'hover') {
-            // → Pasar a modo CLICK: desenlazar tooltips (guardándolos) y activar
-            //   el clic apilado que muestra TODAS las zonas bajo el punto.
-            _recolectarZonas(map);           // 📍 capturar geometría de zonas AHORA
+            // → CLICK: desenlazar tooltips y popups nativos; activar clic apilado.
+            _recolectarZonas(map);
             window._ttStore = [];
-            window._popStore = [];   // guarda popups nativos para re-enlazar al volver a Hover
-            _ttWalk(map, function(ly) {
+            window._popStore = [];
+            _walk(map, function(ly) {
                 if (ly.getTooltip && ly.getTooltip()) {
                     var tt = ly.getTooltip();
                     window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
                     ly.unbindTooltip();
                 }
-                // 🔑 CLAVE: desenlazar el POPUP nativo de la capa. Si no, al hacer clic
-                //    sobre un círculo, Leaflet abre el popup de ESA zona (la de arriba) y
-                //    consume el clic — nunca llega el handler apilado. Lo guardamos para
-                //    re-enlazarlo al volver a modo Hover.
                 if (ly.getPopup && ly.getPopup()) {
                     var pp = ly.getPopup();
                     window._popStore.push({ layer: ly, content: pp.getContent(), options: pp.options });
                     ly.unbindPopup();
                 }
-                if (ly.off && ly.on) {
-                    try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {}
-                }
-                // 🔑 Enlazar el clic APILADO también A NIVEL DE CAPA: con prefer_canvas
-                //    el clic sobre un círculo lo recibe la capa, no el mapa de fondo.
+                if (ly.off) { try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {} }
                 if (ly.feature && ly.feature.properties &&
                     typeof ly.feature.properties._rad_m !== 'undefined' && ly.on) {
-                    try { ly.on('click', _onLayerClickApilado); } catch(e) {}
+                    try { ly.on('click', _onLayerClick); } catch(e) {}
                 }
             });
-            // Activar handler de clic apilado también en el mapa (clic en zonas de fondo)
-            window._clickHandler = _onMapClickApilado;
+            window._clickHandler = _onMapClick;
             map.on('click', window._clickHandler);
-
             window._ttMode = 'click';
-            if (btn) {
-                btn.innerHTML = '👆 Info: Click (apilado)';
-                btn.style.background = '#2563eb';
-            }
-            if (hint) hint.innerHTML = 'Clic → TODAS las encimadas';
+            if (btn) { btn.innerHTML = '👆 Info: Click (apilado)'; btn.style.background = '#2563eb'; }
+            if (hint) hint.innerHTML = 'Clic → elige entre las encimadas';
         } else {
-            // → Volver a modo HOVER: re-enlazar tooltips y quitar el clic apilado.
-            if (window._clickHandler) {
-                try { map.off('click', window._clickHandler); } catch(e) {}
-                window._clickHandler = null;
-            }
-            map.closePopup();
-            // Quitar los handlers de clic apilado enlazados A NIVEL DE CAPA
-            _ttWalk(map, function(ly) {
-                if (ly.off) { try { ly.off('click', _onLayerClickApilado); } catch(e) {} }
-            });
-            // Re-enlazar los tooltips guardados
-            window._ttStore.forEach(function(rec) {
-                try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
-            });
-            // Re-enlazar los popups nativos guardados
-            if (window._popStore) {
-                window._popStore.forEach(function(rec) {
-                    try { rec.layer.bindPopup(rec.content, rec.options); } catch(e) {}
-                });
-                window._popStore = [];
-            }
+            // → HOVER: re-enlazar tooltips y popups; quitar clic apilado.
+            if (window._clickHandler) { try { map.off('click', window._clickHandler); } catch(e) {} window._clickHandler = null; }
+            try { map.closePopup(); } catch(e) {}
+            _walk(map, function(ly) { if (ly.off) { try { ly.off('click', _onLayerClick); } catch(e) {} } });
+            window._ttStore.forEach(function(rec) { try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {} });
+            window._popStore.forEach(function(rec) { try { rec.layer.bindPopup(rec.content, rec.options); } catch(e) {} });
             window._ttStore = [];
+            window._popStore = [];
             window._ttMode = 'hover';
-            if (btn) {
-                btn.innerHTML = '🖱️ Info: Hover';
-                btn.style.background = '#16a34a';
-            }
+            if (btn) { btn.innerHTML = '🖱️ Info: Hover'; btn.style.background = '#16a34a'; }
             if (hint) hint.innerHTML = 'Zonas encimadas → Click';
         }
     };
-
     </script>
     """
     m.get_root().html.add_child(folium.Element(search_html))
