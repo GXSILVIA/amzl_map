@@ -1058,6 +1058,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     window._ttStore = [];       // guarda {layer, content, options} para re-enlazar
     window._zonasGeom = [];     // centros+radios+tooltip de TODAS las zonas (apilar encimadas)
     window._clickHandler = null;// handler del clic en modo Click (para quitarlo al volver a Hover)
+    window._popStore = [];      // guarda popups nativos de capa para re-enlazar al volver a Hover
+    window._apiladas = [];      // zonas encontradas bajo el clic (para el selector con lista)
+    window._apiPopup = null;    // referencia al popup del selector apilado
 
     function _ttFindMap() {
         for (var k in window) {
@@ -1117,10 +1120,24 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     //    contiene el punto clicado y abrir UN popup con el tooltip completo de cada una,
     //    apiladas y separadas por una línea divisoria. Así se ve la info de las que
     //    están encimadas/debajo, no solo la de arriba.
+    // 🖱️ Handler de clic A NIVEL DE CAPA (para prefer_canvas): usa el latlng del
+    //    evento y DETIENE la propagación para que no se abra ningún popup nativo.
+    //    Reutiliza la misma lógica de apilado buscando TODAS las zonas bajo el punto.
+    function _onLayerClickApilado(e) {
+        if (e && e.originalEvent) { try { L.DomEvent.stopPropagation(e); } catch(ex) {} }
+        _mostrarApilado(e.latlng);
+    }
+
     function _onMapClickApilado(e) {
+        _mostrarApilado(e.latlng);
+    }
+
+    // Núcleo compartido: dado un latlng, busca TODAS las zonas cuyo círculo lo
+    // contiene y abre UN popup apilado con el tooltip completo de cada una.
+    function _mostrarApilado(latlng) {
         var map = _ttFindMap();
         if (!map) return;
-        var lat = e.latlng.lat, lon = e.latlng.lng;
+        var lat = latlng.lat, lon = latlng.lng;
         var encontradas = [];
         for (var i = 0; i < window._zonasGeom.length; i++) {
             var z = window._zonasGeom[i];
@@ -1135,24 +1152,63 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         // Ordenar: la zona cuyo centro está MÁS CERCA del clic va primero.
         encontradas.sort(function(a, b){ return a.d - b.d; });
 
+        // 📋 SELECTOR CON LISTA: guardamos las zonas encontradas en una global para
+        //    que la función de selección (window._selZona) pueda leerlas desde el popup.
+        window._apiladas = encontradas.map(function(x){ return x.z; });
+
         var html;
         if (encontradas.length === 1) {
+            // Una sola zona → mostrar su info completa directamente (sin lista).
             html = encontradas[0].z.tt;
         } else {
-            var partes = ['<div style="font-weight:bold;color:#2563eb;margin-bottom:4px;">' +
-                          '🔎 ' + encontradas.length + ' zonas encimadas aquí</div>'];
-            for (var j = 0; j < encontradas.length; j++) {
-                partes.push(encontradas[j].z.tt);
-            }
-            // Separador visible entre cada zona apilada
-            html = partes.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">');
+            // Varias zonas → mostrar la LISTA de nombres para que la usuaria ELIJA.
+            html = _vistaListaZonas();
         }
 
-        L.popup({ maxWidth: 380, maxHeight: 420, autoPan: true })
-         .setLatLng(e.latlng)
-         .setContent('<div style="max-height:400px;overflow-y:auto;font-size:12px;">' + html + '</div>')
-         .openOn(map);
+        window._apiPopup = L.popup({ maxWidth: 380, maxHeight: 440, autoPan: true })
+            .setLatLng(latlng)
+            .setContent('<div id="apiBox" style="max-height:410px;overflow-y:auto;font-size:12px;">' + html + '</div>')
+            .openOn(map);
     }
+
+    // 📋 Vista 1: LISTA de nombres de zonas encimadas (cada uno clicable).
+    function _vistaListaZonas() {
+        var arr = window._apiladas || [];
+        var out = ['<div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">' +
+                   '🔎 ' + arr.length + ' zonas aquí — elige una:</div>'];
+        for (var i = 0; i < arr.length; i++) {
+            var nom = arr[i].nom || ('Zona ' + (i+1));
+            out.push(
+                '<div onclick="window._selZona(' + i + ')" ' +
+                'style="padding:7px 9px;margin:3px 0;border:1px solid #e2e8f0;border-radius:6px;' +
+                'cursor:pointer;background:#f8fafc;transition:background .15s;" ' +
+                'onmouseover="this.style.background=\'#e0edff\'" ' +
+                'onmouseout="this.style.background=\'#f8fafc\'">' +
+                '<span style="color:#2563eb;font-weight:600;">▸</span> ' +
+                '<b>' + nom + '</b></div>'
+            );
+        }
+        return out.join('');
+    }
+
+    // 📋 Al elegir una zona de la lista: mostrar su info completa + botón "Volver".
+    window._selZona = function(idx) {
+        var arr = window._apiladas || [];
+        if (idx < 0 || idx >= arr.length) return;
+        var box = document.getElementById('apiBox');
+        if (!box) return;
+        var volver = '<div onclick="window._volverLista()" ' +
+            'style="display:inline-block;margin-bottom:8px;padding:5px 10px;background:#2563eb;' +
+            'color:white;border-radius:6px;cursor:pointer;font-weight:600;font-size:12px;">' +
+            '← Volver a la lista</div>';
+        box.innerHTML = volver + '<div>' + (arr[idx].tt || '') + '</div>';
+    };
+
+    // 📋 Volver a la lista de nombres desde la vista de una zona.
+    window._volverLista = function() {
+        var box = document.getElementById('apiBox');
+        if (box) box.innerHTML = _vistaListaZonas();
+    };
 
     window.toggleTooltipMode = function() {
         var map = _ttFindMap();
@@ -1165,17 +1221,33 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             //   el clic apilado que muestra TODAS las zonas bajo el punto.
             _recolectarZonas(map);           // 📍 capturar geometría de zonas AHORA
             window._ttStore = [];
+            window._popStore = [];   // guarda popups nativos para re-enlazar al volver a Hover
             _ttWalk(map, function(ly) {
                 if (ly.getTooltip && ly.getTooltip()) {
                     var tt = ly.getTooltip();
                     window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
                     ly.unbindTooltip();
                 }
+                // 🔑 CLAVE: desenlazar el POPUP nativo de la capa. Si no, al hacer clic
+                //    sobre un círculo, Leaflet abre el popup de ESA zona (la de arriba) y
+                //    consume el clic — nunca llega el handler apilado. Lo guardamos para
+                //    re-enlazarlo al volver a modo Hover.
+                if (ly.getPopup && ly.getPopup()) {
+                    var pp = ly.getPopup();
+                    window._popStore.push({ layer: ly, content: pp.getContent(), options: pp.options });
+                    ly.unbindPopup();
+                }
                 if (ly.off && ly.on) {
                     try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {}
                 }
+                // 🔑 Enlazar el clic APILADO también A NIVEL DE CAPA: con prefer_canvas
+                //    el clic sobre un círculo lo recibe la capa, no el mapa de fondo.
+                if (ly.feature && ly.feature.properties &&
+                    typeof ly.feature.properties._rad_m !== 'undefined' && ly.on) {
+                    try { ly.on('click', _onLayerClickApilado); } catch(e) {}
+                }
             });
-            // Activar handler de clic apilado
+            // Activar handler de clic apilado también en el mapa (clic en zonas de fondo)
             window._clickHandler = _onMapClickApilado;
             map.on('click', window._clickHandler);
 
@@ -1192,9 +1264,21 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                 window._clickHandler = null;
             }
             map.closePopup();
+            // Quitar los handlers de clic apilado enlazados A NIVEL DE CAPA
+            _ttWalk(map, function(ly) {
+                if (ly.off) { try { ly.off('click', _onLayerClickApilado); } catch(e) {} }
+            });
+            // Re-enlazar los tooltips guardados
             window._ttStore.forEach(function(rec) {
                 try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {}
             });
+            // Re-enlazar los popups nativos guardados
+            if (window._popStore) {
+                window._popStore.forEach(function(rec) {
+                    try { rec.layer.bindPopup(rec.content, rec.options); } catch(e) {}
+                });
+                window._popStore = [];
+            }
             window._ttStore = [];
             window._ttMode = 'hover';
             if (btn) {
