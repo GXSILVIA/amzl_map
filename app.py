@@ -1148,7 +1148,27 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     }
 
     // Núcleo: dado un latlng, buscar TODAS las zonas que lo contienen y abrir popup.
-    function _mostrarApilado(latlng) {
+    // Arma el bloque HTML de info de un CP a partir de las propiedades de su capa.
+    function _fmtCP(pr) {
+        if (!pr) return '';
+        var cp = (pr.CP !== undefined && pr.CP !== null) ? String(pr.CP).replace(/\.0$/, '') : '';
+        var filas = [
+            ['Código Postal', cp],
+            ['Estado', pr.ESTADO_PERTENECE || ''],
+            ['Volumen Total', pr.VOLUMEN != null ? pr.VOLUMEN : 0],
+            ['Aumento de Zona', pr._UPSIDE_OCUPADO != null ? pr._UPSIDE_OCUPADO : 0],
+            ['Libre', pr._UPSIDE_LIBRE != null ? pr._UPSIDE_LIBRE : 0],
+            ['Partners', pr.PARTNERS != null ? pr.PARTNERS : 0],
+            ['Rango', pr._rango_txt || '']
+        ];
+        var out = ['<div style="font-weight:bold;color:#0e7490;margin-bottom:4px;">📮 CP ' + cp + '</div>'];
+        for (var i = 0; i < filas.length; i++) {
+            out.push('<div><b>' + filas[i][0] + ':</b> ' + filas[i][1] + '</div>');
+        }
+        return out.join('');
+    }
+
+    function _mostrarApilado(latlng, cpInfo) {
         var map = window._map || _findMap();
         if (!map) return;
         var encontradas = [];
@@ -1157,10 +1177,25 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             if (isNaN(z.lat) || isNaN(z.lon) || isNaN(z.rad)) continue;
             if (_distMetros(latlng.lat, latlng.lng, z.lat, z.lon) <= z.rad) encontradas.push({z:z});
         }
-        if (encontradas.length === 0) return;
         window._apiladas = encontradas.map(function(x){ return x.z; });
 
-        var html = (encontradas.length === 1) ? encontradas[0].z.tt : _vistaListaZonas();
+        // Si no hay CP ni zonas, no abrir nada.
+        if (!cpInfo && encontradas.length === 0) return;
+
+        // Bloque de zonas (lista selector si hay varias, info directa si hay una).
+        var htmlZonas = '';
+        if (encontradas.length === 1) {
+            htmlZonas = encontradas[0].z.tt;
+        } else if (encontradas.length > 1) {
+            htmlZonas = _vistaListaZonas();
+        }
+
+        // Componer: info del CP arriba, luego zonas (separadas por línea).
+        var partes = [];
+        if (cpInfo) partes.push(cpInfo);
+        if (htmlZonas) partes.push(htmlZonas);
+        var html = partes.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">');
+
         L.popup({ maxWidth: 380, maxHeight: 440, autoPan: true })
             .setLatLng(latlng)
             .setContent('<div id="apiBox" style="max-height:410px;overflow-y:auto;font-size:12px;">' + html + '</div>')
@@ -1168,10 +1203,19 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     }
 
     // Handlers de clic (mapa y capa).
-    function _onMapClick(e) { _mostrarApilado(e.latlng); }
+    function _onMapClick(e) { _mostrarApilado(e.latlng, null); }
     function _onLayerClick(e) {
         if (e && e.originalEvent) { try { L.DomEvent.stopPropagation(e); } catch(ex) {} }
-        _mostrarApilado(e.latlng);
+        // Si la capa clicada es un CP (tiene props.CP), pasar su info al popup apilado.
+        var cpInfo = null;
+        try {
+            var ly = e.target || e.layer;
+            if (ly && ly.feature && ly.feature.properties &&
+                typeof ly.feature.properties.CP !== 'undefined') {
+                cpInfo = _fmtCP(ly.feature.properties);
+            }
+        } catch(ex) {}
+        _mostrarApilado(e.latlng, cpInfo);
     }
 
     // Delegación de eventos para los clics DENTRO del popup (lista / volver).
@@ -1216,8 +1260,11 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                     ly.unbindPopup();
                 }
                 if (ly.off) { try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {} }
-                if (ly.feature && ly.feature.properties &&
-                    typeof ly.feature.properties._rad_m !== 'undefined' && ly.on) {
+                // Enlazar el clic apilado a capas de ZONA (tienen _rad_m) Y a capas de
+                // CP (tienen CP) — así el clic sobre un CP también muestra su info.
+                if (ly.feature && ly.feature.properties && ly.on &&
+                    (typeof ly.feature.properties._rad_m !== 'undefined' ||
+                     typeof ly.feature.properties.CP !== 'undefined')) {
                     try { ly.on('click', _onLayerClick); } catch(e) {}
                 }
             });
