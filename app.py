@@ -866,6 +866,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             style="background:#2563eb; color:white; border:none; border-radius:6px;
             padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer;">
             Buscar</button>
+        <button id="cpClearBtn" onclick="limpiarBusqueda()" title="Quitar resaltado"
+            style="background:#e2e8f0; color:#475569; border:none; border-radius:6px;
+            padding:6px 11px; font-size:13px; font-weight:700; cursor:pointer;">
+            ✕</button>
         <span id="cpResult" style="font-size:12px; max-width:350px;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
     </div>
@@ -914,6 +918,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     window._zonasGeom = [];      // centro+radio+tooltip de cada zona (para apilado)
     window._apiladas = [];       // zonas bajo el último clic (para el selector)
     window._clickHandler = null; // handler de clic en el mapa
+    window._ultimaBusqueda = null; // último término resaltado (para toggle de deselección)
 
     // ═══════════════════════════════════════════════════════════════
     //  INIT: indexa CPs y zonas para el buscador e inyecta el botón de modo.
@@ -1016,16 +1021,35 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if (ly.openTooltip) ly.openTooltip();
     }
 
+    // Quitar el resaltado azul y limpiar el campo/estado del buscador.
+    window.limpiarBusqueda = function() {
+        if (_hl && _os) { try { _hl.setStyle(_os); if (_hl.closeTooltip) _hl.closeTooltip(); } catch(e) {} }
+        _hl = null; _os = null;
+        window._ultimaBusqueda = null;
+        var inp = document.getElementById('cpInput');
+        if (inp) inp.value = '';
+        var rd = document.getElementById('cpResult');
+        if (rd) { rd.innerHTML = ''; rd.style.color = '#64748b'; }
+    };
+
     window.buscarCP = function(valor) {
         var rd = document.getElementById('cpResult');
         var raw = String(valor).trim();
         var cpIdx = window._cpIdx || {};
         var zonaIdx = window._zonaIdx || {};
         if (!raw) {
+            // Campo vacío → limpiar resaltado (deseleccionar).
+            window.limpiarBusqueda();
             if (rd) { rd.innerHTML = 'Escribe un CP o nombre de zona'; rd.style.color = '#64748b'; }
             return;
         }
+        // TOGGLE: si se busca lo MISMO que ya está resaltado, deseleccionar y salir.
+        if (window._ultimaBusqueda && window._ultimaBusqueda === raw.toUpperCase() && _hl) {
+            window.limpiarBusqueda();
+            return;
+        }
         if (_hl && _os) { try { _hl.setStyle(_os); } catch(e) {} }
+        window._ultimaBusqueda = raw.toUpperCase();
 
         var esCP = /^[0-9]+(\.0)?$/.test(raw);
         if (esCP) {
@@ -1078,12 +1102,18 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     // ═══════════════════════════════════════════════════════════════
     function _recolectarZonas(map) {
         window._zonasGeom = [];
+        var _vistos = {};   // dedup: el _walk visita cada feature varias veces (capa + sub-capas + _layers)
         _walk(map, function(ly) {
             try {
                 if (ly.feature && ly.feature.properties &&
                     typeof ly.feature.properties._clat !== 'undefined' &&
                     typeof ly.feature.properties._rad_m !== 'undefined') {
                     var p = ly.feature.properties;
+                    // Clave única por zona = nombre + centro. Evita contar la misma zona
+                    // múltiples veces (lo que inflaba el conteo a 48 y repetía nombres).
+                    var _key = String(p.NOMBRE || '') + '|' + p._clat + '|' + p._clon;
+                    if (_vistos[_key]) return;
+                    _vistos[_key] = true;
                     window._zonasGeom.push({
                         nom: p.NOMBRE || '',
                         lat: parseFloat(p._clat),
