@@ -591,8 +591,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         # ⚠️ Tooltip de CPs: se quitaron '_UPSIDE_ZONAS' (Aumento por Zona), '_VOL_750M'
         #    (Aumento disp. en 750m) y '_PROSPECTAR' (¿Prospectar?) a pedido de la usuaria.
         #    Esos datos de prospección ya se muestran en los círculos verdes del mapa.
-        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', '_UPSIDE_OCUPADO', '_UPSIDE_LIBRE', 'PARTNERS', '_rango_txt']
-        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Total:', 'Aumento de Zona:', 'Libre:', 'Partners:', 'Rango:']
+        _campos_cp = ['CP', 'ESTADO_PERTENECE', 'VOLUMEN', 'PARTNERS', '_rango_txt']
+        _alias_cp = ['Código Postal:', 'Estado:', 'Volumen Disponible:', 'Partners:', 'Rango:']
 
         # ⚡ FIX 2: UNA sola capa "CP" con color + tooltip (hover) + popup (click).
         fg_cp = folium.FeatureGroup(name="CP", show=True)
@@ -647,24 +647,13 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         nivel_traslape = info_traslape.get('nivel', '⚪ Sin datos')
         desglose_traslape = info_traslape.get('desglose', [])
 
-        info_upside = upside_zona_lookup.get(r['NOMBRE'], {})
-        upside_total = info_upside.get('total', 0)
-        upside_por_cp = info_upside.get('por_cp', [])
-
         tt_lines = [
             f"<b>Zona Operativa: {r['NOMBRE']}</b>",
             f"Rango: {r_text}",
             f"Volumen: {r['VOLUMEN']}",
             f"Perímetro Ope: {r['RADIO']}m",
-            f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>",
-            f"<b>📦 Aumento Total: {upside_total} pqts</b>"
+            f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>"
         ]
-        if upside_por_cp:
-            tt_lines.append("── Aumento por CP ──")
-            for d in upside_por_cp[:15]:
-                tt_lines.append(f"&nbsp;&nbsp;• CP {d['CP']} ({d['pct']}%): {d['upside']} pqts")
-            if len(upside_por_cp) > 15:
-                tt_lines.append(f"&nbsp;&nbsp;… (+{len(upside_por_cp) - 15} CPs más)")
         if desglose_traslape:
             tt_lines.append("── Detalle Traslape ──")
             for d in desglose_traslape:
@@ -1155,9 +1144,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         var filas = [
             ['Código Postal', cp],
             ['Estado', pr.ESTADO_PERTENECE || ''],
-            ['Volumen Total', pr.VOLUMEN != null ? pr.VOLUMEN : 0],
-            ['Aumento de Zona', pr._UPSIDE_OCUPADO != null ? pr._UPSIDE_OCUPADO : 0],
-            ['Libre', pr._UPSIDE_LIBRE != null ? pr._UPSIDE_LIBRE : 0],
+            ['Volumen Disponible', pr.VOLUMEN != null ? pr.VOLUMEN : 0],
             ['Partners', pr.PARTNERS != null ? pr.PARTNERS : 0],
             ['Rango', pr._rango_txt || '']
         ];
