@@ -616,8 +616,10 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     upside_zona_lookup = res.get('upside_por_zona', {})
 
     # ⚡ OPTIMIZACIÓN: precalcular "CPs bajo cada círculo" con sjoin vectorizado
+    #    y también el % del ÁREA de cada CP que el círculo cubre (overlay en métrico).
     _gdf_circ = res['gdf_circles_wgs84']
     _cps_por_circulo = {}
+    _cps_pct_por_circulo = {}  # _circ_id -> {cp_str: pct_cubierto_del_cp}
     try:
         _circ_idx = _gdf_circ.reset_index(drop=True).copy()
         _circ_idx['_circ_id'] = _circ_idx.index
@@ -626,8 +628,22 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         for _cid, _grp in _join.groupby('_circ_id'):
             _cps = sorted({str(x) for x in _grp['CP'].dropna().tolist()})
             _cps_por_circulo[_cid] = _cps
+        # % de cobertura círculo∩CP = área(intersección) / área(CP) × 100 (en métrico Albers)
+        try:
+            _circ_m = _circ_idx[['_circ_id', 'geometry']].to_crs("EPSG:6372")
+            _cob_m = gdf_cobertura[['CP', 'geometry']].to_crs("EPSG:6372").copy()
+            _cob_m['_acp'] = _cob_m.geometry.area
+            _ovz = gpd.overlay(_circ_m, _cob_m, how='intersection', keep_geom_type=False)
+            if not _ovz.empty:
+                _ovz['_ai'] = _ovz.geometry.area
+                _ovz['_pctcp'] = (_ovz['_ai'] / _ovz['_acp'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
+                for _cid, _cpv, _pctv in zip(_ovz['_circ_id'].tolist(), _ovz['CP'].astype(str).tolist(), _ovz['_pctcp'].tolist()):
+                    _cps_pct_por_circulo.setdefault(_cid, {})[_cpv] = round(float(_pctv))
+        except Exception:
+            _cps_pct_por_circulo = {}
     except Exception:
         _cps_por_circulo = {}
+        _cps_pct_por_circulo = {}
 
     # Construir UN SOLO GeoJSON FeatureCollection con todos los círculos.
     _zona_features = []
@@ -640,7 +656,14 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             cps_bajo_circulo = [str(cp_row['CP']) for _, cp_row in gdf_cobertura.iterrows()
                                 if geom_circulo.intersects(cp_row['geometry'])]
             cps_unicos = sorted(set(cps_bajo_circulo))
-        txt_cps_atrapados = ", ".join(cps_unicos) if cps_unicos else "Ninguno"
+        # % que el círculo cubre de cada CP (dict). Para el tooltip y el resaltado JS.
+        _pct_cps = _cps_pct_por_circulo.get(_pos, {})
+        if cps_unicos:
+            txt_cps_atrapados = ", ".join(
+                [f"{c} ({_pct_cps.get(c, 0)}%)" for c in cps_unicos]
+            )
+        else:
+            txt_cps_atrapados = "Ninguno"
 
         info_traslape = traslape_zona_lookup.get(r['NOMBRE'], {})
         pct_traslape = info_traslape.get('pct', 0.0)
@@ -650,8 +673,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         tt_lines = [
             f"<b>Zona Operativa: {r['NOMBRE']}</b>",
             f"Rango: {r_text}",
-            f"Volumen: {r['VOLUMEN']}",
-            f"Perímetro Ope: {r['RADIO']}m",
+            f"Volumen Promedio: {r['VOLUMEN']}",
+            f"Radio: {r['RADIO']}m",
             f"<b>Traslape: {pct_traslape}% — {nivel_traslape}</b>"
         ]
         if desglose_traslape:
@@ -666,6 +689,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             "type": "Feature",
             "properties": {
                 "NOMBRE": str(r['NOMBRE']),
+                # 🔑 id único de la zona (su posición) → el JS lo usa para resaltar
+                #    en azul la zona elegida desde la lista de apiladas.
+                "_zid": int(_pos),
                 "_color": color_hex,
                 "_tt": tt_c,
                 # 📍 Centro GPS real + radio en metros → prueba punto-en-círculo en JS
@@ -839,6 +865,21 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
           display:inline-block; margin-bottom:8px; padding:5px 10px; background:#2563eb;
           color:white; border-radius:6px; cursor:pointer; font-weight:600; font-size:12px;
       }
+      /* 📌 Panel FIJO inferior-izquierdo: muestra info del CP/zona seleccionado */
+      #infoPanel {
+          position:fixed; left:12px; bottom:12px; z-index:9998;
+          width:320px; max-height:46vh; overflow-y:auto;
+          background:rgba(255,255,255,0.55);
+          -webkit-backdrop-filter:blur(5px); backdrop-filter:blur(5px);
+          border:1px solid rgba(203,213,225,0.6); border-radius:12px;
+          box-shadow:0 6px 22px rgba(0,0,0,0.20); padding:12px 14px;
+          font-family:sans-serif; font-size:12px; color:#1e293b; display:none;
+      }
+      #infoPanel .ip-head { display:flex; justify-content:space-between; align-items:center;
+          margin:-2px 0 8px 0; }
+      #infoPanel .ip-close { cursor:pointer; background:#e2e8f0; color:#475569; border:none;
+          border-radius:6px; padding:2px 8px; font-weight:700; font-size:13px; }
+      #infoPanel .ip-close:hover { background:#cbd5e1; }
     </style>
     <div id="cpSearchBar" style="
         position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
@@ -861,6 +902,15 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             ✕</button>
         <span id="cpResult" style="font-size:12px; max-width:350px;
             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+    </div>
+
+    <!-- 📌 Panel fijo inferior-izquierdo (info de selección individual / apilada) -->
+    <div id="infoPanel">
+        <div class="ip-head">
+            <div style="font-weight:bold;color:#2563eb;">ℹ️ Información</div>
+            <button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar">✕</button>
+        </div>
+        <div id="infoPanelBody"></div>
     </div>
 
     <script>
@@ -1091,6 +1141,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     // ═══════════════════════════════════════════════════════════════
     function _recolectarZonas(map) {
         window._zonasGeom = [];
+        window._zonaLayerByZid = {};   // _zid -> capa Leaflet (para resaltar en azul)
         var _vistos = {};   // dedup: el _walk visita cada feature varias veces (capa + sub-capas + _layers)
         _walk(map, function(ly) {
             try {
@@ -1098,6 +1149,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                     typeof ly.feature.properties._clat !== 'undefined' &&
                     typeof ly.feature.properties._rad_m !== 'undefined') {
                     var p = ly.feature.properties;
+                    // Guardar la capa por su _zid para poder resaltarla luego.
+                    if (typeof p._zid !== 'undefined') window._zonaLayerByZid[p._zid] = ly;
                     // Clave única por zona = nombre + centro. Evita contar la misma zona
                     // múltiples veces (lo que inflaba el conteo a 48 y repetía nombres).
                     var _key = String(p.NOMBRE || '') + '|' + p._clat + '|' + p._clon;
@@ -1105,6 +1158,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
                     _vistos[_key] = true;
                     window._zonasGeom.push({
                         nom: p.NOMBRE || '',
+                        zid: (typeof p._zid !== 'undefined') ? p._zid : null,
                         lat: parseFloat(p._clat),
                         lon: parseFloat(p._clon),
                         rad: parseFloat(p._rad_m),
@@ -1155,6 +1209,28 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         return out.join('');
     }
 
+    // ───────── RESALTADO en AZUL de una zona por su _zid ─────────
+    var _zonaHL = null, _zonaHL_os = null;
+    function _quitarResaltadoZona() {
+        if (_zonaHL && _zonaHL_os) { try { _zonaHL.setStyle(_zonaHL_os); } catch(e) {} }
+        _zonaHL = null; _zonaHL_os = null;
+    }
+    function _resaltarZonaPorZid(zid) {
+        var map = window._map || _findMap();
+        var ly = (window._zonaLayerByZid || {})[zid];
+        _quitarResaltadoZona();
+        if (!ly) return;
+        _zonaHL_os = {
+            fillColor: ly.options.fillColor || '#9e9e9e',
+            fillOpacity: (typeof ly.options.fillOpacity !== 'undefined') ? ly.options.fillOpacity : 0.45,
+            color: ly.options.color || 'black',
+            weight: ly.options.weight || 1
+        };
+        try { ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 }); } catch(e) {}
+        _zonaHL = ly;
+        if (ly.getBounds && map) { try { map.fitBounds(ly.getBounds(), {padding:[60,60], maxZoom:14}); } catch(e) {} }
+    }
+
     function _mostrarApilado(latlng, cpInfo) {
         var map = window._map || _findMap();
         if (!map) return;
@@ -1166,15 +1242,24 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         }
         window._apiladas = encontradas.map(function(x){ return x.z; });
 
-        // Si no hay CP ni zonas, no abrir nada.
+        // Si no hay CP ni zonas, no mostrar nada.
         if (!cpInfo && encontradas.length === 0) return;
+
+        // Guardar el bloque del CP para recomponer el panel al navegar lista/detalle.
+        window._cpInfoActual = cpInfo || '';
 
         // Bloque de zonas (lista selector si hay varias, info directa si hay una).
         var htmlZonas = '';
         if (encontradas.length === 1) {
+            // Una sola zona → mostrar su info y resaltarla en azul directamente.
             htmlZonas = encontradas[0].z.tt;
+            if (encontradas[0].z.zid != null) _resaltarZonaPorZid(encontradas[0].z.zid);
         } else if (encontradas.length > 1) {
+            // Varias zonas → lista selector (al elegir se resalta y muestra info).
             htmlZonas = _vistaListaZonas();
+            _quitarResaltadoZona();
+        } else {
+            _quitarResaltadoZona();
         }
 
         // Componer: info del CP arriba, luego zonas (separadas por línea).
@@ -1183,10 +1268,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if (htmlZonas) partes.push(htmlZonas);
         var html = partes.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">');
 
-        L.popup({ maxWidth: 380, maxHeight: 440, autoPan: true })
-            .setLatLng(latlng)
-            .setContent('<div id="apiBox" style="max-height:410px;overflow-y:auto;font-size:12px;">' + html + '</div>')
-            .openOn(map);
+        // 📌 Mostrar en el PANEL FIJO (no en globo flotante).
+        _panelMostrar('<div id="apiBox">' + html + '</div>');
     }
 
     // Handlers de clic (mapa y capa).
@@ -1205,19 +1288,29 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         _mostrarApilado(e.latlng, cpInfo);
     }
 
-    // Delegación de eventos para los clics DENTRO del popup (lista / volver).
+    // Delegación de eventos para los clics DENTRO del panel (lista / volver).
+    //  - Elegir una zona de la lista → resaltarla en azul Y mostrar su info.
+    //  - "Volver" → regresar a la lista y quitar el resaltado.
     document.addEventListener('click', function(ev) {
         var t = ev.target;
         while (t && t !== document) {
             if (t.classList && t.classList.contains('api-zona-item')) {
                 var idx = parseInt(t.getAttribute('data-idx'), 10);
-                var box = document.getElementById('apiBox');
-                if (box) box.innerHTML = _vistaDetalle(idx);
+                var arr = window._apiladas || [];
+                if (arr[idx] && arr[idx].zid != null) _resaltarZonaPorZid(arr[idx].zid);
+                var det = _vistaDetalle(idx);
+                var pp = [];
+                if (window._cpInfoActual) pp.push(window._cpInfoActual);
+                pp.push(det);
+                _panelMostrar('<div id="apiBox">' + pp.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">') + '</div>');
                 return;
             }
             if (t.getAttribute && t.getAttribute('data-volver') === '1') {
-                var box2 = document.getElementById('apiBox');
-                if (box2) box2.innerHTML = _vistaListaZonas();
+                _quitarResaltadoZona();
+                var pp2 = [];
+                if (window._cpInfoActual) pp2.push(window._cpInfoActual);
+                pp2.push(_vistaListaZonas());
+                _panelMostrar('<div id="apiBox">' + pp2.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">') + '</div>');
                 return;
             }
             t = t.parentNode;
@@ -1264,6 +1357,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             // → HOVER: re-enlazar tooltips y popups; quitar clic apilado.
             if (window._clickHandler) { try { map.off('click', window._clickHandler); } catch(e) {} window._clickHandler = null; }
             try { map.closePopup(); } catch(e) {}
+            // Cerrar el panel fijo y quitar resaltado de zona al volver a Hover.
+            try { if (typeof cerrarInfoPanel === 'function') cerrarInfoPanel(); } catch(e) {}
             _walk(map, function(ly) { if (ly.off) { try { ly.off('click', _onLayerClick); } catch(e) {} } });
             window._ttStore.forEach(function(rec) { try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {} });
             window._popStore.forEach(function(rec) { try { rec.layer.bindPopup(rec.content, rec.options); } catch(e) {} });
@@ -1336,6 +1431,33 @@ if st.session_state["authentication_status"]:
 
                 df_poly_user = pd.read_excel(f_poligonos)
                 df_poly_user.columns = df_poly_user.columns.str.upper().str.strip()
+                # ═══════════════════════════════════════════════════════════
+                # 🔧 FIX KeyError 'CP': detectar automáticamente la columna de
+                #    Código Postal. El archivo puede traerla con otro nombre
+                #    (CÓDIGO POSTAL, CODIGO_POSTAL, C.P., CODIGOPOSTAL, ZIP, etc.)
+                #    o con espacios/acentos. Se busca por candidatos y, si no,
+                #    por coincidencia parcial. Luego se renombra a 'CP'.
+                # ═══════════════════════════════════════════════════════════
+                if 'CP' not in df_poly_user.columns:
+                    _cands_cp = ['CP', 'CODIGO POSTAL', 'CÓDIGO POSTAL', 'CODIGO_POSTAL',
+                                 'CÓDIGO_POSTAL', 'CODIGOPOSTAL', 'CODIGO', 'CÓDIGO',
+                                 'C.P.', 'C.P', 'CP.', 'ZIP', 'ZIPCODE', 'D_CODIGO', 'D_CP']
+                    _col_cp = next((c for c in _cands_cp if c in df_poly_user.columns), None)
+                    # Fallback: cualquier columna cuyo nombre contenga 'CP', 'POSTAL' o 'CODIGO'
+                    if _col_cp is None:
+                        _col_cp = next(
+                            (c for c in df_poly_user.columns
+                             if ('CP' in str(c)) or ('POSTAL' in str(c)) or ('CODIGO' in str(c)) or ('CÓDIGO' in str(c))),
+                            None
+                        )
+                    if _col_cp is None:
+                        st.error(
+                            "❌ El archivo de Cobertura no tiene una columna de Código Postal (CP). "
+                            "Columnas encontradas: " + ", ".join(map(str, df_poly_user.columns)) +
+                            ". Renombra la columna del código postal a 'CP' y vuelve a subir el archivo."
+                        )
+                        st.stop()
+                    df_poly_user = df_poly_user.rename(columns={_col_cp: 'CP'})
                 df_poly_user['CP'] = df_poly_user['CP'].apply(normalizar_cp)
 
                 # ═══════════════════════════════════════════════════════════
