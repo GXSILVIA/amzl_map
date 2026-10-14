@@ -1215,6 +1215,48 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         if (_zonaHL && _zonaHL_os) { try { _zonaHL.setStyle(_zonaHL_os); } catch(e) {} }
         _zonaHL = null; _zonaHL_os = null;
     }
+
+    // ───────── PANEL FIJO inferior-izquierdo (robusto) ─────────
+    //  Garantiza que el panel exista en el DOM; si no, lo crea dinámicamente.
+    function _ensureInfoPanel() {
+        var panel = document.getElementById('infoPanel');
+        if (panel) return panel;
+        panel = document.createElement('div');
+        panel.id = 'infoPanel';
+        panel.style.cssText =
+            'position:fixed; left:12px; bottom:12px; z-index:99999;' +
+            'width:320px; max-height:46vh; overflow-y:auto;' +
+            'background:rgba(255,255,255,0.55);' +
+            '-webkit-backdrop-filter:blur(5px); backdrop-filter:blur(5px);' +
+            'border:1px solid rgba(203,213,225,0.6); border-radius:12px;' +
+            'box-shadow:0 6px 22px rgba(0,0,0,0.20); padding:12px 14px;' +
+            'font-family:sans-serif; font-size:12px; color:#1e293b; display:none;';
+        panel.innerHTML =
+            '<div class="ip-head" style="display:flex;justify-content:space-between;align-items:center;margin:-2px 0 8px 0;">' +
+            '<div style="font-weight:bold;color:#2563eb;">ℹ️ Información</div>' +
+            '<button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar" ' +
+            'style="cursor:pointer;background:#e2e8f0;color:#475569;border:none;border-radius:6px;padding:2px 8px;font-weight:700;font-size:13px;">✕</button>' +
+            '</div><div id="infoPanelBody"></div>';
+        document.body.appendChild(panel);
+        return panel;
+    }
+
+    // Muestra el HTML dado en el panel fijo (y lo hace visible).
+    function _panelMostrar(html) {
+        var panel = _ensureInfoPanel();
+        var body  = document.getElementById('infoPanelBody');
+        if (!panel || !body) return;
+        body.innerHTML = html;
+        panel.style.display = 'block';
+    }
+
+    // Cerrar el panel fijo y quitar cualquier resaltado azul de zona.
+    window.cerrarInfoPanel = function() {
+        var panel = document.getElementById('infoPanel');
+        if (panel) panel.style.display = 'none';
+        try { _quitarResaltadoZona(); } catch(e) {}
+    };
+
     function _resaltarZonaPorZid(zid) {
         var map = window._map || _findMap();
         var ly = (window._zonaLayerByZid || {})[zid];
