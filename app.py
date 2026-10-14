@@ -140,26 +140,43 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
         traslape_por_zona: {nombre_zona: {"pct": float, "nivel": str, "nodo": str, "desglose": list}}
         resultados_nodo: [{"Nodo": str, "% Traslape": str, "Nivel": str}]
     """
-    # 1. Asignar cada círculo a su nodo por intersección con CPs
+    # 1. Asignar cada círculo a su nodo.
+    #    ✅ FUENTE DE VERDAD: la columna NODO del 2º archivo (asignación directa de
+    #       cada zona a su nodo). Antes se re-asignaba por intersección geométrica del
+    #       centro con los CPs del nodo, pero si el centro de una zona NO caía sobre
+    #       ningún CP del 1er archivo (calle/hueco/CP ausente), la zona quedaba SIN
+    #       nodo → "Sin datos" y traslape 0% aunque tuviera vecinos encima
+    #       (caso BRYAN ALEXANDER LUNA OLIVEROS, nodo DVR2). Usar la columna NODO
+    #       evita por completo ese problema.
+    #    ↩️ Fallback: si el 2º archivo NO trae NODO (formato antiguo), se usa el
+    #       método geométrico anterior.
     circulos_con_nodo = []
-    for nodo in nodos_unicos:
-        cps_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
-        if cps_nodo.empty:
-            continue
-        union_cps_nodo = unary_union(cps_nodo['geometry'].buffer(0))
-        for idx, row in gdf_circles_wgs84_df.iterrows():
-            pt_check = Point(row['LONGITUD'], row['LATITUD'])
-            # Verificar si el centro del círculo cae cerca de los CPs de este nodo
-            # (usar la geometría proyectada del círculo para intersección)
-            if row['geometry'].intersects(union_cps_nodo):
-                circulos_con_nodo.append({
-                    'NOM': row['NOMBRE'],
-                    'LAT': row['LATITUD'],
-                    'LON': row['LONGITUD'],
-                    'RAD': row['RADIO'],
-                    'VOL': row.get('VOLUMEN', 0),
-                    'nodo': nodo
-                })
+    if 'NODO' in gdf_circles_wgs84_df.columns:
+        for _, row in gdf_circles_wgs84_df.iterrows():
+            _nod = str(row['NODO']).strip().upper()
+            if not _nod or _nod in ('NAN', 'NONE', ''):
+                continue
+            circulos_con_nodo.append({
+                'NOM': row['NOMBRE'],
+                'LAT': row['LATITUD'],
+                'LON': row['LONGITUD'],
+                'RAD': row['RADIO'],
+                'VOL': row.get('VOLUMEN', 0),
+                'nodo': _nod
+            })
+    else:
+        # Fallback geométrico (archivo antiguo sin columna NODO)
+        for nodo in nodos_unicos:
+            cps_nodo = gdf_cobertura_m[gdf_cobertura_m['ZONA'] == nodo]
+            if cps_nodo.empty:
+                continue
+            union_cps_nodo = unary_union(cps_nodo['geometry'].buffer(0))
+            for idx, row in gdf_circles_wgs84_df.iterrows():
+                if row['geometry'].intersects(union_cps_nodo):
+                    circulos_con_nodo.append({
+                        'NOM': row['NOMBRE'], 'LAT': row['LATITUD'], 'LON': row['LONGITUD'],
+                        'RAD': row['RADIO'], 'VOL': row.get('VOLUMEN', 0), 'nodo': nodo
+                    })
 
     # 2. Calcular traslape por zona usando Monte Carlo (igual que Sistema Pro)
     np.random.seed(42)  # Semilla fija para reproducibilidad
@@ -191,15 +208,17 @@ def calcular_traslape_por_zona(gdf_cobertura_m, gdf_circles_wgs84_df, nodos_unic
     # 3. Agregar por nodo: promedio de traslape de sus zonas
     nodo_traslapes = {}
     for nombre, datos in traslape_por_zona.items():
-        nodo = datos['nodo']
+        nodo = str(datos['nodo']).strip().upper()
         if nodo not in nodo_traslapes:
             nodo_traslapes[nodo] = []
         nodo_traslapes[nodo].append(datos['pct'])
 
     resultados_nodo = []
     for nodo in nodos_unicos:
-        if nodo in nodo_traslapes and nodo_traslapes[nodo]:
-            pct_promedio = round(sum(nodo_traslapes[nodo]) / len(nodo_traslapes[nodo]), 2)
+        # Comparar normalizado (upper) — el nodo del 2º archivo viene en MAYÚSCULAS
+        _nk = str(nodo).strip().upper()
+        if _nk in nodo_traslapes and nodo_traslapes[_nk]:
+            pct_promedio = round(sum(nodo_traslapes[_nk]) / len(nodo_traslapes[_nk]), 2)
         else:
             pct_promedio = 0.0
         resultados_nodo.append({
@@ -883,7 +902,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
       }
       /* 📌 Panel FIJO inferior-izquierdo: muestra info del CP/zona seleccionado */
       #infoPanel {
-          position:fixed; left:12px; bottom:12px; z-index:9998;
+          position:fixed; left:12px; bottom:85px; z-index:9998;
           width:320px; max-height:46vh; overflow-y:auto;
           background:rgba(255,255,255,0.55);
           -webkit-backdrop-filter:blur(5px); backdrop-filter:blur(5px);
@@ -1071,6 +1090,8 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             weight: ly.options.weight || 1.5
         };
         ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 });
+        // 🔝 Traer la capa resaltada al frente para que su contorno no quede tapado.
+        try { if (ly.bringToFront) ly.bringToFront(); } catch(e) {}
         _hl = ly;
         if (ly.getBounds && map) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
         if (ly.openTooltip) ly.openTooltip();
@@ -1240,7 +1261,7 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
         panel = document.createElement('div');
         panel.id = 'infoPanel';
         panel.style.cssText =
-            'position:fixed; left:12px; bottom:12px; z-index:99999;' +
+            'position:fixed; left:12px; bottom:85px; z-index:99999;' +
             'width:320px; max-height:46vh; overflow-y:auto;' +
             'background:rgba(255,255,255,0.55);' +
             '-webkit-backdrop-filter:blur(5px); backdrop-filter:blur(5px);' +
@@ -1285,6 +1306,9 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             weight: ly.options.weight || 1
         };
         try { ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 }); } catch(e) {}
+        // 🔝 Traer la zona resaltada al frente: las zonas encimadas tapaban su
+        //    contorno y no se veía hasta dónde llega. bringToFront la pinta arriba.
+        try { if (ly.bringToFront) ly.bringToFront(); } catch(e) {}
         _zonaHL = ly;
         if (ly.getBounds && map) { try { map.fitBounds(ly.getBounds(), {padding:[60,60], maxZoom:14}); } catch(e) {} }
     }
