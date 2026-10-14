@@ -621,26 +621,41 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
     _cps_por_circulo = {}
     _cps_pct_por_circulo = {}  # _circ_id -> {cp_str: pct_cubierto_del_cp}
     try:
+        # Preparar SOLO [_circ_id, geometry] en métrico (Albers) para áreas precisas.
         _circ_idx = _gdf_circ.reset_index(drop=True).copy()
         _circ_idx['_circ_id'] = _circ_idx.index
-        _cob_small = gdf_cobertura[['CP', 'geometry']].to_crs("EPSG:4326") if gdf_cobertura.crs != "EPSG:4326" else gdf_cobertura[['CP', 'geometry']]
-        _join = gpd.sjoin(_circ_idx[['_circ_id', 'geometry']], _cob_small, how='left', predicate='intersects')
+        _circ_m = _circ_idx[['_circ_id', 'geometry']].to_crs("EPSG:6372").copy()
+        _circ_m['geometry'] = _circ_m.geometry.buffer(0)  # reparar
+        # CPs en métrico, con su área precalculada.
+        _cob_m = gdf_cobertura[['CP', 'geometry']].to_crs("EPSG:6372").copy()
+        _cob_m['CP'] = _cob_m['CP'].astype(str)
+        _cob_m['geometry'] = _cob_m.geometry.buffer(0)   # reparar
+        _cob_m['_acp'] = _cob_m.geometry.area
+        # sjoin para saber qué CPs toca cada círculo (lista de CPs por círculo).
+        _join = gpd.sjoin(_circ_m[['_circ_id', 'geometry']], _cob_m[['CP', 'geometry']],
+                          how='left', predicate='intersects')
         for _cid, _grp in _join.groupby('_circ_id'):
             _cps = sorted({str(x) for x in _grp['CP'].dropna().tolist()})
-            _cps_por_circulo[_cid] = _cps
-        # % de cobertura círculo∩CP = área(intersección) / área(CP) × 100 (en métrico Albers)
-        try:
-            _circ_m = _circ_idx[['_circ_id', 'geometry']].to_crs("EPSG:6372")
-            _cob_m = gdf_cobertura[['CP', 'geometry']].to_crs("EPSG:6372").copy()
-            _cob_m['_acp'] = _cob_m.geometry.area
-            _ovz = gpd.overlay(_circ_m, _cob_m, how='intersection', keep_geom_type=False)
-            if not _ovz.empty:
-                _ovz['_ai'] = _ovz.geometry.area
-                _ovz['_pctcp'] = (_ovz['_ai'] / _ovz['_acp'].replace(0, np.nan) * 100).fillna(0).clip(upper=100)
-                for _cid, _cpv, _pctv in zip(_ovz['_circ_id'].tolist(), _ovz['CP'].astype(str).tolist(), _ovz['_pctcp'].tolist()):
-                    _cps_pct_por_circulo.setdefault(_cid, {})[_cpv] = round(float(_pctv))
-        except Exception:
-            _cps_pct_por_circulo = {}
+            _cps_por_circulo[int(_cid)] = _cps
+        # % de cobertura círculo∩CP = área(intersección) / área(CP) × 100.
+        #   Lookups de geometría/área del CP por su clave string.
+        _cpgeom = dict(zip(_cob_m['CP'].tolist(), _cob_m.geometry.tolist()))
+        _cparea = dict(zip(_cob_m['CP'].tolist(), _cob_m['_acp'].tolist()))
+        _circ_geom = dict(zip(_circ_m['_circ_id'].tolist(), _circ_m.geometry.tolist()))
+        for _cid, _cps in _cps_por_circulo.items():
+            _gc = _circ_geom.get(_cid)
+            if _gc is None or _gc.is_empty:
+                continue
+            for _cp in _cps:
+                _gcp = _cpgeom.get(_cp); _acp = _cparea.get(_cp, 0.0)
+                if _gcp is None or not _acp or _acp <= 0:
+                    continue
+                try:
+                    _ai = _gc.intersection(_gcp).area
+                    _pctv = min(100.0, (_ai / _acp) * 100.0)
+                    _cps_pct_por_circulo.setdefault(_cid, {})[_cp] = round(_pctv)
+                except Exception:
+                    continue
     except Exception:
         _cps_por_circulo = {}
         _cps_pct_por_circulo = {}
@@ -658,10 +673,11 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
             cps_unicos = sorted(set(cps_bajo_circulo))
         # % que el círculo cubre de cada CP (dict). Para el tooltip y el resaltado JS.
         _pct_cps = _cps_pct_por_circulo.get(_pos, {})
-        if cps_unicos:
-            txt_cps_atrapados = ", ".join(
-                [f"{c} ({_pct_cps.get(c, 0)}%)" for c in cps_unicos]
-            )
+        # 🚫 Omitir CPs cuyo % de cobertura por la zona sea 0% (no aportan).
+        _cps_con_pct = [(c, _pct_cps.get(c, 0)) for c in cps_unicos] if cps_unicos else []
+        _cps_con_pct = [(c, p) for (c, p) in _cps_con_pct if p and p > 0]
+        if _cps_con_pct:
+            txt_cps_atrapados = ", ".join([f"{c} ({p}%)" for c, p in _cps_con_pct])
         else:
             txt_cps_atrapados = "Ninguno"
 
@@ -1727,14 +1743,14 @@ if st.session_state["authentication_status"]:
                 union_total_partners_m = unary_union(gdf_circles_m_corr['geometry']).buffer(0) if not gdf_circles_m_corr.empty else None
 
                 # ═══════════════════════════════════════════════════════════════
-                # 📦 CÁLCULO DE AUMENTO: paquetes capturables por zona sobre cada CP
-                #    (Monte Carlo VECTORIZADO por CP con reparto 1/k en zonas traslapadas)
-                #    Se usa gdf_cobertura_m (Albers) para áreas precisas.
+                # 📦 AUMENTO: cálculo DESACTIVADO (ya no se usa en la app).
+                #    Se dejan los lookups vacíos para no romper referencias residuales
+                #    (tooltips/popups que aún leen estas claves devolverán 0/vacío).
                 # ═══════════════════════════════════════════════════════════════
-                _prog(35, "📦 Calculando Aumento por zona (Monte Carlo vectorizado)...")
-                upside_por_zona, upside_por_cp_zona, upside_ocupado_por_cp = calcular_upside_por_zona(
-                    gdf_cobertura_m, gdf_circles_m_corr.to_crs(CRS_AREAS), nodos_unicos_maestro
-                )
+                _prog(35, "🔗 Preparando cruce de zonas y CPs...")
+                upside_por_zona = {}
+                upside_por_cp_zona = {}
+                upside_ocupado_por_cp = {}
 
                 # ═══════════════════════════════════════════════════════════════
                 # ⚡ OPTIMIZACIÓN 8K CPs × 3K zonas — PRECÁLCULO VECTORIZADO
@@ -1919,17 +1935,17 @@ if st.session_state["authentication_status"]:
                                 continue
                             cps_actuales_zona_con_pct = []
                             for _cp_str, _pct in _pares:
-                                up_val = upside_por_cp_zona.get((_zona_nom, _cp_str), 0)
+                                # 🚫 Omitir CPs con 0% de cobertura por la zona.
+                                if round(_pct) <= 0:
+                                    continue
                                 cps_actuales_zona_con_pct.append(
-                                    f"{_cp_str} ({round(_pct)}% → Aumento {up_val})"
+                                    f"{_cp_str} ({round(_pct)}%)"
                                 )
                             if cps_actuales_zona_con_pct:
-                                up_total_zona = upside_por_zona.get(_zona_nom, {}).get('total', 0)
                                 reporte_cp_por_zona.append({
                                     "Nodo": nodo_iter,
                                     "Zona": _zona_nom,
-                                    "CPs Cubiertos (% → Aumento pqts)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
-                                    "Aumento Total (pqts)": up_total_zona
+                                    "CPs Cubiertos (%)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct))))
                                 })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
@@ -2090,27 +2106,8 @@ if st.session_state["authentication_status"]:
                         lambda z: traslape_por_zona[z]['nivel'] if z in traslape_por_zona else "⚪ Sin datos"
                     )
 
-                # ═══════════════════════════════════════════════════════════════
-                # 📦 Agregar columna "Aumento Total (pqts)" al desglose por nodo
-                #    (suma del aumento de todas las zonas asignadas a ese nodo)
-                # ═══════════════════════════════════════════════════════════════
-                # Mapear cada zona a su nodo vía traslape_por_zona
-                upside_por_nodo = {}
-                for zona_nom, info_tz in traslape_por_zona.items():
-                    nodo_de_zona = info_tz.get('nodo')
-                    up_z = upside_por_zona.get(zona_nom, {}).get('total', 0)
-                    if nodo_de_zona:
-                        upside_por_nodo[nodo_de_zona] = upside_por_nodo.get(nodo_de_zona, 0) + up_z
-                if not df_desglose.empty:
-                    df_desglose['Aumento Total (pqts)'] = df_desglose['Nodo'].map(
-                        lambda n: int(upside_por_nodo.get(n, 0))
-                    )
-
-                # Construir df de detalle de zonas con Aumento Total por zona
+                # Construir df de detalle de zonas (sin columna de Aumento)
                 df_zonas_detalles_base = gdf_circles_m[['NOMBRE', 'RADIO', 'VOLUMEN', 'AREA_KM2', 'Territorio MES', 'ESTADO']].copy()
-                df_zonas_detalles_base['Aumento Total (pqts)'] = df_zonas_detalles_base['NOMBRE'].map(
-                    lambda n: int(upside_por_zona.get(n, {}).get('total', 0))
-                )
                 df_zonas_detalles_base = df_zonas_detalles_base.rename(columns={
                     'NOMBRE': 'Nombre de la Zona',
                     'RADIO': 'Perímetro (m)',
@@ -2184,7 +2181,7 @@ if st.session_state["authentication_status"]:
             st.markdown("### 📍 Cobertura por CPs por Nodo")
             st.dataframe(res['df_cp_por_estado'], use_container_width=True, hide_index=True)
 
-            st.markdown("### ⭕ Cobertura Detallada por cada Zona (con Aumento de paquetes)")
+            st.markdown("### ⭕ Cobertura Detallada por cada Zona")
             st.dataframe(res['df_cp_por_zona'], use_container_width=True, hide_index=True)
             st.write("---")
 
