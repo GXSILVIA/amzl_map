@@ -1776,6 +1776,17 @@ if st.session_state["authentication_status"]:
                 upside_por_cp_zona = {}
                 upside_ocupado_por_cp = {}
 
+                # 📦 NUEVO: lookup CP(5 díg) -> VOLUMEN total disponible (1er archivo).
+                #    Se usa para las columnas "Volumen Disponible por CP" y
+                #    "Volumen Total Disponible" de la pestaña "CPs por Zona".
+                _vol_por_cp = {}
+                if 'VOLUMEN' in df_poly_user.columns:
+                    for _cpv, _volv in zip(
+                        df_poly_user['CP'].astype(str).map(normalizar_cp),
+                        pd.to_numeric(df_poly_user['VOLUMEN'], errors='coerce').fillna(0)
+                    ):
+                        _vol_por_cp[_cpv] = float(_volv)
+
                 # ═══════════════════════════════════════════════════════════════
                 # ⚡ OPTIMIZACIÓN 8K CPs × 3K zonas — PRECÁLCULO VECTORIZADO
                 #    Reemplaza los dos bucles anidados (CP×union y zona×CP) por
@@ -1958,6 +1969,11 @@ if st.session_state["authentication_status"]:
                             if not _pares:
                                 continue
                             cps_actuales_zona_con_pct = []
+                            # 📦 NUEVO: desglose Volumen por CP + suma total de la zona.
+                            #    _vol_por_cp mapea CP(str, 5 díg) -> VOLUMEN total del 1er archivo.
+                            _vol_detalle_zona = []       # [("06700", 120), ("06720", 50), ...]
+                            _vol_total_zona = 0          # suma del volumen de los CPs que ocupa
+                            _cps_vistos_vol = set()      # evita sumar dos veces el mismo CP
                             for _cp_str, _pct in _pares:
                                 # 🚫 Omitir CPs con 0% de cobertura por la zona.
                                 if round(_pct) <= 0:
@@ -1965,11 +1981,25 @@ if st.session_state["authentication_status"]:
                                 cps_actuales_zona_con_pct.append(
                                     f"{_cp_str} ({round(_pct)}%)"
                                 )
+                                # 📦 Volumen TOTAL del CP (tal cual viene en el 1er archivo)
+                                _cp_key = normalizar_cp(_cp_str)
+                                if _cp_key not in _cps_vistos_vol:
+                                    _cps_vistos_vol.add(_cp_key)
+                                    _vol_cp = int(round(float(_vol_por_cp.get(_cp_key, 0))))
+                                    _vol_detalle_zona.append((_cp_key, _vol_cp))
+                                    _vol_total_zona += _vol_cp
                             if cps_actuales_zona_con_pct:
+                                # 📦 Ordenar el detalle de volumen por CP (ascendente por código)
+                                _vol_detalle_zona.sort(key=lambda t: t[0])
+                                _txt_vol_detalle = ", ".join(
+                                    [f"{_c}: {_v}" for _c, _v in _vol_detalle_zona]
+                                ) if _vol_detalle_zona else "0"
                                 reporte_cp_por_zona.append({
                                     "Nodo": nodo_iter,
                                     "Zona": _zona_nom,
-                                    "CPs Cubiertos (%)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct))))
+                                    "CPs Cubiertos (%)": ", ".join(sorted(list(set(cps_actuales_zona_con_pct)))),
+                                    "Volumen Disponible por CP": _txt_vol_detalle,
+                                    "Volumen Total Disponible": int(_vol_total_zona)
                                 })
 
                 df_cp_por_estado = pd.DataFrame(reporte_cp_por_estado)
