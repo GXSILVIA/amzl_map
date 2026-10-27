@@ -285,6 +285,65 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None):
 # ═══════════════════════════════════════════════════════════════════════
 # 📊 TABLAS de análisis descargable
 # ═══════════════════════════════════════════════════════════════════════
+def construir_entregas_no_asignadas(R):
+    """
+    PAQUETES POR LLEVAR por zona = puntos (morados) NO asignados por tracking
+    que SÍ caen DENTRO del radio de alguna zona → esa zona aún los puede llevar.
+    Cada punto se cuenta a la zona MÁS CERCANA entre las que lo contienen.
+
+    Devuelve 2 DataFrames:
+      A) Resumen por zona: nº de paquetes por llevar (morados dentro de su radio).
+      B) Detalle punto-por-punto (tracking, coords, zona dentro de cuyo radio cae).
+    """
+    zonas = R["zonas"]
+    pts = R["puntos"].copy()
+    # "morado" = no asignado por tracking. R['puntos'] trae _origen_asig.
+    if "_origen_asig" in pts.columns:
+        es_morado = pts["_origen_asig"] != "tracking"
+    else:
+        es_morado = ~pts["_asignado"]
+    no = pts[es_morado].copy()
+
+    conteo = {}
+    filas = []
+    if len(no) and zonas:
+        szlat = np.array([z["LAT"] for z in zonas])
+        szlon = np.array([z["LON"] for z in zonas])
+        szrad = np.array([z["RAD"] for z in zonas])
+        sznom = np.array([z["NOM"] for z in zonas])
+        cl = np.cos(np.radians(float(szlat.mean())))
+        plat = no["latitude"].to_numpy()
+        plon = no["longitude"].to_numpy()
+        d2 = ((plat[:, None] - szlat[None, :]) * M_GRADO) ** 2 + \
+             ((plon[:, None] - szlon[None, :]) * M_GRADO * cl) ** 2
+        dentro = d2 <= (szrad[None, :] ** 2)          # dentro del radio de la zona
+        d2m = np.where(dentro, d2, np.inf)
+        im = np.argmin(d2m, axis=1)
+        cae = np.isfinite(d2m[np.arange(len(no)), im])  # cae en ≥1 zona
+        trk = no["tracking_id"].to_numpy()
+        for k in range(len(no)):
+            if cae[k]:
+                zn = sznom[im[k]]
+                conteo[zn] = conteo.get(zn, 0) + 1
+                filas.append({
+                    "tracking_id": trk[k],
+                    "latitude": float(plat[k]),
+                    "longitude": float(plon[k]),
+                    "Zona (dentro de su radio)": zn,
+                })
+
+    dfA = pd.DataFrame([{
+        "Zona": z["NOM"],
+        "Paquetes por llevar (no asignados en su radio)": int(conteo.get(z["NOM"], 0)),
+    } for z in zonas])
+    if not dfA.empty:
+        dfA = dfA.sort_values("Paquetes por llevar (no asignados en su radio)",
+                              ascending=False).reset_index(drop=True)
+    dfB = pd.DataFrame(filas) if filas else pd.DataFrame(
+        columns=["tracking_id", "latitude", "longitude", "Zona (dentro de su radio)"])
+    return dfA, dfB
+
+
 def construir_tabla_zonas(R, hist_por_zona=None):
     """
     Tabla por VR (estilo imagen): Seteo(SW Max Cap), Volumen Despachado(captados),
@@ -576,7 +635,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
     fg_cp.add_to(m)
 
     # ── CÍRCULOS de zonas ENABLED (una capa) ──
-    fg_z = folium.FeatureGroup(name="Zonas (ENABLED)", show=True)
+    fg_z = folium.FeatureGroup(name="Zonas", show=True)
     features = []
     for i, z in enumerate(zonas):
         tinfo = R["traslape_zona"].get(z["NOM"], {})
@@ -614,7 +673,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
     fg_z.add_to(m)
 
     # ── PUNTOS: blancos (asignados) y color distinto (no asignados) ──
-    fg_ok = folium.FeatureGroup(name="📦 Entregados (asignados)", show=True)
+    fg_ok = folium.FeatureGroup(name="📦 Entregados", show=True)
     fg_no = folium.FeatureGroup(name="❗ No asignados", show=True)
     pts_ok = pts[pts["_asignado"]]
     pts_no = pts[~pts["_asignado"]]
@@ -738,7 +797,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     gdf_cp_wgs84: (opcional) polígonos de CP para contar puntos y elegibilidad por CP.
                   Puedes pasar st.session_state.get('gdf_cobertura_global') reproyectado a 4326.
     """
-    st.markdown("## 🛰️ Análisis Real por Día (entregas, zonas enabled y elegibilidad)")
+    st.markdown("## Análisis")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -789,19 +848,30 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
     # KPIs
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Zonas ENABLED", len(R["zonas"]))
+    k1.metric("Zonas", len(R["zonas"]))
     k2.metric("Paquetes (puntos)", R["total_puntos"])
-    k3.metric("Asignados", R["total_asignados"])
+    k3.metric("Entregados", R["total_asignados"])
     k4.metric("Traslape total", f"{R['traslape_total']}%")
 
-    # Mapa
-    mapa = st.session_state.get("rd_mapa")
-    if mapa:
-        components.html(mapa, height=620)
-
-    # Tablas
-    st.markdown("### 📋 Análisis por Zona (VR)")
+    # ── Layout tipo capa de cobertura: mapa (izq) + panel desglose (der) ──
     df_z = construir_tabla_zonas(R, hist_por_zona=st.session_state.get("rd_hist"))
+    _col_map, _col_pan = st.columns([3, 1.3])
+    with _col_map:
+        mapa = st.session_state.get("rd_mapa")
+        if mapa:
+            components.html(mapa, height=620)
+    with _col_pan:
+        st.markdown("### 🗂️ Desglose de Zonas")
+        st.caption(f"{len(df_z)} círculos del día")
+        # Panel con TODOS los círculos (zona, seteo, despachado, ocupación, traslape)
+        _cols_panel = [c for c in ["VR (Store Name)", "Seteo (SW Max Cap)",
+                                   "Volumen Despachado", "Ocupación", "% Traslape"]
+                       if c in df_z.columns]
+        st.dataframe(df_z[_cols_panel] if _cols_panel else df_z,
+                     use_container_width=True, hide_index=True, height=560)
+
+    # Tablas completas debajo del mapa
+    st.markdown("### 📋 Análisis por Zona (VR)")
     st.dataframe(df_z, use_container_width=True, hide_index=True)
 
     st.markdown("### 📮 Elegibilidad vs. Entregado por CP")
@@ -852,6 +922,20 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         st.download_button("📥 Descargar Seteo Sugerido (Excel)", data=_bufp.getvalue(),
                            file_name=f"Seteo_Sugerido_{R['nodo']}_{dia.replace('/','-')}_plan{_plan_obj}.xlsx",
                            mime="application/vnd.ms-excel", use_container_width=True)
+
+    # ── 📦 PAQUETES POR LLEVAR por zona = morados (no asignados por tracking)
+    #    que caen DENTRO del radio de la zona → los que esa zona aún puede llevar.
+    st.markdown("### 📦 Paquetes por llevar por zona")
+    st.caption("Puntos morados (no asignados por tracking) que caen dentro del radio de cada zona.")
+    _df_llevar, _df_det = construir_entregas_no_asignadas(R)
+    st.dataframe(_df_llevar, use_container_width=True, hide_index=True, height=320)
+    _buf_na = io.BytesIO()
+    with pd.ExcelWriter(_buf_na, engine="xlsxwriter") as _wna:
+        _df_llevar.to_excel(_wna, index=False, sheet_name="Por llevar por zona")
+        _df_det.to_excel(_wna, index=False, sheet_name="Detalle (puntos morados)")
+    st.download_button("📥 Descargar Paquetes por Llevar (Excel)", data=_buf_na.getvalue(),
+                       file_name=f"Paquetes_por_llevar_{R['nodo']}_{dia.replace('/','-')}.xlsx",
+                       mime="application/vnd.ms-excel", use_container_width=True)
 
     # Descargas
     d1, d2 = st.columns(2)
