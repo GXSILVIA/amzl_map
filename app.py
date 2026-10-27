@@ -667,8 +667,6 @@ def construir_mapa_html(res, gdf_cobertura, mostrar_anillos):
 
             # 🛡️ GUARDA (FIX NaN): si el centroide del nodo es inválido (None/NaN),
             #    saltar este nodo por completo — no dibujar marcador ni anillos.
-            #    Esta es la causa raíz del error:
-            #    "ValueError: Location values cannot contain NaNs."
             if (c_lat is None or c_lon is None
                     or (isinstance(c_lat, float) and math.isnan(c_lat))
                     or (isinstance(c_lon, float) and math.isnan(c_lon))):
@@ -1275,6 +1273,34 @@ auth = stauth.Authenticate(
 auth.login(location='main')
 
 if st.session_state["authentication_status"]:
+    # ═══════════════════════════════════════════════════════════════════
+    # 🛰️ SELECTOR DE MODO: Planeación (capa original) ó Análisis Real por Día
+    #    La capa real vive en el módulo capa_real_dia.py (no toca esta lógica).
+    # ═══════════════════════════════════════════════════════════════════
+    _modo_app = st.sidebar.radio(
+        "🧭 Modo de análisis",
+        ["🗺️ Planeación de Cobertura", "🛰️ Análisis Real por Día"],
+        index=0,
+    )
+    if _modo_app == "🛰️ Análisis Real por Día":
+        try:
+            from capa_real_dia import render_analisis_real_dia
+        except Exception as _e:
+            st.error(
+                "No se pudo cargar la capa de Análisis Real por Día "
+                "(capa_real_dia.py debe estar junto a app_sistema_pro.py). Detalle: %s" % _e
+            )
+            st.stop()
+        _gdf_cp_real = None
+        try:
+            _g = st.session_state.get('gdf_cobertura_global', None)
+            if _g is not None and not _g.empty:
+                _gdf_cp_real = _g.to_crs("EPSG:4326") if (_g.crs and _g.crs.to_epsg() != 4326) else _g
+        except Exception:
+            _gdf_cp_real = None
+        render_analisis_real_dia(gdf_cp_wgs84=_gdf_cp_real)
+        st.stop()
+
     if 'procesado' not in st.session_state:
         st.session_state.procesado = False
     if 'resultados' not in st.session_state:
@@ -1458,11 +1484,7 @@ if st.session_state["authentication_status"]:
                         continue
 
                     # 🛡️ FIX NaN (raíz): quitar zonas con geometría vacía/nula ANTES de
-                    #    calcular el centroide por mediana. Si una zona tiene geometría
-                    #    degenerada, su .centroid.x/.y sale NaN → np.median NaN → el
-                    #    marcador del centroide revienta con "Location values cannot
-                    #    contain NaNs". Filtramos y, si no queda nada válido, omitimos
-                    #    el nodo por completo.
+                    #    calcular el centroide por mediana.
                     _pz = partners_del_nodo[
                         partners_del_nodo.geometry.notna() & (~partners_del_nodo.geometry.is_empty)
                     ]
@@ -1473,12 +1495,11 @@ if st.session_state["authentication_status"]:
                     _xs = _centros_zonas.x.to_numpy()
                     _ys = _centros_zonas.y.to_numpy()
 
-                    # Descartar cualquier NaN residual en los centros
                     _mask_ok = ~(np.isnan(_xs) | np.isnan(_ys))
                     _xs = _xs[_mask_ok]
                     _ys = _ys[_mask_ok]
                     if _xs.size == 0:
-                        continue  # sin centros válidos → omitir nodo
+                        continue
 
                     _mx = float(np.median(_xs))
                     _my = float(np.median(_ys))
@@ -1491,7 +1512,6 @@ if st.session_state["authentication_status"]:
                     except Exception:
                         pass
 
-                    # 🛡️ Guarda final: si por cualquier razón el centro resultó NaN, omitir.
                     if math.isnan(_mx) or math.isnan(_my):
                         continue
 
