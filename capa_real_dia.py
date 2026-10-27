@@ -38,6 +38,7 @@ El módulo es auto-contenido: no modifica la lógica existente de la app.
 """
 
 import io
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -420,6 +421,7 @@ def calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=None):
 #    Tope por zona = 96 (excedente se redistribuye entre las demás).
 # ═══════════════════════════════════════════════════════════════════════
 TOPE_ZONA = 96          # máximo de volumen por zona
+MIN_ZONA = 32           # mínimo de volumen por zona
 W_HIST = 0.5            # peso histórico de despacho
 W_DEMANDA = 0.5         # peso demanda libre del polígono
 
@@ -519,37 +521,51 @@ def distribuir_confirmation_plan(R, plan_total, hist_zona, demanda_zona,
     if peso.sum() <= 0:
         peso = np.ones(len(sns))
 
-    # Reparto con tope + redistribución iterativa del excedente
-    asign = np.zeros(len(sns))
-    libres = np.ones(len(sns), dtype=bool)
-    restante = float(plan_total)
-    for _ in range(100):
-        p = peso * libres
-        if p.sum() <= 0 or restante <= 0.5:
-            break
-        add = restante * (p / p.sum())
-        nuevo = asign + add
-        # aplicar tope
-        exceso_mask = nuevo > tope
-        if exceso_mask.any():
-            asign[exceso_mask] = tope
-            libres[exceso_mask] = False
-            restante = float(plan_total) - asign.sum()
-        else:
-            asign = nuevo
-            restante = 0.0
-            break
+    # Reparto con PISO (32) y TECHO (96) por zona.
+    #   1) A cada zona se le da primero el mínimo (32).
+    #   2) El resto del plan se reparte por peso, respetando el techo (96).
+    #   3) Si el plan no alcanza ni para el mínimo de todas, o excede el máximo
+    #      de todas, se avisa (la suma puede no cuadrar exactamente en ese caso).
+    n = len(sns)
+    piso_total = MIN_ZONA * n
+    techo_total = tope * n
+    asign = np.full(n, float(MIN_ZONA))        # arranca en el mínimo
+    restante = float(plan_total) - piso_total  # lo que queda por repartir sobre el mínimo
+
+    if restante > 0:
+        libres = np.ones(n, dtype=bool)
+        for _ in range(200):
+            p = peso * libres
+            if p.sum() <= 0 or restante <= 0.5:
+                break
+            add = restante * (p / p.sum())
+            nuevo_val = asign + add
+            exceso = nuevo_val > tope
+            # solo tope sobre zonas aún libres
+            exceso = exceso & libres
+            if exceso.any():
+                asign[exceso] = tope
+                libres[exceso] = False
+                restante = float(plan_total) - asign.sum()
+            else:
+                asign = np.where(libres, nuevo_val, asign)
+                restante = 0.0
+                break
+    # Si restante < 0 (plan < piso_total) no se puede respetar el mínimo;
+    # se reparte proporcional sin bajar de 0 (se avisa en la UI).
+    elif restante < 0:
+        asign = np.clip(float(plan_total) * (peso / peso.sum()), 0, tope)
 
     sugerido = np.round(asign).astype(int)
-    # Ajuste fino para que la suma sea EXACTA al plan (por redondeos)
+    # Ajuste fino para cuadrar al plan SIN violar piso/techo (si es factible)
     diff = int(plan_total) - int(sugerido.sum())
-    if diff != 0:
-        orden = np.argsort(-peso)  # ajustar primero a las de mayor peso
+    if diff != 0 and piso_total <= plan_total <= techo_total:
+        orden = np.argsort(-peso) if diff > 0 else np.argsort(peso)
         i = 0
-        while diff != 0 and i < len(orden) * 3:
+        while diff != 0 and i < len(orden) * 6:
             k = orden[i % len(orden)]
             cand = sugerido[k] + (1 if diff > 0 else -1)
-            if 0 <= cand <= tope:
+            if MIN_ZONA <= cand <= tope:
                 sugerido[k] = cand
                 diff += -1 if diff > 0 else 1
             i += 1
@@ -567,6 +583,8 @@ def distribuir_confirmation_plan(R, plan_total, hist_zona, demanda_zona,
             razon.append(f"⚠️traslape {tras[j]*100:.0f}%")
         if sug >= tope:
             razon.append("tope 96")
+        if sug <= MIN_ZONA:
+            razon.append("mín 32")
         filas.append({
             "VR (Store Name)": z["NOM"],
             "Seteo actual": actual,
@@ -579,7 +597,7 @@ def distribuir_confirmation_plan(R, plan_total, hist_zona, demanda_zona,
     return df
 
 
-def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
+def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     """
     gdf_cp_wgs84: GeoDataFrame opcional con polígonos de CP (col 'CP' y geometry)
                   para contar puntos por CP y mostrar elegibilidad en tooltip.
@@ -597,12 +615,41 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
     else:
         c_lat, c_lon = 19.19, -96.15
 
+    # 🗺️ Si no llegaron polígonos de CP (no se procesó cobertura), cargarlos
+    #    desde los GeoJSON de la carpeta mapas/, filtrando a los CPs que aparecen
+    #    en la elegibilidad del día (R['elig_por_cp']) para no cargar todo el país.
+    if (gdf_cp_wgs84 is None or getattr(gdf_cp_wgs84, "empty", True)):
+        try:
+            import geopandas as _gpd
+            _cps_interes = set(str(_norm_cp(c)) for c in R.get("elig_por_cp", {}).keys())
+            if os.path.isdir(mapas_dir) and _cps_interes:
+                _gdfs = []
+                for _f in os.listdir(mapas_dir):
+                    if not _f.lower().endswith(".geojson"):
+                        continue
+                    try:
+                        _g = _gpd.read_file(os.path.join(mapas_dir, _f))
+                    except Exception:
+                        continue
+                    _cpcol = next((c for c in ["d_codigo","d_cp","CP","CODIGOPOSTAL","cp"]
+                                   if c in _g.columns), None)
+                    if _cpcol is None:
+                        continue
+                    _g["CP"] = _g[_cpcol].astype(str).map(_norm_cp)
+                    _g = _g[_g["CP"].isin(_cps_interes)]
+                    if not _g.empty:
+                        _gdfs.append(_g[["CP","geometry"]])
+                if _gdfs:
+                    gdf_cp_wgs84 = _gpd.GeoDataFrame(pd.concat(_gdfs, ignore_index=True), crs="EPSG:4326")
+        except Exception:
+            pass
+
     m = folium.Map(location=[c_lat, c_lon], zoom_start=11,
                    tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
                    attr="&copy; OpenStreetMap", prefer_canvas=True)
 
-    # ── (opcional) Conteo de puntos por CP y elegibilidad en tooltip ──
-    fg_cp = folium.FeatureGroup(name="CP + Elegibilidad", show=bool(gdf_cp_wgs84 is not None))
+    # ── POLÍGONOS DE CP (coloreados por elegibilidad) — siempre visibles ──
+    fg_cp = folium.FeatureGroup(name="CP + Elegibilidad", show=True)
     if gdf_cp_wgs84 is not None and not gdf_cp_wgs84.empty:
         try:
             import geopandas as gpd
@@ -619,20 +666,63 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
             cob["_entregados"] = cob["CP"].map(lambda c: int(cnt_cp.get(c, 0)))
             cob["_elegibles"] = cob["CP"].map(lambda c: int(R["elig_por_cp"].get(c, 0)))
             cob["_diferencia"] = cob["_elegibles"] - cob["_entregados"]
+
+            # Color por elegibilidad (igual escala que la capa de cobertura)
+            def _col_elig(v):
+                v = float(v)
+                if v <= 0:   return "#9e9e9e"
+                if v <= 100: return "#f1c40f"
+                if v <= 200: return "#e67e22"
+                if v <= 300: return "#e74c3c"
+                if v <= 400: return "#8e44ad"
+                return "#6d4c41"
+            cob["_color"] = cob["_elegibles"].map(_col_elig)
             gj = cob.to_json()
             folium.GeoJson(
                 gj,
-                style_function=lambda f: {"fillColor": "#3388ff", "color": "#ffffff",
-                                          "weight": 1, "fillOpacity": 0.12},
+                style_function=lambda f: {
+                    "fillColor": f["properties"].get("_color", "#9e9e9e"),
+                    "color": "#ffffff", "weight": 1.2, "fillOpacity": 0.45},
                 tooltip=folium.GeoJsonTooltip(
                     fields=["CP", "_entregados", "_elegibles", "_diferencia"],
                     aliases=["CP:", "Entregados hoy:", "Elegibles (libre):", "Diferencia:"],
                     localize=True),
+                popup=folium.GeoJsonPopup(
+                    fields=["CP", "_entregados", "_elegibles", "_diferencia"],
+                    aliases=["CP:", "Entregados hoy:", "Elegibles (libre):", "Diferencia:"]),
             ).add_to(fg_cp)
         except Exception as e:
             folium.map.Marker([c_lat, c_lon],
                               tooltip=f"(CP overlay no disponible: {e})").add_to(fg_cp)
     fg_cp.add_to(m)
+
+    # 📦 Paquetes LIBRES por zona = morados (no asignados por tracking) que caen
+    #    DENTRO del círculo de la zona. Se calcula aquí para mostrarlo en el tooltip.
+    _libres_por_sn = {}
+    try:
+        if "_origen_asig" in pts.columns:
+            _mor = pts[pts["_origen_asig"] != "tracking"]
+        else:
+            _mor = pts[~pts["_asignado"]]
+        if len(_mor) and zonas:
+            _szlat = np.array([z["LAT"] for z in zonas])
+            _szlon = np.array([z["LON"] for z in zonas])
+            _szrad = np.array([z["RAD"] for z in zonas])
+            _szsn = np.array([z["_sn"] for z in zonas])
+            _cl = np.cos(np.radians(float(_szlat.mean())))
+            _pla = _mor["latitude"].to_numpy(); _plo = _mor["longitude"].to_numpy()
+            _d2 = ((_pla[:, None] - _szlat[None, :]) * M_GRADO) ** 2 + \
+                  ((_plo[:, None] - _szlon[None, :]) * M_GRADO * _cl) ** 2
+            _dentro = _d2 <= (_szrad[None, :] ** 2)
+            _d2m = np.where(_dentro, _d2, np.inf)
+            _im = np.argmin(_d2m, axis=1)
+            _cae = np.isfinite(_d2m[np.arange(len(_mor)), _im])
+            for _k in range(len(_mor)):
+                if _cae[_k]:
+                    _sn = _szsn[_im[_k]]
+                    _libres_por_sn[_sn] = _libres_por_sn.get(_sn, 0) + 1
+    except Exception:
+        _libres_por_sn = {}
 
     # ── CÍRCULOS de zonas ENABLED (una capa) ──
     fg_z = folium.FeatureGroup(name="Zonas", show=True)
@@ -640,11 +730,17 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
     for i, z in enumerate(zonas):
         tinfo = R["traslape_zona"].get(z["NOM"], {})
         desp = int(R["cap_por_zona"].get(z["_sn"], 0))
+        libres = int(_libres_por_sn.get(z["_sn"], 0))
         ocup = round((desp / z["MAXCAP"]) * 100, 1) if z["MAXCAP"] else 0.0
-        tt = ("<b>Zona: {nom}</b><br>SW Max Cap: {mc}<br>Radio: {rad} m<br>"
-              "Despachado: {d}<br>Ocupación: {o}%<br>"
-              "<b>Traslape: {t}% — {nv}</b>").format(
-            nom=z["NOM"], mc=int(z["MAXCAP"]), rad=int(z["RAD"]), d=desp, o=ocup,
+        # Tooltip pedido: SW Max Cap, SW Coverage, entregados del día, paquetes libres.
+        tt = ("<b>Zona: {nom}</b><br>"
+              "SW Max Cap: {mc}<br>"
+              "SW Coverage: {rad} m<br>"
+              "Paquetes entregados (hoy): {d}<br>"
+              "<b>Paquetes libres: {lib}</b><br>"
+              "Ocupación: {o}%<br>"
+              "Traslape: {t}% — {nv}").format(
+            nom=z["NOM"], mc=int(z["MAXCAP"]), rad=int(z["RAD"]), d=desp, lib=libres, o=ocup,
             t=tinfo.get("pct", 0.0), nv=tinfo.get("nivel", "⚪"))
         # círculo como polígono aproximado (para GeoJson + buscador + apilados)
         ang = np.linspace(0, 2 * np.pi, 48)
@@ -714,85 +810,513 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
 
 # JS: buscador (CP/zona), modo hover/click apilado, cuadro info izquierdo.
 _JS_BUSCADOR_APILADO = r"""
-<style>
-  .api-zona-item{padding:7px 9px;margin:3px 0;border:1px solid #e2e8f0;border-radius:6px;
-     cursor:pointer;background:#f8fafc;}
-  .api-zona-item:hover{background:#e0edff;}
-  #infoPanel{position:fixed;left:12px;bottom:85px;z-index:99999;width:320px;max-height:46vh;
-     overflow-y:auto;background:rgba(255,255,255,0.92);border:1px solid #cbd5e1;border-radius:12px;
-     box-shadow:0 6px 22px rgba(0,0,0,0.2);padding:12px 14px;font-family:sans-serif;font-size:12px;
-     color:#1e293b;display:none;}
-  #cpSearchBar{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9999;background:white;
-     padding:8px 14px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,0.25);display:flex;
-     align-items:center;gap:8px;font-family:sans-serif;}
-</style>
-<div id="cpSearchBar">
-  <span>🔍</span>
-  <input id="cpInput" type="text" placeholder="Buscar Zona o CP..."
-     onkeyup="if(event.key==='Enter')buscar(this.value)"
-     style="border:1px solid #e2e8f0;border-radius:6px;padding:6px 12px;font-size:14px;width:180px;">
-  <button onclick="buscar(document.getElementById('cpInput').value)"
-     style="background:#2563eb;color:white;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;">Buscar</button>
-  <button onclick="limpiar()" style="background:#e2e8f0;border:none;border-radius:6px;padding:6px 11px;cursor:pointer;">✕</button>
-  <span id="cpResult" style="font-size:12px;"></span>
-</div>
-<div id="infoPanel"><div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">ℹ️ Información
-  <button onclick="document.getElementById('infoPanel').style.display='none'"
-    style="float:right;background:#e2e8f0;border:none;border-radius:6px;cursor:pointer;">✕</button></div>
-  <div id="infoBody"></div></div>
-<script>
-function _findMap(){for(var k in window){try{if(k.indexOf('map_')===0&&window[k]&&window[k].eachLayer)return window[k];}catch(e){}}return null;}
-function _walk(l,cb){cb(l);if(l.eachLayer)l.eachLayer(function(s){_walk(s,cb);});if(l._layers){for(var id in l._layers)_walk(l._layers[id],cb);}}
-function _dist(a,b,c,d){var R=6371000,dx=(c-a)*Math.PI/180,dy=(d-b)*Math.PI/180;var x=Math.sin(dx/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dy/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
-var _hl=null,_os=null,_zidx={},_zonasG=[],_map=null,_mode='hover',_clickH=null,_apil=[];
-window.addEventListener('load',function(){setTimeout(init,1200);});
-function init(){_map=_findMap();if(!_map)return;
-  _map.eachLayer(function(l){_walk(l,function(ly){
-    if(ly.feature&&ly.feature.properties){var p=ly.feature.properties;
-      if(p.NOMBRE){_zidx[String(p.NOMBRE).toUpperCase()]=ly;}
-      if(typeof p._rad_m!=='undefined'){_zonasG.push({nom:p.NOMBRE,lat:+p._clat,lon:+p._clon,rad:+p._rad_m,tt:p._tt,ly:ly});}
-    }});});
-  var rd=document.getElementById('cpResult');if(rd){rd.innerHTML=Object.keys(_zidx).length+' zonas ✓';rd.style.color='#16a34a';setTimeout(function(){rd.innerHTML='';},2500);}
-  _injectModeBtn();
-}
-function _injectModeBtn(){try{var lc=document.querySelector('.leaflet-control-layers-list');
-  if(lc&&!document.getElementById('mBtn')){var r=document.createElement('div');r.style.cssText='padding:4px 2px;';
-    r.innerHTML='<button id="mBtn" onclick="toggleMode()" style="width:100%;background:#16a34a;color:white;border:none;border-radius:5px;padding:5px;cursor:pointer;">🖱️ Info: Hover</button>';
-    lc.appendChild(r);}}catch(e){}}
-function _resaltar(ly){if(_hl&&_os){try{_hl.setStyle(_os);}catch(e){}}
-  _os={fillColor:ly.options.fillColor,fillOpacity:ly.options.fillOpacity,color:ly.options.color,weight:ly.options.weight};
-  ly.setStyle({fillColor:'#2563eb',fillOpacity:0.55,color:'#2563eb',weight:3});try{ly.bringToFront();}catch(e){}
-  _hl=ly;if(ly.getBounds&&_map)_map.fitBounds(ly.getBounds(),{padding:[50,50],maxZoom:14});}
-window.limpiar=function(){if(_hl&&_os){try{_hl.setStyle(_os);}catch(e){}}_hl=null;_os=null;
-  var i=document.getElementById('cpInput');if(i)i.value='';document.getElementById('cpResult').innerHTML='';}
-window.buscar=function(v){var raw=String(v||'').trim();if(!raw){limpiar();return;}
-  var k=raw.toUpperCase(),ly=_zidx[k];
-  if(!ly){var c=Object.keys(_zidx).filter(function(x){return x.indexOf(k)!==-1;});if(c.length)ly=_zidx[c[0]];}
-  var rd=document.getElementById('cpResult');
-  if(ly){_resaltar(ly);if(rd){rd.innerHTML='✔ '+(ly.feature.properties.NOMBRE||k);rd.style.color='#16a34a';}
-    _panel(ly.feature.properties._tt||'');}
-  else if(rd){rd.innerHTML='✘ No encontrado';rd.style.color='#dc2626';}}
-function _panel(html){var p=document.getElementById('infoPanel'),b=document.getElementById('infoBody');
-  if(p&&b){b.innerHTML=html;p.style.display='block';}}
-window.toggleMode=function(){var b=document.getElementById('mBtn');
-  if(_mode==='hover'){_walk(_map,function(ly){if(ly.getTooltip&&ly.getTooltip())ly.unbindTooltip();});
-    _clickH=function(e){_apilado(e.latlng);};_map.on('click',_clickH);_mode='click';
-    if(b){b.innerHTML='👆 Info: Click';b.style.background='#2563eb';}}
-  else{if(_clickH){_map.off('click',_clickH);_clickH=null;}_mode='hover';
-    if(b){b.innerHTML='🖱️ Info: Hover';b.style.background='#16a34a';}}}
-function _apilado(ll){var enc=[];for(var i=0;i<_zonasG.length;i++){var z=_zonasG[i];
-    if(_dist(ll.lat,ll.lng,z.lat,z.lon)<=z.rad)enc.push(z);}
-  _apil=enc;if(!enc.length){return;}
-  if(enc.length===1){_panel(enc[0].tt);try{_resaltar(enc[0].ly);}catch(e){}}
-  else{var h='<div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">🔎 '+enc.length+' zonas aquí:</div>';
-    for(var j=0;j<enc.length;j++)h+='<div class="api-zona-item" data-i="'+j+'">▸ <b>'+enc[j].nom+'</b></div>';_panel(h);}}
-document.addEventListener('click',function(ev){var t=ev.target;while(t&&t!==document){
-  if(t.classList&&t.classList.contains('api-zona-item')){var i=+t.getAttribute('data-i');
-    if(_apil[i]){_panel('<div class="api-zona-item" data-volver="1">← Volver</div>'+_apil[i].tt);try{_resaltar(_apil[i].ly);}catch(e){}}return;}
-  if(t.getAttribute&&t.getAttribute('data-volver')==='1'){_apilado({lat:_apil[0].lat,lng:_apil[0].lon});return;}
-  t=t.parentNode;}});
-</script>
-"""
+    <style>
+      #cpSearchBar * { box-sizing:border-box; }
+      .api-zona-item {
+          padding:7px 9px; margin:3px 0; border:1px solid #e2e8f0; border-radius:6px;
+          cursor:pointer; background:#f8fafc; transition:background .15s;
+      }
+      .api-zona-item:hover { background:#e0edff; }
+      .api-volver {
+          display:inline-block; margin-bottom:8px; padding:5px 10px; background:#2563eb;
+          color:white; border-radius:6px; cursor:pointer; font-weight:600; font-size:12px;
+      }
+      #infoPanel {
+          position:fixed; left:12px; bottom:85px; z-index:9998;
+          width:320px; max-height:46vh; overflow-y:auto;
+          background:rgba(255,255,255,0.55);
+          -webkit-backdrop-filter:blur(5px); backdrop-filter:blur(5px);
+          border:1px solid rgba(203,213,225,0.6); border-radius:12px;
+          box-shadow:0 6px 22px rgba(0,0,0,0.20); padding:12px 14px;
+          font-family:sans-serif; font-size:12px; color:#1e293b; display:none;
+      }
+      #infoPanel .ip-head { display:flex; justify-content:space-between; align-items:center;
+          margin:-2px 0 8px 0; }
+      #infoPanel .ip-close { cursor:pointer; background:#e2e8f0; color:#475569; border:none;
+          border-radius:6px; padding:2px 8px; font-weight:700; font-size:13px; }
+      #infoPanel .ip-close:hover { background:#cbd5e1; }
+    </style>
+    <div id="cpSearchBar" style="
+        position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:9999;
+        background:white; padding:8px 14px; border-radius:10px;
+        box-shadow:0 4px 16px rgba(0,0,0,0.25);
+        display:flex; align-items:center; gap:8px;
+        font-family:sans-serif;">
+        <span style="font-size:16px">🔍</span>
+        <input id="cpInput" type="text" placeholder="Buscar CP o Zona..."
+            onkeyup="if(event.key==='Enter')buscarCP(this.value)"
+            style="border:1px solid #e2e8f0; border-radius:6px; padding:6px 12px;
+            font-size:14px; width:170px; outline:none;" />
+        <button onclick="buscarCP(document.getElementById('cpInput').value)"
+            style="background:#2563eb; color:white; border:none; border-radius:6px;
+            padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer;">
+            Buscar</button>
+        <button id="cpClearBtn" onclick="limpiarBusqueda()" title="Quitar resaltado"
+            style="background:#e2e8f0; color:#475569; border:none; border-radius:6px;
+            padding:6px 11px; font-size:13px; font-weight:700; cursor:pointer;">
+            ✕</button>
+        <span id="cpResult" style="font-size:12px; max-width:350px;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+    </div>
+
+    <div id="infoPanel">
+        <div class="ip-head">
+            <div style="font-weight:bold;color:#2563eb;">ℹ️ Información</div>
+            <button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar">✕</button>
+        </div>
+        <div id="infoPanelBody"></div>
+    </div>
+
+    <script>
+    window.addEventListener('load', function() {
+        setTimeout(function() { initCPSearch(); }, 1500);
+    });
+
+    function _findMap() {
+        for (var k in window) {
+            try { if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
+        }
+        for (var k2 in window) {
+            try { if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2]; } catch(e) {}
+        }
+        return null;
+    }
+
+    function _walk(layer, cb) {
+        cb(layer);
+        if (layer.eachLayer) layer.eachLayer(function(sub){ _walk(sub, cb); });
+        if (layer._layers) { for (var id in layer._layers) _walk(layer._layers[id], cb); }
+    }
+
+    function _distMetros(lat1, lon1, lat2, lon2) {
+        var R = 6371000;
+        var dLat = (lat2 - lat1) * Math.PI / 180;
+        var dLon = (lon2 - lon1) * Math.PI / 180;
+        var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    window._ttMode = 'hover';
+    window._ttStore = [];
+    window._popStore = [];
+    window._zonasGeom = [];
+    window._apiladas = [];
+    window._clickHandler = null;
+    window._ultimaBusqueda = null;
+
+    function initCPSearch() {
+        var map = _findMap();
+        if (!map) {
+            var rd0 = document.getElementById('cpResult');
+            if (rd0) { rd0.innerHTML = '⚠ Mapa no encontrado'; rd0.style.color = '#d97706'; }
+            return;
+        }
+        window._map = map;
+
+        var cpIdx = {};
+        var zonaIdx = {};
+        var totalFeatures = 0;
+
+        function esVisible(layer) {
+            var fo = (layer.options && typeof layer.options.fillOpacity !== 'undefined')
+                     ? layer.options.fillOpacity : 0.45;
+            return fo > 0;
+        }
+
+        function indexLayer(layer) {
+            if (layer.feature && layer.feature.properties) {
+                var props = layer.feature.properties;
+                var visible = esVisible(layer);
+                if ('CP' in props) {
+                    var cpVal = String(props.CP).replace(/\.0$/, '').trim();
+                    while (cpVal.length < 5) cpVal = '0' + cpVal;
+                    if (!(cpVal in cpIdx) || visible) {
+                        if (!(cpVal in cpIdx)) totalFeatures++;
+                        cpIdx[cpVal] = layer;
+                    }
+                }
+                var zonaNom = props.NOMBRE || props.name || props.Name || null;
+                if (zonaNom) {
+                    var zk = String(zonaNom).trim().toUpperCase();
+                    if (!(zk in zonaIdx) || visible) zonaIdx[zk] = layer;
+                }
+            }
+            if (layer.eachLayer) layer.eachLayer(function(sub) { indexLayer(sub); });
+            if (layer._layers) { for (var id in layer._layers) indexLayer(layer._layers[id]); }
+        }
+        map.eachLayer(function(layer) { indexLayer(layer); });
+
+        window._cpIdx = cpIdx;
+        window._zonaIdx = zonaIdx;
+
+        var rd = document.getElementById('cpResult');
+        if (rd && totalFeatures > 0) {
+            rd.innerHTML = totalFeatures + ' CPs y ' + Object.keys(zonaIdx).length + ' zonas indexados ✓';
+            rd.style.color = '#16a34a';
+            setTimeout(function() { rd.innerHTML = ''; }, 3000);
+        } else if (rd) {
+            rd.innerHTML = '⚠ 0 CPs encontrados';
+            rd.style.color = '#d97706';
+        }
+
+        try {
+            var _lc = document.querySelector('.leaflet-control-layers-list');
+            if (_lc && !document.getElementById('ttModeRow')) {
+                var _sep = document.createElement('div');
+                _sep.className = 'leaflet-control-layers-separator';
+                _lc.appendChild(_sep);
+                var _row = document.createElement('div');
+                _row.id = 'ttModeRow';
+                _row.style.cssText = 'padding:4px 2px; font-family:sans-serif;';
+                _row.innerHTML =
+                    '<button id="ttModeBtn" onclick="toggleTooltipMode()" ' +
+                    'style="width:100%; background:#16a34a; color:white; border:none; border-radius:5px; ' +
+                    'padding:5px 8px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;">' +
+                    '🖱️ Info: Hover</button>' +
+                    '<div id="ttModeHint" style="font-size:10px; color:#94a3b8; margin-top:3px; text-align:center;">' +
+                    'Zonas encimadas → Click</div>';
+                _lc.appendChild(_row);
+            }
+        } catch(e) {}
+
+        try { window.parent.postMessage({action:'mapReady', cpCount: totalFeatures}, '*'); } catch(ex) {}
+    }
+
+    var _hl = null, _os = null;
+
+    function _resaltarCapa(ly) {
+        var map = window._map || _findMap();
+        _os = {
+            fillColor: ly.options.fillColor || '#9e9e9e',
+            fillOpacity: ly.options.fillOpacity || 0.45,
+            color: ly.options.color || '#ffffff',
+            weight: ly.options.weight || 1.5
+        };
+        ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 });
+        try { if (ly.bringToFront) ly.bringToFront(); } catch(e) {}
+        _hl = ly;
+        if (ly.getBounds && map) map.fitBounds(ly.getBounds(), {padding:[50,50], maxZoom:14});
+        if (ly.openTooltip) ly.openTooltip();
+    }
+
+    window.limpiarBusqueda = function() {
+        if (_hl && _os) { try { _hl.setStyle(_os); if (_hl.closeTooltip) _hl.closeTooltip(); } catch(e) {} }
+        _hl = null; _os = null;
+        window._ultimaBusqueda = null;
+        var inp = document.getElementById('cpInput');
+        if (inp) inp.value = '';
+        var rd = document.getElementById('cpResult');
+        if (rd) { rd.innerHTML = ''; rd.style.color = '#64748b'; }
+    };
+
+    window.buscarCP = function(valor) {
+        var rd = document.getElementById('cpResult');
+        var raw = String(valor).trim();
+        var cpIdx = window._cpIdx || {};
+        var zonaIdx = window._zonaIdx || {};
+        if (!raw) {
+            window.limpiarBusqueda();
+            if (rd) { rd.innerHTML = 'Escribe un CP o nombre de zona'; rd.style.color = '#64748b'; }
+            return;
+        }
+        if (window._ultimaBusqueda && window._ultimaBusqueda === raw.toUpperCase() && _hl) {
+            window.limpiarBusqueda();
+            return;
+        }
+        if (_hl && _os) { try { _hl.setStyle(_os); } catch(e) {} }
+        window._ultimaBusqueda = raw.toUpperCase();
+
+        var esCP = /^[0-9]+(\.0)?$/.test(raw);
+        if (esCP) {
+            var cp = raw.replace(/\.0$/, '');
+            while (cp.length < 5) cp = '0' + cp;
+            var ly = cpIdx[cp];
+            if (ly) {
+                _resaltarCapa(ly);
+                if (rd) {
+                    var pr = ly.feature.properties;
+                    rd.innerHTML = '✔ CP ' + cp + ' — ' + (pr.ESTADO_PERTENECE||'') +
+                        ' | Vol: ' + (pr.VOLUMEN||0) + ' | Partners: ' + (pr.PARTNERS||0);
+                    rd.style.color = '#16a34a';
+                }
+            } else if (rd) {
+                rd.innerHTML = '⚠ El CP ' + cp + ' no está dentro de la cobertura';
+                rd.style.color = '#dc2626';
+            }
+            return;
+        }
+
+        var clave = raw.toUpperCase();
+        var lyZona = zonaIdx[clave];
+        if (!lyZona) {
+            var cands = Object.keys(zonaIdx).filter(function(k){ return k.indexOf(clave) !== -1; });
+            if (cands.length > 0) { lyZona = zonaIdx[cands[0]]; clave = cands[0]; }
+        }
+        if (lyZona) {
+            _resaltarCapa(lyZona);
+            if (rd) { rd.innerHTML = '✔ Zona ' + clave + ' localizada'; rd.style.color = '#16a34a'; }
+        } else if (rd) {
+            rd.innerHTML = '✘ No se encontró el CP ni la zona "' + raw + '"';
+            rd.style.color = '#dc2626';
+        }
+    };
+
+    (function(){
+        var pr = new URLSearchParams(window.location.search).get('cp');
+        if (pr) setTimeout(function() { window.buscarCP(pr); }, 2000);
+    })();
+    window.addEventListener('message', function(e) {
+        if (e.data && e.data.action === 'searchCP' && e.data.cp) window.buscarCP(e.data.cp);
+    });
+
+    function _recolectarZonas(map) {
+        window._zonasGeom = [];
+        window._zonaLayerByZid = {};
+        var _vistos = {};
+        _walk(map, function(ly) {
+            try {
+                if (ly.feature && ly.feature.properties &&
+                    typeof ly.feature.properties._clat !== 'undefined' &&
+                    typeof ly.feature.properties._rad_m !== 'undefined') {
+                    var p = ly.feature.properties;
+                    if (typeof p._zid !== 'undefined') window._zonaLayerByZid[p._zid] = ly;
+                    var _key = String(p.NOMBRE || '') + '|' + p._clat + '|' + p._clon;
+                    if (_vistos[_key]) return;
+                    _vistos[_key] = true;
+                    window._zonasGeom.push({
+                        nom: p.NOMBRE || '',
+                        zid: (typeof p._zid !== 'undefined') ? p._zid : null,
+                        lat: parseFloat(p._clat),
+                        lon: parseFloat(p._clon),
+                        rad: parseFloat(p._rad_m),
+                        tt: p._tt || ''
+                    });
+                }
+            } catch(e) {}
+        });
+    }
+
+    function _vistaListaZonas() {
+        var arr = window._apiladas || [];
+        var out = ['<div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">🔎 ' +
+                   arr.length + ' zonas aquí — elige una:</div>'];
+        for (var i = 0; i < arr.length; i++) {
+            var nom = arr[i].nom || ('Zona ' + (i+1));
+            out.push('<div class="api-zona-item" data-idx="' + i + '">' +
+                     '<span style="color:#2563eb;font-weight:600;">▸</span> <b>' + nom + '</b></div>');
+        }
+        return out.join('');
+    }
+
+    function _vistaDetalle(idx) {
+        var arr = window._apiladas || [];
+        if (idx < 0 || idx >= arr.length) return '';
+        return '<div class="api-volver" data-volver="1">← Volver a la lista</div>' +
+               '<div>' + (arr[idx].tt || '') + '</div>';
+    }
+
+    function _fmtCP(pr) {
+        if (!pr) return '';
+        var cp = (pr.CP !== undefined && pr.CP !== null) ? String(pr.CP).replace(/\.0$/, '') : '';
+        var filas = [
+            ['Código Postal', cp],
+            ['Estado', pr.ESTADO_PERTENECE || ''],
+            ['Volumen Disponible', pr.VOLUMEN != null ? pr.VOLUMEN : 0],
+            ['Partners', pr.PARTNERS != null ? pr.PARTNERS : 0],
+            ['Rango', pr._rango_txt || '']
+        ];
+        var out = ['<div style="font-weight:bold;color:#0e7490;margin-bottom:4px;">📮 CP ' + cp + '</div>'];
+        for (var i = 0; i < filas.length; i++) {
+            out.push('<div><b>' + filas[i][0] + ':</b> ' + filas[i][1] + '</div>');
+        }
+        return out.join('');
+    }
+
+    var _zonaHL = null, _zonaHL_os = null;
+    function _quitarResaltadoZona() {
+        if (_zonaHL && _zonaHL_os) { try { _zonaHL.setStyle(_zonaHL_os); } catch(e) {} }
+        _zonaHL = null; _zonaHL_os = null;
+    }
+
+    function _ensureInfoPanel() {
+        var panel = document.getElementById('infoPanel');
+        if (panel) return panel;
+        panel = document.createElement('div');
+        panel.id = 'infoPanel';
+        panel.style.cssText =
+            'position:fixed; left:12px; bottom:85px; z-index:99999;' +
+            'width:320px; max-height:46vh; overflow-y:auto;' +
+            'background:rgba(255,255,255,0.55);' +
+            '-webkit-backdrop-filter:blur(5px); backdrop-filter:blur(5px);' +
+            'border:1px solid rgba(203,213,225,0.6); border-radius:12px;' +
+            'box-shadow:0 6px 22px rgba(0,0,0,0.20); padding:12px 14px;' +
+            'font-family:sans-serif; font-size:12px; color:#1e293b; display:none;';
+        panel.innerHTML =
+            '<div class="ip-head" style="display:flex;justify-content:space-between;align-items:center;margin:-2px 0 8px 0;">' +
+            '<div style="font-weight:bold;color:#2563eb;">ℹ️ Información</div>' +
+            '<button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar" ' +
+            'style="cursor:pointer;background:#e2e8f0;color:#475569;border:none;border-radius:6px;padding:2px 8px;font-weight:700;font-size:13px;">✕</button>' +
+            '</div><div id="infoPanelBody"></div>';
+        document.body.appendChild(panel);
+        return panel;
+    }
+
+    function _panelMostrar(html) {
+        var panel = _ensureInfoPanel();
+        var body  = document.getElementById('infoPanelBody');
+        if (!panel || !body) return;
+        body.innerHTML = html;
+        panel.style.display = 'block';
+    }
+
+    window.cerrarInfoPanel = function() {
+        var panel = document.getElementById('infoPanel');
+        if (panel) panel.style.display = 'none';
+        try { _quitarResaltadoZona(); } catch(e) {}
+    };
+
+    function _resaltarZonaPorZid(zid) {
+        var map = window._map || _findMap();
+        var ly = (window._zonaLayerByZid || {})[zid];
+        _quitarResaltadoZona();
+        if (!ly) return;
+        _zonaHL_os = {
+            fillColor: ly.options.fillColor || '#9e9e9e',
+            fillOpacity: (typeof ly.options.fillOpacity !== 'undefined') ? ly.options.fillOpacity : 0.45,
+            color: ly.options.color || 'black',
+            weight: ly.options.weight || 1
+        };
+        try { ly.setStyle({ fillColor:'#2563eb', fillOpacity:0.7, color:'#2563eb', weight:3 }); } catch(e) {}
+        try { if (ly.bringToFront) ly.bringToFront(); } catch(e) {}
+        _zonaHL = ly;
+        if (ly.getBounds && map) { try { map.fitBounds(ly.getBounds(), {padding:[60,60], maxZoom:14}); } catch(e) {} }
+    }
+
+    function _mostrarApilado(latlng, cpInfo) {
+        var map = window._map || _findMap();
+        if (!map) return;
+        var encontradas = [];
+        for (var i = 0; i < window._zonasGeom.length; i++) {
+            var z = window._zonasGeom[i];
+            if (isNaN(z.lat) || isNaN(z.lon) || isNaN(z.rad)) continue;
+            if (_distMetros(latlng.lat, latlng.lng, z.lat, z.lon) <= z.rad) encontradas.push({z:z});
+        }
+        window._apiladas = encontradas.map(function(x){ return x.z; });
+
+        if (!cpInfo && encontradas.length === 0) return;
+
+        window._cpInfoActual = cpInfo || '';
+
+        var htmlZonas = '';
+        if (encontradas.length === 1) {
+            htmlZonas = encontradas[0].z.tt;
+            if (encontradas[0].z.zid != null) _resaltarZonaPorZid(encontradas[0].z.zid);
+        } else if (encontradas.length > 1) {
+            htmlZonas = _vistaListaZonas();
+            _quitarResaltadoZona();
+        } else {
+            _quitarResaltadoZona();
+        }
+
+        var partes = [];
+        if (cpInfo) partes.push(cpInfo);
+        if (htmlZonas) partes.push(htmlZonas);
+        var html = partes.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">');
+
+        _panelMostrar('<div id="apiBox">' + html + '</div>');
+    }
+
+    function _onMapClick(e) { _mostrarApilado(e.latlng, null); }
+    function _onLayerClick(e) {
+        if (e && e.originalEvent) { try { L.DomEvent.stopPropagation(e); } catch(ex) {} }
+        var cpInfo = null;
+        try {
+            var ly = e.target || e.layer;
+            if (ly && ly.feature && ly.feature.properties &&
+                typeof ly.feature.properties.CP !== 'undefined') {
+                cpInfo = _fmtCP(ly.feature.properties);
+            }
+        } catch(ex) {}
+        _mostrarApilado(e.latlng, cpInfo);
+    }
+
+    document.addEventListener('click', function(ev) {
+        var t = ev.target;
+        while (t && t !== document) {
+            if (t.classList && t.classList.contains('api-zona-item')) {
+                var idx = parseInt(t.getAttribute('data-idx'), 10);
+                var arr = window._apiladas || [];
+                if (arr[idx] && arr[idx].zid != null) _resaltarZonaPorZid(arr[idx].zid);
+                var det = _vistaDetalle(idx);
+                var pp = [];
+                if (window._cpInfoActual) pp.push(window._cpInfoActual);
+                pp.push(det);
+                _panelMostrar('<div id="apiBox">' + pp.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">') + '</div>');
+                return;
+            }
+            if (t.getAttribute && t.getAttribute('data-volver') === '1') {
+                _quitarResaltadoZona();
+                var pp2 = [];
+                if (window._cpInfoActual) pp2.push(window._cpInfoActual);
+                pp2.push(_vistaListaZonas());
+                _panelMostrar('<div id="apiBox">' + pp2.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">') + '</div>');
+                return;
+            }
+            t = t.parentNode;
+        }
+    });
+
+    window.toggleTooltipMode = function() {
+        var map = window._map || _findMap();
+        var btn = document.getElementById('ttModeBtn');
+        var hint = document.getElementById('ttModeHint');
+        if (!map) return;
+
+        if (window._ttMode === 'hover') {
+            _recolectarZonas(map);
+            window._ttStore = [];
+            window._popStore = [];
+            _walk(map, function(ly) {
+                if (ly.getTooltip && ly.getTooltip()) {
+                    var tt = ly.getTooltip();
+                    window._ttStore.push({ layer: ly, content: tt.getContent(), options: tt.options });
+                    ly.unbindTooltip();
+                }
+                if (ly.getPopup && ly.getPopup()) {
+                    var pp = ly.getPopup();
+                    window._popStore.push({ layer: ly, content: pp.getContent(), options: pp.options });
+                    ly.unbindPopup();
+                }
+                if (ly.off) { try { ly.off('mouseover'); ly.off('mousemove'); } catch(e) {} }
+                if (ly.feature && ly.feature.properties && ly.on &&
+                    (typeof ly.feature.properties._rad_m !== 'undefined' ||
+                     typeof ly.feature.properties.CP !== 'undefined')) {
+                    try { ly.on('click', _onLayerClick); } catch(e) {}
+                }
+            });
+            window._clickHandler = _onMapClick;
+            map.on('click', window._clickHandler);
+            window._ttMode = 'click';
+            if (btn) { btn.innerHTML = '👆 Info: Click (apilado)'; btn.style.background = '#2563eb'; }
+            if (hint) hint.innerHTML = 'Clic → elige entre las encimadas';
+        } else {
+            if (window._clickHandler) { try { map.off('click', window._clickHandler); } catch(e) {} window._clickHandler = null; }
+            try { map.closePopup(); } catch(e) {}
+            try { if (typeof cerrarInfoPanel === 'function') cerrarInfoPanel(); } catch(e) {}
+            _walk(map, function(ly) { if (ly.off) { try { ly.off('click', _onLayerClick); } catch(e) {} } });
+            window._ttStore.forEach(function(rec) { try { rec.layer.bindTooltip(rec.content, rec.options); } catch(e) {} });
+            window._popStore.forEach(function(rec) { try { rec.layer.bindPopup(rec.content, rec.options); } catch(e) {} });
+            window._ttStore = [];
+            window._popStore = [];
+            window._ttMode = 'hover';
+            if (btn) { btn.innerHTML = '🖱️ Info: Hover'; btn.style.background = '#16a34a'; }
+            if (hint) hint.innerHTML = 'Zonas encimadas → Click';
+        }
+    };
+    </script>
+    """
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -890,6 +1414,13 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
                                       min_value=0, step=10, value=0, key="rd_plan_val")
     with pc2:
         _btn_plan = st.button("🎯 Distribuir plan entre zonas", use_container_width=True, key="rd_plan_btn")
+
+    # Rango factible: con N zonas, el plan debe estar entre 32*N y 96*N para
+    # poder respetar el mínimo (32) y el máximo (96) por zona.
+    _nz = len(R["zonas"])
+    _pmin, _pmax = 32 * _nz, 96 * _nz
+    st.caption(f"ℹ️ Con {_nz} zonas, el plan factible va de **{_pmin}** (todas en 32) "
+               f"a **{_pmax}** (todas en 96). Fuera de ese rango no se puede respetar el mín/máx.")
 
     if _btn_plan and _plan_total > 0:
         with st.spinner("Distribuyendo el plan según histórico y demanda libre…"):
