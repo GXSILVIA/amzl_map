@@ -672,11 +672,18 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None):
         ).add_to(fg_z)
     fg_z.add_to(m)
 
-    # ── PUNTOS: blancos (asignados) y color distinto (no asignados) ──
+    # ── PUNTOS: blancos = asignados por TRACKING; morados = NO asignados por
+    #    tracking (aunque caigan dentro de un círculo → son los "por llevar").
+    #    El color se decide por el ORIGEN de la asignación, no por si cae o no
+    #    en un círculo: así los puntos sin tracking salen morados como pediste.
     fg_ok = folium.FeatureGroup(name="📦 Entregados", show=True)
     fg_no = folium.FeatureGroup(name="❗ No asignados", show=True)
-    pts_ok = pts[pts["_asignado"]]
-    pts_no = pts[~pts["_asignado"]]
+    if "_origen_asig" in pts.columns:
+        _es_track = pts["_origen_asig"] == "tracking"
+    else:
+        _es_track = pts["_asignado"]
+    pts_ok = pts[_es_track]
+    pts_no = pts[~_es_track]
     for _, p in pts_ok.iterrows():
         folium.CircleMarker(
             [p["latitude"], p["longitude"]], radius=2.5,
