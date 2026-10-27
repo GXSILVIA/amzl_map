@@ -698,6 +698,9 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
 
     # 📦 Paquetes LIBRES por zona = morados (no asignados por tracking) que caen
     #    DENTRO del círculo de la zona. Se calcula aquí para mostrarlo en el tooltip.
+    #    ⚠️ CONTEO COMPLETO en zonas apiladas: un morado que cae dentro de VARIAS
+    #       zonas se cuenta COMPLETO para CADA zona que lo cubre (no solo la más
+    #       cercana) → por eso usamos la matriz _dentro completa, no argmin.
     _libres_por_sn = {}
     try:
         if "_origen_asig" in pts.columns:
@@ -713,16 +716,46 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             _pla = _mor["latitude"].to_numpy(); _plo = _mor["longitude"].to_numpy()
             _d2 = ((_pla[:, None] - _szlat[None, :]) * M_GRADO) ** 2 + \
                   ((_plo[:, None] - _szlon[None, :]) * M_GRADO * _cl) ** 2
-            _dentro = _d2 <= (_szrad[None, :] ** 2)
-            _d2m = np.where(_dentro, _d2, np.inf)
-            _im = np.argmin(_d2m, axis=1)
-            _cae = np.isfinite(_d2m[np.arange(len(_mor)), _im])
-            for _k in range(len(_mor)):
-                if _cae[_k]:
-                    _sn = _szsn[_im[_k]]
-                    _libres_por_sn[_sn] = _libres_por_sn.get(_sn, 0) + 1
+            _dentro = _d2 <= (_szrad[None, :] ** 2)      # (P, Z) booleana
+            # Suma por columna = nº de morados dentro de cada zona (completo).
+            _conteo_zona = _dentro.sum(axis=0)
+            for _zi in range(len(zonas)):
+                _libres_por_sn[_szsn[_zi]] = int(_conteo_zona[_zi])
     except Exception:
         _libres_por_sn = {}
+
+    # 📮 DESGLOSE POR CP de cada zona: qué CPs cubre, % del CP que ocupa y libre
+    #    (elegibilidad Aurora) de cada CP. Se calcula si hay polígonos de CP.
+    _cps_detalle_por_sn = {}
+    try:
+        if gdf_cp_wgs84 is not None and not getattr(gdf_cp_wgs84, "empty", True):
+            import geopandas as _gpd2
+            _cpm = gdf_cp_wgs84[["CP", "geometry"]].copy()
+            _cpm["CP"] = _cpm["CP"].astype(str).map(_norm_cp)
+            _cpm = _cpm.to_crs("EPSG:6372")             # métrico para áreas
+            _cpm["geometry"] = _cpm.geometry.buffer(0)
+            _cpm["_acp"] = _cpm.geometry.area
+            # círculos de zonas en métrico
+            import shapely as _shp2
+            for _z in zonas:
+                _cen = _gpd2.GeoSeries([_shp2.geometry.Point(_z["LON"], _z["LAT"])],
+                                       crs="EPSG:4326").to_crs("EPSG:6372").iloc[0]
+                _circ = _cen.buffer(_z["RAD"])
+                _sub = _cpm[_cpm.geometry.intersects(_circ)]
+                _det = []
+                for _, _cr in _sub.iterrows():
+                    _ai = _cr.geometry.intersection(_circ).area
+                    if _cr["_acp"] <= 0:
+                        continue
+                    _pct = round(min(100.0, _ai / _cr["_acp"] * 100.0))
+                    if _pct <= 0:
+                        continue
+                    _lib = int(R.get("elig_por_cp", {}).get(_cr["CP"], 0))
+                    _det.append((_cr["CP"], _pct, _lib))
+                _det.sort(key=lambda t: t[1], reverse=True)
+                _cps_detalle_por_sn[_z["_sn"]] = _det
+    except Exception:
+        _cps_detalle_por_sn = {}
 
     # ── CÍRCULOS de zonas ENABLED (una capa) ──
     fg_z = folium.FeatureGroup(name="Zonas", show=True)
@@ -732,16 +765,26 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         desp = int(R["cap_por_zona"].get(z["_sn"], 0))
         libres = int(_libres_por_sn.get(z["_sn"], 0))
         ocup = round((desp / z["MAXCAP"]) * 100, 1) if z["MAXCAP"] else 0.0
-        # Tooltip pedido: SW Max Cap, SW Coverage, entregados del día, paquetes libres.
+        # Desglose por CP: elegibilidad libre total + detalle (CP, %, libre).
+        _det_cp = _cps_detalle_por_sn.get(z["_sn"], [])
+        _elig_total = sum(l for _, _, l in _det_cp)
+        _cp_lines = "".join(
+            [f"&nbsp;&nbsp;• {c}: {p}%<br>" for c, p, l in _det_cp]
+        ) if _det_cp else "&nbsp;&nbsp;(sin CPs)<br>"
+        # Tooltip: SW Max Cap, SW Coverage, entregados, paquetes libres, capacidad
+        # usada, elegibilidad libre (Aurora) y desglose por CP (% y libre c/u).
         tt = ("<b>Zona: {nom}</b><br>"
               "SW Max Cap: {mc}<br>"
               "SW Coverage: {rad} m<br>"
               "Paquetes entregados (hoy): {d}<br>"
               "<b>Paquetes libres: {lib}</b><br>"
-              "Ocupación: {o}%<br>"
-              "Traslape: {t}% — {nv}").format(
+              "Capacidad usada: {o}%<br>"
+              "Traslape: {t}% — {nv}<br>"
+              "<b>Elegibilidad libre (Aurora): {et}</b><br>"
+              "── Libre por CP ──<br>{cps}").format(
             nom=z["NOM"], mc=int(z["MAXCAP"]), rad=int(z["RAD"]), d=desp, lib=libres, o=ocup,
-            t=tinfo.get("pct", 0.0), nv=tinfo.get("nivel", "⚪"))
+            t=tinfo.get("pct", 0.0), nv=tinfo.get("nivel", "⚪"),
+            et=int(_elig_total), cps=_cp_lines)
         # círculo como polígono aproximado (para GeoJson + buscador + apilados)
         ang = np.linspace(0, 2 * np.pi, 48)
         cos_lat = np.cos(np.radians(z["LAT"]))
