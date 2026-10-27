@@ -1339,14 +1339,18 @@ if st.session_state["authentication_status"]:
                 if 'VOLUMEN' in df_poly_user.columns:
                     df_poly_user['VOLUMEN'] = pd.to_numeric(df_poly_user['VOLUMEN'], errors='coerce').fillna(0)
                     agg_dict = {'VOLUMEN': 'sum'}
-                    if 'ZONA' in df_poly_user.columns:
-                        agg_dict['ZONA'] = 'first'
                     if 'PARTNERS' in df_poly_user.columns:
                         agg_dict['PARTNERS'] = 'sum'
                     for col in df_poly_user.columns:
                         if col not in ['CP', 'VOLUMEN', 'ZONA', 'PARTNERS']:
                             agg_dict[col] = 'first'
-                    df_poly_user = df_poly_user.groupby('CP', as_index=False).agg(agg_dict)
+                    # ✅ FIX CPs compartidos: agrupar por CP + ZONA (no solo CP). Un CP
+                    #    que pertenece a varios nodos (p.ej. DCU2 y DCU4 en Cancún)
+                    #    conserva UNA fila por cada nodo, y ningún nodo pierde sus CPs.
+                    if 'ZONA' in df_poly_user.columns:
+                        df_poly_user = df_poly_user.groupby(['CP', 'ZONA'], as_index=False).agg(agg_dict)
+                    else:
+                        df_poly_user = df_poly_user.groupby('CP', as_index=False).agg(agg_dict)
                 else:
                     df_poly_user = df_poly_user.drop_duplicates(subset=['CP'])
 
@@ -1384,7 +1388,10 @@ if st.session_state["authentication_status"]:
                     st.warning("⚠️ No se encontraron coincidencias entre los CPs del Excel y los mapas GeoJSON.")
                     st.stop()
 
-                gdf_cobertura = gdf_cobertura.drop_duplicates(subset=['CP'])
+                # ✅ FIX CPs compartidos: deduplicar por CP + ZONA para no colapsar
+                #    los CPs que pertenecen a varios nodos (evita que DCU4 pierda sus CPs).
+                _subset_dedup = ['CP', 'ZONA'] if 'ZONA' in gdf_cobertura.columns else ['CP']
+                gdf_cobertura = gdf_cobertura.drop_duplicates(subset=_subset_dedup)
                 estados_con_cobertura_real = gdf_cobertura['ESTADO_PERTENECE'].unique().tolist()
 
                 for c in ['LATITUD', 'LONGITUD', 'RADIO', 'VOLUMEN']:
