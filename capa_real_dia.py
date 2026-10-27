@@ -853,24 +853,14 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     k3.metric("Entregados", R["total_asignados"])
     k4.metric("Traslape total", f"{R['traslape_total']}%")
 
-    # ── Layout tipo capa de cobertura: mapa (izq) + panel desglose (der) ──
-    df_z = construir_tabla_zonas(R, hist_por_zona=st.session_state.get("rd_hist"))
-    _col_map, _col_pan = st.columns([3, 1.3])
-    with _col_map:
-        mapa = st.session_state.get("rd_mapa")
-        if mapa:
-            components.html(mapa, height=620)
-    with _col_pan:
-        st.markdown("### 🗂️ Desglose de Zonas")
-        st.caption(f"{len(df_z)} círculos del día")
-        # Panel con TODOS los círculos (zona, seteo, despachado, ocupación, traslape)
-        _cols_panel = [c for c in ["VR (Store Name)", "Seteo (SW Max Cap)",
-                                   "Volumen Despachado", "Ocupación", "% Traslape"]
-                       if c in df_z.columns]
-        st.dataframe(df_z[_cols_panel] if _cols_panel else df_z,
-                     use_container_width=True, hide_index=True, height=560)
+    # Mapa a ancho completo (la info de cada zona se ve en el tooltip / panel
+    # apilado del propio mapa, igual que la capa de cobertura — sin panel lateral).
+    mapa = st.session_state.get("rd_mapa")
+    if mapa:
+        components.html(mapa, height=620)
 
     # Tablas completas debajo del mapa
+    df_z = construir_tabla_zonas(R, hist_por_zona=st.session_state.get("rd_hist"))
     st.markdown("### 📋 Análisis por Zona (VR)")
     st.dataframe(df_z, use_container_width=True, hide_index=True)
 
