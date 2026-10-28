@@ -654,17 +654,26 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         try:
             import geopandas as gpd
             from shapely.geometry import Point
+            _pts2 = pts.copy()
+            # Marcar cada punto como blanco (entregado hub = por tracking) o morado.
+            if "_origen_asig" in _pts2.columns:
+                _pts2["_es_blanco"] = (_pts2["_origen_asig"] == "tracking")
+            else:
+                _pts2["_es_blanco"] = _pts2["_asignado"]
             gpts = gpd.GeoDataFrame(
-                pts.copy(),
-                geometry=[Point(xy) for xy in zip(pts["longitude"], pts["latitude"])],
+                _pts2,
+                geometry=[Point(xy) for xy in zip(_pts2["longitude"], _pts2["latitude"])],
                 crs="EPSG:4326",
             )
             cob = gdf_cp_wgs84[["CP", "geometry"]].copy()
             cob["CP"] = cob["CP"].astype(str).map(_norm_cp)
-            join = gpd.sjoin(gpts, cob, how="left", predicate="within")
-            cnt_cp = join.dropna(subset=["CP"]).groupby("CP").size().to_dict()
-            cob["_entregados"] = cob["CP"].map(lambda c: int(cnt_cp.get(c, 0)))
-            cob["_elegibles"] = cob["CP"].map(lambda c: int(R["elig_por_cp"].get(c, 0)))
+            join = gpd.sjoin(gpts, cob, how="left", predicate="within").dropna(subset=["CP"])
+            # Entregados hub = puntos BLANCOS por CP; Disponibles = puntos MORADOS por CP.
+            _blancos_cp = join[join["_es_blanco"]].groupby("CP").size().to_dict()
+            _morados_cp = join[~join["_es_blanco"]].groupby("CP").size().to_dict()
+            cob["_entregados"] = cob["CP"].map(lambda c: int(_blancos_cp.get(c, 0)))   # blancos
+            cob["_disponibles"] = cob["CP"].map(lambda c: int(_morados_cp.get(c, 0)))  # morados
+            cob["_elegibles"] = cob["CP"].map(lambda c: int(R["elig_por_cp"].get(c, 0)))  # Aurora
             cob["_diferencia"] = cob["_elegibles"] - cob["_entregados"]
 
             # Color por elegibilidad (igual escala que la capa de cobertura)
@@ -684,12 +693,12 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
                     "fillColor": f["properties"].get("_color", "#9e9e9e"),
                     "color": "#ffffff", "weight": 1.2, "fillOpacity": 0.45},
                 tooltip=folium.GeoJsonTooltip(
-                    fields=["CP", "_entregados", "_elegibles", "_diferencia"],
-                    aliases=["CP:", "Entregados hoy:", "Elegibles (libre):", "Diferencia:"],
+                    fields=["CP", "_entregados", "_elegibles", "_disponibles"],
+                    aliases=["CP:", "Entregados hub:", "Elegibles:", "Disponibles:"],
                     localize=True),
                 popup=folium.GeoJsonPopup(
-                    fields=["CP", "_entregados", "_elegibles", "_diferencia"],
-                    aliases=["CP:", "Entregados hoy:", "Elegibles (libre):", "Diferencia:"]),
+                    fields=["CP", "_entregados", "_elegibles", "_disponibles"],
+                    aliases=["CP:", "Entregados hub:", "Elegibles:", "Disponibles:"]),
             ).add_to(fg_cp)
         except Exception as e:
             folium.map.Marker([c_lat, c_lon],
@@ -781,7 +790,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
               "Capacidad usada: {o}%<br>"
               "Traslape: {t}% — {nv}<br>"
               "<b>Elegibilidad libre (Aurora): {et}</b><br>"
-              "── Libre por CP ──<br>{cps}").format(
+              "── % Ocupado por CP ──<br>{cps}").format(
             nom=z["NOM"], mc=int(z["MAXCAP"]), rad=int(z["RAD"]), d=desp, lib=libres, o=ocup,
             t=tinfo.get("pct", 0.0), nv=tinfo.get("nivel", "⚪"),
             et=int(_elig_total), cps=_cp_lines)
@@ -1163,12 +1172,13 @@ _JS_BUSCADOR_APILADO = r"""
     function _fmtCP(pr) {
         if (!pr) return '';
         var cp = (pr.CP !== undefined && pr.CP !== null) ? String(pr.CP).replace(/\.0$/, '') : '';
+        // Campos propios de la CAPA DE ANÁLISIS: _elegibles = volumen libre (Aurora),
+        // _entregados = puntos entregados hoy en el CP, _diferencia = libre - entregados.
         var filas = [
             ['Código Postal', cp],
-            ['Estado', pr.ESTADO_PERTENECE || ''],
-            ['Volumen Disponible', pr.VOLUMEN != null ? pr.VOLUMEN : 0],
-            ['Partners', pr.PARTNERS != null ? pr.PARTNERS : 0],
-            ['Rango', pr._rango_txt || '']
+            ['Entregados hub', pr._entregados != null ? pr._entregados : 0],
+            ['Elegibles', pr._elegibles != null ? pr._elegibles : 0],
+            ['Disponibles', pr._disponibles != null ? pr._disponibles : 0]
         ];
         var out = ['<div style="font-weight:bold;color:#0e7490;margin-bottom:4px;">📮 CP ' + cp + '</div>'];
         for (var i = 0; i < filas.length; i++) {
@@ -1439,7 +1449,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     st.dataframe(df_z, use_container_width=True, hide_index=True)
 
     st.markdown("### 📮 Elegibilidad vs. Entregado por CP")
-    df_cp = pd.DataFrame([{"CP": cp, "Elegibles (libre)": int(v)} for cp, v in sorted(R["elig_por_cp"].items())])
+    df_cp = pd.DataFrame([{"CP": cp, "Volumen libre (Aurora)": int(v)} for cp, v in sorted(R["elig_por_cp"].items())])
     st.dataframe(df_cp, use_container_width=True, hide_index=True)
 
     # ═══════════════════════════════════════════════════════════════════
