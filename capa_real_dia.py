@@ -239,6 +239,7 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None):
         zona_geom = np.where(tiene, sz_sn[idx_min], None)
         dentro_alguna = tiene
     gd["_zona_geom"] = zona_geom
+    gd["_dentro_zona"] = dentro_alguna  # cae dentro de algún círculo
 
     # 4) ZONA FINAL: tracking si existe, si no geometría
     zt = gd["_zona_tracking"]
@@ -262,9 +263,11 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None):
     # 8) Puntos por CP (según postal_code del raw por tracking, si existe; si no, no se cuenta aquí)
     #    El conteo de puntos dentro de cada polígono de CP se hace en la app con las
     #    geometrías GeoJSON; aquí entregamos el dict de elegibilidad y los puntos.
-    total_puntos = len(gd)
+    total_puntos = len(gd)                              # TODOS los geopuntos del día
     total_asignados = int(gd["_asignado"].sum())
     total_no_asig = total_puntos - total_asignados
+    total_dentro_zonas = int(gd["_dentro_zona"].sum())  # caen dentro de un círculo
+    total_blancos = int((gd["_origen_asig"] == "tracking").sum())  # ENTREGADOS = blancos (tracking)
 
     R = {
         "dia": dia,
@@ -279,6 +282,8 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None):
         "total_puntos": total_puntos,
         "total_asignados": total_asignados,
         "total_no_asignados": total_no_asig,
+        "total_dentro_zonas": total_dentro_zonas,
+        "total_blancos": total_blancos,
     }
     return R
 
@@ -587,6 +592,7 @@ def distribuir_confirmation_plan(R, plan_total, hist_zona, demanda_zona,
             razon.append("mín 32")
         filas.append({
             "VR (Store Name)": z["NOM"],
+            "Histórico (prom. despachado)": int(round(hist[j])),
             "Seteo actual": actual,
             "Seteo sugerido": sug,
             "% del plan": f"{round(sug/plan*100,1)}%",
@@ -1434,7 +1440,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Zonas", len(R["zonas"]))
     k2.metric("Paquetes (puntos)", R["total_puntos"])
-    k3.metric("Entregados", R["total_asignados"])
+    k3.metric("Entregados", R.get("total_blancos", R["total_asignados"]))
     k4.metric("Traslape total", f"{R['traslape_total']}%")
 
     # Mapa a ancho completo (la info de cada zona se ve en el tooltip / panel
