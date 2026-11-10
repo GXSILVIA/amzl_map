@@ -908,6 +908,15 @@ def analizar_fuera_de_zona(R):
 
     rp = raw.copy()
     rp["_emp"] = rp["_emp"].astype(str).map(_norm_txt)
+    # SOLO repartidores cuya zona está ENABLED ese día (presente en R["zonas"]).
+    # Las zonas que no salieron ese día en el seteo se excluyen del neto/bruto.
+    _sns_enabled = set(z["_sn"] for z in zonas)
+    rp = rp[rp["_emp"].isin(_sns_enabled)].copy()
+    if rp.empty:
+        return (pd.DataFrame(columns=cols_resumen),
+                pd.DataFrame(columns=["Zona origen", "Zona destino", "Paquetes"]),
+                pd.DataFrame(columns=["tracking_id", "latitude", "longitude",
+                                      "Zona propia (repartidor)", "Zona destino (según coords)"]))
     plat = rp["latitude"].to_numpy(dtype=float)
     plon = rp["longitude"].to_numpy(dtype=float)
     emp = rp["_emp"].to_numpy()
@@ -1077,9 +1086,9 @@ def construir_tabla_zonas(R, hist_por_zona=None):
             "PDNP dentro (✘ perfil)": pdnp_in,
             "% Cumplimiento": f"{pct_cumpl}%",
             "Ocupación": f"{ocup}%",
-            "Histórico": h.get("hist", ""),
-            "Máximo": h.get("max", ""),
-            "Mínimo": h.get("min", ""),
+            "Histórico (prom. semana)": h.get("hist", ""),
+            "Máximo semana": h.get("max", ""),
+            "Mínimo semana": h.get("min", ""),
             "% Traslape": f"{pct_t}%",
             "Nivel Traslape": tinfo.get("nivel", "⚪ Sin datos"),
             "Prob. más volumen": prob,
@@ -1387,10 +1396,15 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         except Exception:
             pass
 
+    # Mapa SIN tiles por defecto; el basemap se agrega con control=False para
+    # que NO aparezca como opción (URL) en el control de "Filtros".
     m = folium.Map(location=[c_lat, c_lon], zoom_start=11,
-                   tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
-                   attr="&copy; OpenStreetMap", prefer_canvas=True,
-                   control_scale=True)
+                   tiles=None, prefer_canvas=True, control_scale=True)
+    folium.TileLayer(
+        tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
+        attr="&copy; OpenStreetMap", name="Mapa base",
+        control=False,   # ← no aparece en el control de capas/filtros
+    ).add_to(m)
 
     # ── ZOOM automático al NODO: ajustar la vista a las zonas del nodo ──
     #    Así, al elegir un nodo, el mapa se acerca a donde están sus zonas
@@ -1433,6 +1447,21 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             cob["_pdp"] = cob["CP"].map(lambda c: int(_pdp_cp.get(c, 0)))
             cob["_pdnp"] = cob["CP"].map(lambda c: int(_pdnp_cp.get(c, 0)))
             cob["_elegibles"] = cob["CP"].map(lambda c: int(R["elig_por_cp"].get(c, 0)))
+            # HUB = paquetes entregados por zona (Raw) que caen en cada CP
+            _hub_cp = {}
+            try:
+                _rawp = R.get("raw_pts", None)
+                if _rawp is not None and len(_rawp):
+                    _grw = gpd.GeoDataFrame(
+                        _rawp.copy(),
+                        geometry=[Point(xy) for xy in zip(_rawp["longitude"], _rawp["latitude"])],
+                        crs="EPSG:4326")
+                    _jrw = gpd.sjoin(_grw, cob[["CP", "geometry"]], how="left",
+                                     predicate="within").dropna(subset=["CP"])
+                    _hub_cp = _jrw.groupby("CP").size().to_dict()
+            except Exception:
+                _hub_cp = {}
+            cob["_hub"] = cob["CP"].map(lambda c: int(_hub_cp.get(c, 0)))
 
             def _col_elig(v):
                 v = float(v)
@@ -1450,14 +1479,14 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
                     "fillColor": f["properties"].get("_color", "#9e9e9e"),
                     "color": "#ffffff", "weight": 1.2, "fillOpacity": 0.45},
                 tooltip=folium.GeoJsonTooltip(
-                    fields=["CP", "_pdp", "_pdnp", "_elegibles"],
+                    fields=["CP", "_pdp", "_pdnp", "_hub", "_elegibles"],
                     aliases=["Código Postal:", "PDP (✔ perfil):", "PDNP (✘ perfil):",
-                             "Elegibles (Aurora):"],
-                    localize=True),
+                             "Entregados hub (Raw):", "Elegibles (Aurora):"],
+                    localize=True, sticky=True),
                 popup=folium.GeoJsonPopup(
-                    fields=["CP", "_pdp", "_pdnp", "_elegibles"],
+                    fields=["CP", "_pdp", "_pdnp", "_hub", "_elegibles"],
                     aliases=["Código Postal:", "PDP (✔ perfil):", "PDNP (✘ perfil):",
-                             "Elegibles (Aurora):"], localize=True),
+                             "Entregados hub (Raw):", "Elegibles (Aurora):"], localize=True),
             ).add_to(fg_cp)
         except Exception as e:
             folium.map.Marker([c_lat, c_lon],
@@ -1571,6 +1600,10 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         if _det_tras_lines:
             _tt_lines.append(_det_tras_lines.rstrip("<br>"))
         _tt_lines.append("-------------------------")
+        # Histórico semanal (máx/mín) de la zona, si está disponible
+        _h = R.get("hist_por_zona", {}).get(z["_sn"], {})
+        if _h:
+            _tt_lines.append(f"Histórico semana — máx: {_h.get('max','?')} · mín: {_h.get('min','?')} · prom: {_h.get('hist','?')}")
         _tt_lines.append(f"<b>Elegibilidad libre (Aurora): {int(_elig_total)}</b>")
         _tt_lines.append(f"<b>CPs Ocupados:</b> {_txt_cps}")
         tt = "<br>".join(_tt_lines)
@@ -1601,7 +1634,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             {"type": "FeatureCollection", "features": features},
             style_function=lambda f: {"fillColor": f["properties"]["_color"],
                                       "color": "black", "weight": 1, "fillOpacity": 0.25},
-            tooltip=folium.GeoJsonTooltip(fields=["_tt"], aliases=[""], localize=True),
+            tooltip=folium.GeoJsonTooltip(fields=["_tt"], aliases=[""], localize=True, sticky=True),
             popup=folium.GeoJsonPopup(fields=["_tt"], aliases=[""], max_width=360),
         ).add_to(fg_z)
     fg_z.add_to(m)
@@ -1757,8 +1790,8 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             renderer: _cv, radius: 2.2, weight: 0.3,
             color: "#000000", fillColor: "#000000", fillOpacity: 0.85
           });
-          cm.bindTooltip("⚫ Entregado por zona: " + r[2] + "<br>" + r[3]);
-          window._rawMarkers.push({ marker: cm, zona: (r[2]||"").toUpperCase() });
+          cm.bindTooltip("<b>⚫ Repartidor:</b> " + r[2] + "<br>Tracking: " + r[3]);
+          window._rawMarkers.push({ marker: cm, zona: (r[2]||"").toUpperCase().replace(/\\s+/g," ").trim() });
           grupo.addLayer(cm);
         }
         grupo.addTo(mapa);
@@ -1766,7 +1799,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
       }
       // Resalta (amarillo grande) los puntos Raw de una zona; "" restaura todos.
       window.resaltarZonaRaw = function(nombreZona) {
-        var z = (nombreZona || "").toUpperCase().trim();
+        var z = (nombreZona || "").toUpperCase().replace(/\\s+/g," ").trim();
         if (!window._rawMarkers) return;
         for (var i = 0; i < window._rawMarkers.length; i++) {
           var it = window._rawMarkers[i];
@@ -2052,7 +2085,7 @@ _JS_BUSCADOR_APILADO = r"""
     function _fmtCP(pr){
         if(!pr)return '';
         var cp=(pr.CP!==undefined&&pr.CP!==null)?String(pr.CP).replace(/\.0$/,''):'';
-        var filas=[['Código Postal',cp],['PDP (✔ perfil)',pr._pdp!=null?pr._pdp:0],['PDNP (✘ perfil)',pr._pdnp!=null?pr._pdnp:0],['Elegibles (Aurora)',pr._elegibles!=null?pr._elegibles:0]];
+        var filas=[['Código Postal',cp],['PDP (✔ perfil)',pr._pdp!=null?pr._pdp:0],['PDNP (✘ perfil)',pr._pdnp!=null?pr._pdnp:0],['Entregados hub (Raw)',pr._hub!=null?pr._hub:0],['Elegibles (Aurora)',pr._elegibles!=null?pr._elegibles:0]];
         var out=['<div style="font-weight:bold;color:#0e7490;margin-bottom:4px;">📮 CP '+cp+'</div>'];
         for(var i=0;i<filas.length;i++){ out.push('<div><b>'+filas[i][0]+':</b> '+filas[i][1]+'</div>'); }
         return out.join('');
@@ -2343,6 +2376,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
             _pbar.progress(55, text="📊 Calculando histórico del periodo…")
             hist = calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=nodo)
+            R["hist_por_zona"] = hist   # para mostrar máx/mín en el tooltip de zona
 
             _pbar.progress(75, text="🗺️ Construyendo el mapa (zonas, puntos, CP, heatmap)…")
             # Si no llegaron polígonos de CP, intentar cargarlos desde mapas/ con
