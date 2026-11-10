@@ -1263,8 +1263,15 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             "properties": {
                 "NOMBRE": z["NOM"], "_zid": i, "_tt": tt,
                 "_clat": z["LAT"], "_clon": z["LON"], "_rad_m": z["RAD"],
-                "_color": "#e74c3c" if tinfo.get("pct", 0) >= 75 else
-                          ("#e67e22" if tinfo.get("pct", 0) >= 50 else "#2ecc71"),
+                # Color por VOLUMEN de paquetes despachados a la zona (mismos
+                # rangos que la capa de cobertura — obtener_color_rango_circulo):
+                #   0 gris · ≤15 amarillo · ≤20 naranja · ≤30 rojo · ≤40 morado · >40 café
+                "_color": ("#9e9e9e" if desp == 0 else
+                           "#f1c40f" if desp <= 15 else
+                           "#e67e22" if desp <= 20 else
+                           "#e74c3c" if desp <= 30 else
+                           "#8e44ad" if desp <= 40 else
+                           "#6d4c41"),
             },
             "geometry": {"type": "Polygon", "coordinates": [ring]},
         })
@@ -1319,33 +1326,40 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
                  "label": "⚪ No asignado"},
     }
 
-    # FeatureGroups vacíos (solo para que aparezcan en el LayerControl y se
-    # puedan prender/apagar). El dibujado real lo hace el JS de abajo.
-    fg_pdp = folium.FeatureGroup(name="🟢 PDP (cumplen perfil)", show=True)
-    fg_pdnp = folium.FeatureGroup(name="🔴 PDNP (no cumplen)", show=True)
-    fg_no = folium.FeatureGroup(name="⚪ No asignados", show=True)
-    fg_pdp.add_to(m)
-    fg_pdnp.add_to(m)
-    fg_no.add_to(m)
+    # (Los puntos los dibuja el JS de abajo directamente sobre el mapa, en capas
+    #  L.layerGroup por categoría — sin crear un objeto Python por punto.)
 
-    _map_var = m.get_name()
-    _fg_pdp_var = fg_pdp.get_name()
-    _fg_pdnp_var = fg_pdnp.get_name()
-    _fg_no_var = fg_no.get_name()
+    # El JS busca el mapa dinámicamente (robusto dentro del iframe de Streamlit),
+    # crea una capa (L.layerGroup) por categoría sobre un canvas compartido y la
+    # registra en el LayerControl para poder prender/apagar. Dibuja TODOS los
+    # puntos de golpe (sin un objeto Python por punto → rápido y sin HTML gigante).
     _js_puntos = """
     <script>
     (function() {
       var _DATA = __DATA__;
-      var _grupos = {"pdp": __FGPDP__, "pdnp": __FGPDNP__, "no": __FGNO__};
-      function _pintar() {
-        var mapa = __MAP__;
-        if (!mapa) { setTimeout(_pintar, 300); return; }
-        // canvas renderer compartido = muchísimo más rápido que SVG por punto
+      function _buscarMapa() {
+        for (var k in window) {
+          try { if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
+        }
+        for (var k2 in window) {
+          try { if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2]; } catch(e) {}
+        }
+        return null;
+      }
+      function _pintar(intentos) {
+        intentos = intentos || 0;
+        var mapa = _buscarMapa();
+        if (!mapa || typeof L === 'undefined') {
+          if (intentos < 40) { setTimeout(function(){ _pintar(intentos+1); }, 300); }
+          return;
+        }
+        if (window.__puntosDibujados) return;  // evitar doble dibujado
+        window.__puntosDibujados = true;
         var _canvas = L.canvas({ padding: 0.5 });
         Object.keys(_DATA).forEach(function(cat) {
           var cfg = _DATA[cat];
-          var fg = _grupos[cat];
-          if (!fg) return;
+          if (!cfg.pts || !cfg.pts.length) return;
+          var grupo = L.layerGroup();
           for (var i = 0; i < cfg.pts.length; i++) {
             var r = cfg.pts[i];
             var cm = L.circleMarker([r[0], r[1]], {
@@ -1354,21 +1368,21 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             });
             cm.bindTooltip(cfg.label + "<br>" + r[2] +
               (r[3] && r[3] !== "None" && r[3] !== "nan" ? "<br>Zona: " + r[3] : ""));
-            cm.addTo(fg);
+            grupo.addLayer(cm);
           }
+          grupo.addTo(mapa);
+          // registrar en el control de capas si existe
+          try {
+            if (mapa._qwLayerControl) { mapa._qwLayerControl.addOverlay(grupo, cfg.label); }
+          } catch(e) {}
         });
       }
-      if (document.readyState === "complete") { setTimeout(_pintar, 400); }
-      else { window.addEventListener("load", function() { setTimeout(_pintar, 400); }); }
+      if (document.readyState === "complete") { setTimeout(function(){ _pintar(0); }, 500); }
+      else { window.addEventListener("load", function() { setTimeout(function(){ _pintar(0); }, 500); }); }
     })();
     </script>
     """
-    _js_puntos = (_js_puntos
-                  .replace("__DATA__", _json.dumps(_data_puntos))
-                  .replace("__MAP__", _map_var)
-                  .replace("__FGPDP__", _fg_pdp_var)
-                  .replace("__FGPDNP__", _fg_pdnp_var)
-                  .replace("__FGNO__", _fg_no_var))
+    _js_puntos = _js_puntos.replace("__DATA__", _json.dumps(_data_puntos))
     m.get_root().html.add_child(folium.Element(_js_puntos))
 
     # ── HEATMap ──
