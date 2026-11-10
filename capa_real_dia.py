@@ -370,8 +370,12 @@ def _leer_raw(raw_items):
     _const = raw[raw["_status"] != ""]
     tr2status = dict(zip(_const["tracking_id"], _const["_status"])) if len(_const) else {}
     # puntos Raw (con coordenadas válidas) = paquetes entregados por zona
-    raw_pts = raw.dropna(subset=["latitude", "longitude"]).copy()
-    raw_pts = raw_pts[(raw_pts["latitude"] != 0) & (raw_pts["longitude"] != 0)]
+    # NO descartar los sin coordenada: se conservan con lat/lon NaN para que
+    # la app les asigne un punto DENTRO del círculo de su zona (employee).
+    raw_pts = raw.copy()
+    # marcar las coords 0 como NaN (inválidas) para tratarlas como "sin coord"
+    raw_pts.loc[raw_pts["latitude"] == 0, "latitude"] = np.nan
+    raw_pts.loc[raw_pts["longitude"] == 0, "longitude"] = np.nan
     return tr2emp, tr2status, raw_pts
 
 
@@ -835,6 +839,36 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
         # DEDUPLICAR por tracking_id: el Raw repite el mismo paquete en varias
         # filas (intentos/escaneos). Cada paquete debe contar UNA vez.
         _rp = _rp.drop_duplicates(subset=["tracking_id"], keep="first")
+
+        # ── ASIGNAR coordenada a los paquetes SIN geocoding ──
+        # Si un paquete del Raw no trae coordenada (lat/lon NaN), se dibuja
+        # DENTRO del círculo de SU zona (la del employee en el seteo), en una
+        # posición pseudo-aleatoria estable (determinística por tracking_id).
+        _rp = _rp.copy()
+        _sin = _rp["latitude"].isna() | _rp["longitude"].isna()
+        if _sin.any() and zonas:
+            _zc = {z["_sn"]: (z["LAT"], z["LON"], z["RAD"]) for z in zonas}
+            _emp_u = _rp["_emp"].map(_norm_txt)
+            _trk = _rp["tracking_id"].astype(str)
+            _new_lat = _rp["latitude"].to_numpy(dtype=float).copy()
+            _new_lon = _rp["longitude"].to_numpy(dtype=float).copy()
+            _idx = np.where(_sin.to_numpy())[0]
+            for _k in _idx:
+                _c = _zc.get(_emp_u.iloc[_k])
+                if _c is None:
+                    continue  # sin zona conocida → se queda sin coord (se filtrará)
+                # ángulo y radio determinísticos a partir del hash del tracking
+                _hh = abs(hash(_trk.iloc[_k]))
+                _ang = (_hh % 3600) / 3600.0 * 2 * np.pi
+                _rr = ((_hh // 3600) % 1000) / 1000.0
+                _rad_pt = np.sqrt(_rr) * _c[2] * 0.9   # dentro del 90% del radio
+                _cl = np.cos(np.radians(_c[0]))
+                _new_lat[_k] = _c[0] + (_rad_pt * np.sin(_ang)) / M_GRADO
+                _new_lon[_k] = _c[1] + (_rad_pt * np.cos(_ang)) / (M_GRADO * _cl)
+            _rp["latitude"] = _new_lat
+            _rp["longitude"] = _new_lon
+        # descartar los que siguen sin coord (employee sin zona en el seteo)
+        _rp = _rp.dropna(subset=["latitude", "longitude"])
 
         # ── LIMPIAR coordenadas erróneas ──
         # El employee del Raw = nombre de la zona (Store Name del seteo). Las
