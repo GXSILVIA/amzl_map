@@ -318,17 +318,68 @@ def _leer_geo(bts, name, categoria):
 
 
 @st.cache_data(show_spinner=False)
-def _leer_raw(raw_bytes, raw_name):
-    """Lee Raw Data → devuelve (tr2emp, tr2status)."""
-    raw = _read_tabla(raw_bytes, raw_name)
-    raw.columns = [str(c).strip() for c in raw.columns]
-    raw["tracking_id"] = _norm_trk(raw["tracking_id"])
-    raw["_emp"] = raw["Employee"].map(_norm_txt)
-    tr2emp = dict(zip(raw["tracking_id"], raw["_emp"]))
-    _col_st = next((c for c in ["last_shipment_status", "last_shipment_status_code",
-                                "Delivery Status"] if c in raw.columns), None)
-    tr2status = dict(zip(raw["tracking_id"], raw[_col_st].map(_norm_txt))) if _col_st else {}
-    return tr2emp, tr2status
+def _leer_raw(raw_items):
+    """
+    Lee UNO o VARIOS archivos Raw y los combina. Devuelve:
+      • tr2emp  : dict tracking_id → Employee (zona que lo entregó)
+      • tr2status: dict tracking_id → estatus (si existe la columna)
+      • raw_pts : DataFrame de los paquetes ENTREGADOS por zona, con columnas
+                  tracking_id, latitude, longitude, _emp, _nodo, _fecha.
+                  (Son los puntos NEGROS del mapa.)
+
+    raw_items: lista de tuplas (bytes, nombre). Acepta el formato nuevo con
+    columnas: dispatch_day, tracking_id, delivery_station, employee,
+    latitud, longitud  — y también el formato viejo (Employee, postal_code...).
+    Detección de columnas CASE-INSENSITIVE.
+    """
+    if not isinstance(raw_items, (list, tuple)):
+        raw_items = [raw_items]
+
+    _frames = []
+    for _bts, _name in raw_items:
+        if _bts is None:
+            continue
+        r = _read_tabla(_bts, _name)
+        r.columns = [str(c).strip() for c in r.columns]
+        _low = {str(c).strip().lower(): c for c in r.columns}
+        def _c(cands):
+            for cand in cands:
+                if cand.lower() in _low:
+                    return _low[cand.lower()]
+            return None
+        _ctrk = _c(["tracking_id", "tracking", "trackingid"])
+        _cemp = _c(["employee", "empleado", "repartidor"])
+        _clat = _c(["latitud", "latitude", "lat"])
+        _clon = _c(["longitud", "longitude", "lon", "lng"])
+        _cnod = _c(["delivery_station", "nodo", "station_code", "station", "node"])
+        _cfec = _c(["dispatch_day", "fecha", "event_day", "date"])
+        _cst = _c(["last_shipment_status", "last_shipment_status_code", "delivery status"])
+        if _ctrk is None:
+            continue
+        d = pd.DataFrame()
+        d["tracking_id"] = _norm_trk(r[_ctrk])
+        d["_emp"] = r[_cemp].map(_norm_txt) if _cemp else ""
+        d["latitude"] = pd.to_numeric(r[_clat], errors="coerce") if _clat else np.nan
+        d["longitude"] = pd.to_numeric(r[_clon], errors="coerce") if _clon else np.nan
+        d["_nodo"] = r[_cnod].map(_norm_txt) if _cnod else ""
+        d["_fecha"] = _norm_fecha(r[_cfec]) if _cfec else None
+        d["_status"] = r[_cst].map(_norm_txt) if _cst else ""
+        _frames.append(d)
+
+    if not _frames:
+        return {}, {}, pd.DataFrame(columns=["tracking_id", "latitude", "longitude",
+                                             "_emp", "_nodo", "_fecha", "_status"])
+
+    raw = pd.concat(_frames, ignore_index=True)
+    # diccionarios para el cruce (último gana si hay duplicados)
+    _conemp = raw[raw["_emp"] != ""]
+    tr2emp = dict(zip(_conemp["tracking_id"], _conemp["_emp"]))
+    _const = raw[raw["_status"] != ""]
+    tr2status = dict(zip(_const["tracking_id"], _const["_status"])) if len(_const) else {}
+    # puntos Raw (con coordenadas válidas) = paquetes entregados por zona
+    raw_pts = raw.dropna(subset=["latitude", "longitude"]).copy()
+    raw_pts = raw_pts[(raw_pts["latitude"] != 0) & (raw_pts["longitude"] != 0)]
+    return tr2emp, tr2status, raw_pts
 
 
 @st.cache_data(show_spinner=False)
@@ -336,10 +387,19 @@ def _leer_elig(elig_bytes, elig_name, elig_sheet):
     """Lee Elegibilidad (Aurora) y normaliza columnas."""
     elig = _read_tabla(elig_bytes, elig_name, sheet=elig_sheet)
     elig.columns = [str(c).strip() for c in elig.columns]
-    _cf = next((c for c in ["event_day", "fecha"] if c in elig.columns), None)
-    _cz = next((c for c in ["zone", "nodo", "station_code"] if c in elig.columns), None)
-    _ccp = next((c for c in ["destination_postal_code", "postal_code", "ZipCode", "cp"] if c in elig.columns), None)
-    _cl = next((c for c in ["libre", "free", "disponible"] if c in elig.columns), None)
+    # Detección de columnas CASE-INSENSITIVE (AURORA usa FECHA, ZONA, CP, VOLUMEN
+    # en mayúsculas; otros archivos usan event_day, zone, destination_postal_code,
+    # libre). Se busca sin importar mayúsculas/minúsculas.
+    _low = {str(c).strip().lower(): c for c in elig.columns}
+    def _col(cands):
+        for cand in cands:
+            if cand.lower() in _low:
+                return _low[cand.lower()]
+        return None
+    _cf = _col(["event_day", "fecha", "date", "dia"])
+    _cz = _col(["zone", "zona", "nodo", "station_code", "station"])
+    _ccp = _col(["destination_postal_code", "postal_code", "cp", "codigo_postal", "zipcode"])
+    _cl = _col(["libre", "volumen", "volume", "free", "disponible", "vol"])
     elig["_fecha"] = _norm_fecha(elig[_cf]) if _cf else None
     elig["_cp"] = elig[_ccp].map(_norm_cp) if _ccp else ""
     elig["_zona"] = elig[_cz].map(_norm_txt) if _cz else ""
@@ -453,10 +513,19 @@ def cargar_archivos(seteo_bytes, seteo_name,
     # ───────────────── ELEGIBILIDAD (Aurora) ─────────────────
     elig = _read_tabla(elig_bytes, elig_name, sheet=elig_sheet)
     elig.columns = [str(c).strip() for c in elig.columns]
-    _cf = next((c for c in ["event_day", "fecha"] if c in elig.columns), None)
-    _cz = next((c for c in ["zone", "nodo", "station_code"] if c in elig.columns), None)
-    _ccp = next((c for c in ["destination_postal_code", "postal_code", "ZipCode", "cp"] if c in elig.columns), None)
-    _cl = next((c for c in ["libre", "free", "disponible"] if c in elig.columns), None)
+    # Detección de columnas CASE-INSENSITIVE (AURORA usa FECHA, ZONA, CP, VOLUMEN
+    # en mayúsculas; otros archivos usan event_day, zone, destination_postal_code,
+    # libre). Se busca sin importar mayúsculas/minúsculas.
+    _low = {str(c).strip().lower(): c for c in elig.columns}
+    def _col(cands):
+        for cand in cands:
+            if cand.lower() in _low:
+                return _low[cand.lower()]
+        return None
+    _cf = _col(["event_day", "fecha", "date", "dia"])
+    _cz = _col(["zone", "zona", "nodo", "station_code", "station"])
+    _ccp = _col(["destination_postal_code", "postal_code", "cp", "codigo_postal", "zipcode"])
+    _cl = _col(["libre", "volumen", "volume", "free", "disponible", "vol"])
     elig["_fecha"] = _norm_fecha(elig[_cf]) if _cf else None
     elig["_cp"] = elig[_ccp].map(_norm_cp) if _ccp else ""
     elig["_zona"] = elig[_cz].map(_norm_txt) if _cz else ""
@@ -547,7 +616,7 @@ def calcular_traslape_dia(zonas, n=8000, seed=42):
 # ═══════════════════════════════════════════════════════════════════════
 # 🎯 NÚCLEO: procesar un día → zonas, puntos asignados, métricas
 # ═══════════════════════════════════════════════════════════════════════
-def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None):
+def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None, raw_pts=None):
     """Devuelve un dict 'R' con todo lo necesario para pintar el mapa y las tablas."""
     dow = _fecha_a_dow(dia)
 
@@ -675,10 +744,31 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
                 dest[z["_sn"]] = int(conteo[k])
 
     # 6) ELEGIBILIDAD del día por CP (nodo opcional)
-    ed = elig[elig["_fecha"] == dia].copy()
+    # Elegibilidad del día. Diagnóstico: contar por fecha y por fecha+nodo para
+    # detectar si el filtro por nodo (o la fecha) está vaciando los CPs.
+    _ed_fecha = elig[elig["_fecha"] == dia].copy()
+    _cps_solo_fecha = _ed_fecha["_cp"].nunique()
+    _nodos_aurora = sorted([n for n in _ed_fecha["_zona"].dropna().unique() if n]) if "_zona" in _ed_fecha.columns else []
+    ed = _ed_fecha
     if nodo and "_zona" in ed.columns:
-        ed = ed[ed["_zona"] == _norm_txt(nodo)]
+        _ed_nodo = ed[ed["_zona"] == _norm_txt(nodo)]
+        # Si el filtro por nodo deja vacío PERO sí hay CPs en la fecha, es que el
+        # nombre del nodo en Aurora no coincide → usar TODA la fecha (no perder datos).
+        if len(_ed_nodo) == 0 and len(ed) > 0:
+            _elig_nodo_mismatch = True
+        else:
+            _elig_nodo_mismatch = False
+            ed = _ed_nodo
+    else:
+        _elig_nodo_mismatch = False
     elig_por_cp = ed.groupby("_cp")["libre"].sum().to_dict() if len(ed) else {}
+    _elig_diag = {
+        "cps_solo_fecha": int(_cps_solo_fecha),
+        "cps_final": len(elig_por_cp),
+        "nodos_aurora": _nodos_aurora[:20],
+        "nodo_pedido": _norm_txt(nodo) if nodo else "",
+        "nodo_mismatch": _elig_nodo_mismatch,
+    }
 
     # 7) TRASLAPE del día
     traslape_zona, traslape_total = calcular_traslape_dia(zonas)
@@ -708,6 +798,18 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     total_dentro_zonas = int(gd["_dentro_zona"].sum())
     total_pdp = int((gd["_cat"] == "PDP").sum())
     total_pdnp = int((gd["_cat"] == "PDNP").sum())
+
+    # ── PUNTOS RAW (negros) = paquetes ENTREGADOS por zona ese día/nodo ──
+    #    Se filtran por fecha y nodo (delivery_station). Su "zona" es el Employee.
+    _raw_dia = pd.DataFrame(columns=["tracking_id", "latitude", "longitude", "_emp", "_nodo"])
+    if raw_pts is not None and len(raw_pts):
+        _rp = raw_pts
+        if "_fecha" in _rp.columns and _rp["_fecha"].notna().any():
+            _rp = _rp[_rp["_fecha"] == dia]
+        if nodo and "_nodo" in _rp.columns:
+            _rp = _rp[(_rp["_nodo"] == _norm_txt(nodo)) | (_rp["_nodo"] == "")]
+        _raw_dia = _rp.copy()
+
     # Diagnóstico del MATCH tracking→Raw→zona:
     #   cuántos puntos cruzaron por tracking (tienen Employee en Raw) y cuántos
     #   de esos cayeron en una zona ENABLED del nodo.
@@ -736,6 +838,8 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
         "total_dentro_zonas": total_dentro_zonas,
         "total_pdp": total_pdp,
         "total_pdnp": total_pdnp,
+        "elig_diag": _elig_diag,
+        "raw_pts": _raw_dia[["tracking_id", "latitude", "longitude", "_emp", "_nodo"]].copy() if len(_raw_dia) else _raw_dia,
     }
     return R
 
@@ -743,6 +847,121 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
 # ═══════════════════════════════════════════════════════════════════════
 # 📊 TABLAS de análisis descargable
 # ═══════════════════════════════════════════════════════════════════════
+def analizar_fuera_de_zona(R):
+    """
+    Analiza, con base en los PUNTOS RAW (paquetes entregados por repartidor),
+    cuáles se entregaron FUERA de la zona propia del repartidor.
+
+    Zona propia = el círculo cuyo Store Name == employee (el repartidor es su
+    zona). Un paquete está "dentro" si cae en el radio de SU propia zona.
+    Si cae fuera, se identifica a qué OTRA zona corresponde (el círculo que lo
+    contiene; si varios, el más cercano al centro).
+
+    Devuelve 3 DataFrames:
+      • resumen : por repartidor → volumen bruto (total), neto (en su zona),
+                  fuera de zona, % fuera.
+      • matriz  : zona origen (repartidor) × zona destino (donde cayó) → conteo.
+      • detalle : paquete por paquete fuera de zona (tracking, coords, zona
+                  propia, zona destino).
+    """
+    zonas = R.get("zonas", [])
+    raw = R.get("raw_pts", None)
+    cols_resumen = ["Repartidor (zona)", "Volumen bruto (total)",
+                    "Volumen neto (en su zona)", "Fuera de zona", "% fuera"]
+    if raw is None or len(raw) == 0 or not zonas:
+        return (pd.DataFrame(columns=cols_resumen),
+                pd.DataFrame(columns=["Zona origen", "Zona destino", "Paquetes"]),
+                pd.DataFrame(columns=["tracking_id", "latitude", "longitude",
+                                      "Zona propia (repartidor)", "Zona destino (según coords)"]))
+
+    # Geometría de zonas
+    sz_lat = np.array([z["LAT"] for z in zonas], dtype=float)
+    sz_lon = np.array([z["LON"] for z in zonas], dtype=float)
+    sz_rad = np.array([z["RAD"] for z in zonas], dtype=float)
+    sz_sn = np.array([z["_sn"] for z in zonas])          # Store Name normalizado
+    sz_nom = np.array([z["NOM"] for z in zonas])         # Store Name display
+    _sn2idx = {sn: i for i, sn in enumerate(sz_sn)}
+    cos_lat = np.cos(np.radians(float(np.nanmean(sz_lat))))
+
+    rp = raw.copy()
+    rp["_emp"] = rp["_emp"].astype(str).map(_norm_txt)
+    plat = rp["latitude"].to_numpy(dtype=float)
+    plon = rp["longitude"].to_numpy(dtype=float)
+    emp = rp["_emp"].to_numpy()
+    trk = rp["tracking_id"].astype(str).to_numpy()
+
+    # distancia² de cada punto a CADA zona (metros²)
+    dlat = (plat[:, None] - sz_lat[None, :]) * M_GRADO
+    dlon = (plon[:, None] - sz_lon[None, :]) * M_GRADO * cos_lat
+    d2 = dlat ** 2 + dlon ** 2
+    dentro = d2 <= (sz_rad[None, :] ** 2)                 # (P, Z) ¿dentro del círculo?
+
+    # Para "zona destino" del punto: círculo que lo contiene; si varios, el más cercano
+    d2_dentro = np.where(dentro, d2, np.inf)
+    idx_destino = np.argmin(d2_dentro, axis=1)
+    tiene_destino = np.isfinite(d2_dentro[np.arange(len(rp)), idx_destino])
+
+    resumen = {}   # emp -> {bruto, neto, fuera}
+    matriz = {}    # (origen, destino) -> conteo
+    filas_det = []
+
+    for k in range(len(rp)):
+        e = emp[k]
+        if e not in resumen:
+            resumen[e] = {"bruto": 0, "neto": 0, "fuera": 0}
+        resumen[e]["bruto"] += 1
+
+        # ¿tiene zona propia? (existe un círculo con su nombre)
+        zi_propia = _sn2idx.get(e, None)
+        en_su_zona = bool(dentro[k, zi_propia]) if zi_propia is not None else False
+
+        if en_su_zona:
+            resumen[e]["neto"] += 1
+        else:
+            resumen[e]["fuera"] += 1
+            # zona destino = círculo que lo contiene (más cercano) si existe
+            if tiene_destino[k]:
+                zdest = sz_nom[idx_destino[k]]
+            else:
+                zdest = "FUERA DE TODA ZONA"
+            matriz[(e, _norm_txt(zdest))] = matriz.get((e, _norm_txt(zdest)), 0) + 1
+            filas_det.append({
+                "tracking_id": trk[k],
+                "latitude": float(plat[k]),
+                "longitude": float(plon[k]),
+                "Zona propia (repartidor)": e,
+                "Zona destino (según coords)": zdest,
+            })
+
+    # DataFrame resumen
+    fr = []
+    for e, v in resumen.items():
+        bruto = v["bruto"]; fuera = v["fuera"]
+        pct = round(fuera / bruto * 100, 1) if bruto else 0.0
+        fr.append({
+            "Repartidor (zona)": e,
+            "Volumen bruto (total)": bruto,
+            "Volumen neto (en su zona)": v["neto"],
+            "Fuera de zona": fuera,
+            "% fuera": f"{pct}%",
+        })
+    df_resumen = pd.DataFrame(fr, columns=cols_resumen)
+    if not df_resumen.empty:
+        df_resumen = df_resumen.sort_values("Fuera de zona", ascending=False).reset_index(drop=True)
+
+    # DataFrame matriz (origen → destino)
+    fm = [{"Zona origen": o, "Zona destino": d, "Paquetes": c}
+          for (o, d), c in matriz.items()]
+    df_matriz = pd.DataFrame(fm, columns=["Zona origen", "Zona destino", "Paquetes"])
+    if not df_matriz.empty:
+        df_matriz = df_matriz.sort_values("Paquetes", ascending=False).reset_index(drop=True)
+
+    df_detalle = pd.DataFrame(filas_det) if filas_det else pd.DataFrame(
+        columns=["tracking_id", "latitude", "longitude",
+                 "Zona propia (repartidor)", "Zona destino (según coords)"])
+    return df_resumen, df_matriz, df_detalle
+
+
 def construir_entregas_no_asignadas(R):
     """
     PAQUETES POR LLEVAR por zona = puntos NO asignados por tracking que SÍ caen
@@ -1364,6 +1583,89 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     _n_pdnp = _dibujar_categoria(_pts_pdnp, "🔴 PDNP (no cumplen)", "#e74c3c", "🔴 PDNP (✘ perfil)")
     _n_pdp = _dibujar_categoria(_pts_pdp, "🟢 PDP (cumplen perfil)", "#2ecc71", "🟢 PDP (✔ perfil)")
 
+    # ── PUNTOS RAW (negros) = paquetes ENTREGADOS por zona ──
+    #    Siempre visibles. Cada punto guarda su zona (_emp) como clase CSS para
+    #    poder RESALTARLO cuando se selecciona esa zona en el buscador.
+    #    Se dibujan vía JS (canvas) para poder RESALTARLOS por zona (_emp) al
+    #    seleccionar/buscar una zona. Cada punto guarda su zona para el resaltado.
+    _raw_dia = R.get("raw_pts", None)
+    _raw_data_js = []
+    if _raw_dia is not None and len(_raw_dia):
+        _rla = _raw_dia["latitude"].to_numpy()
+        _rlo = _raw_dia["longitude"].to_numpy()
+        _rtk = _raw_dia["tracking_id"].astype(str).to_numpy()
+        _remp = (_raw_dia["_emp"].astype(str).to_numpy()
+                 if "_emp" in _raw_dia.columns else np.array(["" for _ in range(len(_raw_dia))]))
+        _RAW_MAX = 25000
+        _rng_idx = list(range(len(_raw_dia)))
+        if len(_raw_dia) > _RAW_MAX:
+            _rng_idx = np.random.RandomState(42).choice(len(_raw_dia), _RAW_MAX, replace=False).tolist()
+        for k in _rng_idx:
+            _raw_data_js.append([
+                round(float(_rla[k]), 6), round(float(_rlo[k]), 6),
+                str(_remp[k]), str(_rtk[k]),
+            ])
+
+    import json as _json2
+    _js_raw = """
+    <script>
+    (function() {
+      var _RAW = __RAWDATA__;
+      window._rawMarkers = [];   // {marker, zona}
+      function _buscarMapaRaw() {
+        for (var k in window) {
+          try { if (k.indexOf('map_')===0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
+        }
+        return null;
+      }
+      function _pintarRaw(intentos) {
+        intentos = intentos || 0;
+        var mapa = _buscarMapaRaw();
+        if (!mapa || typeof L === 'undefined') {
+          if (intentos < 40) setTimeout(function(){ _pintarRaw(intentos+1); }, 300);
+          return;
+        }
+        if (window._rawDibujado) return;
+        window._rawDibujado = true;
+        var _cv = L.canvas({ padding: 0.5 });
+        var grupo = L.layerGroup();
+        for (var i = 0; i < _RAW.length; i++) {
+          var r = _RAW[i];
+          var cm = L.circleMarker([r[0], r[1]], {
+            renderer: _cv, radius: 2.2, weight: 0.3,
+            color: "#000000", fillColor: "#000000", fillOpacity: 0.85
+          });
+          cm.bindTooltip("⚫ Entregado por zona: " + r[2] + "<br>" + r[3]);
+          window._rawMarkers.push({ marker: cm, zona: (r[2]||"").toUpperCase() });
+          grupo.addLayer(cm);
+        }
+        grupo.addTo(mapa);
+        window._rawLayerGroup = grupo;
+      }
+      // Resalta (amarillo grande) los puntos Raw de una zona; "" restaura todos.
+      window.resaltarZonaRaw = function(nombreZona) {
+        var z = (nombreZona || "").toUpperCase().trim();
+        if (!window._rawMarkers) return;
+        for (var i = 0; i < window._rawMarkers.length; i++) {
+          var it = window._rawMarkers[i];
+          if (z && it.zona === z) {
+            it.marker.setStyle({ radius: 5, color: "#ff9800", weight: 1.5,
+                                 fillColor: "#ffeb3b", fillOpacity: 1.0 });
+            if (it.marker.bringToFront) { try { it.marker.bringToFront(); } catch(e){} }
+          } else {
+            it.marker.setStyle({ radius: 2.2, color: "#000000", weight: 0.3,
+                                 fillColor: "#000000", fillOpacity: 0.85 });
+          }
+        }
+      };
+      if (document.readyState === "complete") { setTimeout(function(){ _pintarRaw(0); }, 600); }
+      else { window.addEventListener("load", function(){ setTimeout(function(){ _pintarRaw(0); }, 600); }); }
+    })();
+    </script>
+    """
+    _js_raw = _js_raw.replace("__RAWDATA__", _json2.dumps(_raw_data_js))
+    m.get_root().html.add_child(folium.Element(_js_raw))
+
     # ── HEATMap ──
     if HeatMap is not None and len(pts) > 0:
         fg_heat = folium.FeatureGroup(name="🔥 Mapa de calor", show=False)
@@ -1521,6 +1823,7 @@ _JS_BUSCADOR_APILADO = r"""
         _hl=ly; if(ly.getBounds&&map)map.fitBounds(ly.getBounds(),{padding:[50,50],maxZoom:14}); if(ly.openTooltip)ly.openTooltip();
     }
     window.limpiarBusqueda=function(){
+        try{ if(window.resaltarZonaRaw) window.resaltarZonaRaw(""); }catch(e){}
         if(_hl&&_os){ try{ _hl.setStyle(_os); if(_hl.closeTooltip)_hl.closeTooltip(); }catch(e){} }
         _hl=null;_os=null; window._ultimaBusqueda=null;
         var inp=document.getElementById('cpInput'); if(inp)inp.value='';
@@ -1543,7 +1846,7 @@ _JS_BUSCADOR_APILADO = r"""
         }
         var clave=raw.toUpperCase(); var lyZona=zonaIdx[clave];
         if(!lyZona){ var cands=Object.keys(zonaIdx).filter(function(k){return k.indexOf(clave)!==-1;}); if(cands.length>0){lyZona=zonaIdx[cands[0]];clave=cands[0];} }
-        if(lyZona){ _resaltarCapa(lyZona); if(rd){rd.innerHTML='✔ Zona '+clave+' localizada';rd.style.color='#16a34a';} }
+        if(lyZona){ _resaltarCapa(lyZona); try{ if(window.resaltarZonaRaw) window.resaltarZonaRaw(clave); }catch(e){} if(rd){rd.innerHTML='✔ Zona '+clave+' localizada';rd.style.color='#16a34a';} }
         else if(rd){ rd.innerHTML='✘ No se encontró el CP ni la zona "'+raw+'"'; rd.style.color='#dc2626'; }
     };
     (function(){ var pr=new URLSearchParams(window.location.search).get('cp'); if(pr)setTimeout(function(){window.buscarCP(pr);},2000); })();
@@ -1590,6 +1893,7 @@ _JS_BUSCADOR_APILADO = r"""
         _zonaHL_os={ fillColor:ly.options.fillColor||'#9e9e9e', fillOpacity:(typeof ly.options.fillOpacity!=='undefined')?ly.options.fillOpacity:0.45, color:ly.options.color||'black', weight:ly.options.weight||1 };
         try{ ly.setStyle({fillColor:'#2563eb',fillOpacity:0.7,color:'#2563eb',weight:3}); }catch(e){}
         try{ if(ly.bringToFront)ly.bringToFront(); }catch(e){} _zonaHL=ly;
+        try{ var _nz=(ly.feature&&ly.feature.properties)?(ly.feature.properties.NOMBRE||''):''; if(window.resaltarZonaRaw) window.resaltarZonaRaw(_nz); }catch(e){}
         if(ly.getBounds&&map){ try{map.fitBounds(ly.getBounds(),{padding:[60,60],maxZoom:14});}catch(e){} }
     }
     function _mostrarApilado(latlng,cpInfo){
@@ -1668,11 +1972,11 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         f_pdp = st.file_uploader("2a) PDP — CUMPLEN perfil (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdp")
         f_pdnp = st.file_uploader("2b) PDNP — NO cumplen (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdnp")
     with c2:
-        f_raw = st.file_uploader("3) Raw Data at Tracking (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_raw")
+        f_raw = st.file_uploader("3) Raw Data at Tracking — paquetes entregados por zona (puedes subir VARIOS: csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_raw", accept_multiple_files=True)
         f_elig = st.file_uploader("4) Elegibilidad / Data Aurora Dia (.xlsx)", type=["xlsx"], key="rd_elig")
         f_total = st.file_uploader("5) Total_Data (opcional — csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_total")
 
-    if not (f_seteo and f_pdp and f_pdnp and f_raw and f_elig):
+    if not (f_seteo and f_pdp and f_pdnp and f_raw and len(f_raw) > 0 and f_elig):
         st.info("Sube al menos los archivos 1–4 (Total_Data es opcional) para habilitar el análisis.")
         return
 
@@ -1685,7 +1989,8 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
                 return len(f.getvalue()) / (1024 * 1024)
             except Exception:
                 return 0.0
-    _tot_mb = sum(_mb(f) for f in [f_seteo, f_pdp, f_pdnp, f_raw, f_elig] if f)
+    _tot_mb = sum(_mb(f) for f in [f_seteo, f_pdp, f_pdnp, f_elig] if f)
+    _tot_mb += sum(_mb(fr) for fr in f_raw)  # f_raw es lista
     if f_total:
         _tot_mb += _mb(f_total)
     st.caption(f"📁 Archivos subidos: **{_tot_mb:.0f} MB** en total. "
@@ -1695,7 +2000,8 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     _b_seteo = f_seteo.getvalue()
     _b_pdp = f_pdp.getvalue()
     _b_pdnp = f_pdnp.getvalue()
-    _b_raw = f_raw.getvalue()
+    _raw_items = [(fr.getvalue(), fr.name) for fr in f_raw]  # lista de los Raw
+    _b_raw_sizes = tuple(len(b) for b, _ in _raw_items)
     _b_elig = f_elig.getvalue()
     total_bytes = f_total.getvalue() if f_total else None
     total_name = f_total.name if f_total else ""
@@ -1709,13 +2015,14 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
     # ── Firma para cachear por set de archivos (por nombre + tamaño) ──
     _firma = (f_seteo.name, len(_b_seteo), f_pdp.name, len(_b_pdp),
-              f_pdnp.name, len(_b_pdnp), f_raw.name, len(_b_raw),
+              f_pdnp.name, len(_b_pdnp),
+              tuple(sorted(fr.name for fr in f_raw)), _b_raw_sizes,
               f_elig.name, len(_b_elig), total_name,
               (len(total_bytes) if total_bytes else 0))
     _ya_cargado = st.session_state.get("rd_firma") == _firma
 
     if _ya_cargado and "rd_cache" in st.session_state:
-        seteo, geo, tr2emp, tr2status, elig, total = st.session_state["rd_cache"]
+        seteo, geo, tr2emp, tr2status, elig, total, raw_pts = st.session_state["rd_cache"]
         st.success("✅ Archivos ya cargados (usando caché) — listo para analizar.")
     else:
         # ── BARRA DE PROGRESO de carga de los 5 archivos (+ Total_Data opcional) ──
@@ -1777,7 +2084,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
             # — 3) RAW —
             _pintar_checklist(3)
             _prog.progress(_pasos[2][1], text=f"📦 Leyendo Raw Data ({_mb(f_raw):.0f} MB)…")
-            tr2emp, tr2status = _leer_raw(_b_raw, f_raw.name)
+            tr2emp, tr2status, raw_pts = _leer_raw(_raw_items)
             _prog.progress(_pasos[3][1], text="✅ Raw Data listo")
             _t.sleep(0.25)
 
@@ -1808,7 +2115,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         _prog.empty()
         _check.empty()
         st.session_state["rd_firma"] = _firma
-        st.session_state["rd_cache"] = (seteo, geo, tr2emp, tr2status, elig, total)
+        st.session_state["rd_cache"] = (seteo, geo, tr2emp, tr2status, elig, total, raw_pts)
 
     dias = fechas_disponibles(seteo, geo)
     if not dias:
@@ -1833,7 +2140,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         _pbar = st.progress(0, text=f"⏳ Procesando {dia} ({_fecha_a_dow(dia)})…")
         try:
             _pbar.progress(15, text="🎯 Calculando zonas, asignación de puntos y traslape…")
-            R = procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=nodo, total=total)
+            R = procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=nodo, total=total, raw_pts=raw_pts)
 
             _pbar.progress(55, text="📊 Calculando histórico del periodo…")
             hist = calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=nodo)
@@ -1888,10 +2195,17 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
     # Diagnóstico de polígonos de CP (elegibilidad): si no hay, avisar por qué.
     _n_cps_elig = len(R.get("elig_por_cp", {}))
+    _diag = R.get("elig_diag", {})
+    if _diag.get("nodo_mismatch"):
+        st.info(f"ℹ️ La elegibilidad (Aurora) del {dia} tiene "
+                f"{_diag.get('cps_solo_fecha',0)} CPs, pero ninguno con el nodo "
+                f"'{_diag.get('nodo_pedido','')}'. Nodos que SÍ trae Aurora ese día: "
+                f"{', '.join(_diag.get('nodos_aurora', [])) or '—'}. "
+                f"Se usan TODOS los CPs de la fecha para no perder datos.")
     if _n_cps_elig == 0:
-        st.warning("⚠️ No hay elegibilidad (polígonos de CP) para dibujar: la "
-                   "elegibilidad (Aurora) de este día/nodo vino vacía. Revisa que "
-                   "el archivo Aurora tenga filas para esta fecha y este nodo.")
+        st.warning(f"⚠️ No hay elegibilidad (Aurora) para el {dia}: 0 CPs. "
+                   f"Revisa que el archivo Aurora tenga filas con esa fecha "
+                   f"(el formato de 'event_day' debe coincidir).")
     elif gdf_cp_wgs84 is None or getattr(gdf_cp_wgs84, "empty", True):
         st.info(f"ℹ️ Hay {_n_cps_elig} CPs con elegibilidad, pero no se recibieron "
                 "los polígonos de CP para dibujarlos. Para verlos: procesa primero "
@@ -1969,6 +2283,37 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
                        file_name=f"Paquetes_por_llevar_{R['nodo']}_{dia.replace('/','-')}.xlsx",
                        mime="application/vnd.ms-excel", use_container_width=True)
 
+    # ── 🚚 ENTREGAS FUERA DE ZONA (por repartidor) ──
+    st.markdown("### 🚚 Entregas fuera de zona (por repartidor)")
+    st.caption("Con base en el Raw: paquetes que un repartidor entregó FUERA de su "
+               "propio círculo. Volumen bruto = total entregado; neto = los de su "
+               "zona; fuera = los que cayeron en otra zona (se identifica cuál).")
+    _df_fz, _df_mz, _df_det = analizar_fuera_de_zona(R)
+    if _df_fz.empty:
+        st.info("No hay datos de Raw para calcular entregas fuera de zona "
+                "(sube los archivos Raw con coordenadas).")
+    else:
+        _fz1, _fz2, _fz3 = st.columns(3)
+        _tot_bruto = int(pd.to_numeric(_df_fz["Volumen bruto (total)"], errors="coerce").sum())
+        _tot_fuera = int(pd.to_numeric(_df_fz["Fuera de zona"], errors="coerce").sum())
+        _fz1.metric("Volumen bruto total", _tot_bruto)
+        _fz2.metric("Entregados fuera de zona", _tot_fuera)
+        _fz3.metric("% fuera", f"{round(_tot_fuera/_tot_bruto*100,1) if _tot_bruto else 0}%")
+
+        st.markdown("**Resumen por repartidor**")
+        st.dataframe(_df_fz, use_container_width=True, hide_index=True, height=320)
+        st.markdown("**Matriz: zona origen → zona destino** (a dónde se fueron los paquetes)")
+        st.dataframe(_df_mz, use_container_width=True, hide_index=True, height=260)
+
+        _buf_fz = io.BytesIO()
+        with pd.ExcelWriter(_buf_fz, engine="xlsxwriter") as _wfz:
+            _df_fz.to_excel(_wfz, index=False, sheet_name="Fuera de zona (repartidor)")
+            _df_mz.to_excel(_wfz, index=False, sheet_name="Matriz origen-destino")
+            _df_det.to_excel(_wfz, index=False, sheet_name="Detalle fuera de zona")
+        st.download_button("📥 Descargar Fuera de Zona (Excel)", data=_buf_fz.getvalue(),
+                           file_name=f"Fuera_de_zona_{R['nodo']}_{dia.replace('/','-')}.xlsx",
+                           mime="application/vnd.ms-excel", use_container_width=True)
+
     # ── Descargas ──
     d1, d2 = st.columns(2)
     with d1:
@@ -1989,6 +2334,14 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
                 "Traslape total": f"{R['traslape_total']}%",
             }])
             resumen.to_excel(w, index=False, sheet_name="Resumen")
+            # Pestañas de ENTREGAS FUERA DE ZONA (resumen por repartidor + matriz)
+            try:
+                _df_fz, _df_mz, _df_det = analizar_fuera_de_zona(R)
+                _df_fz.to_excel(w, index=False, sheet_name="Fuera de zona (repartidor)")
+                _df_mz.to_excel(w, index=False, sheet_name="Matriz origen-destino")
+                _df_det.to_excel(w, index=False, sheet_name="Detalle fuera de zona")
+            except Exception:
+                pass
         st.download_button("📊 Descargar Análisis Excel", data=buf.getvalue(),
                            file_name=f"Analisis_Real_{R['nodo']}_{dia.replace('/','-')}.xlsx",
                            mime="application/vnd.ms-excel", use_container_width=True)
