@@ -116,66 +116,37 @@ def _norm_cp(v):
 
 def _norm_fecha(serie):
     """
-    Devuelve la fecha como texto dd/mm/YYYY, robusta ante formatos mezclados.
-
-    PROBLEMA que resuelve: algunos archivos traen la fecha como DD/MM/YYYY
-    (01/11/2026) y otros como MM/DD/YYYY (11/05/2026 = 5 de noviembre). Si se
-    asume un solo orden, las del formato US salen "al revés" (11/05 → 11 de
-    mayo en vez de 5 de noviembre).
-
-    ESTRATEGIA: se parsea cada fecha a sus 3 números (a, b, año). Como el mes
-    real es conocido por contexto (noviembre = 11 en este análisis), si uno de
-    los dos primeros números es > 12 ése es el día; si uno vale 11 y el otro
-    ≤ 12, se toma 11 como MES y el otro como día. Así 11/05 y 05/11 terminan
-    ambas en 05/11/2026. Fallback: pandas dayfirst=True.
+    Normaliza fechas a texto 'dd/mm/YYYY', robusto ante CUALQUIER mes y formato:
+      • datetime64 / Timestamp (lo que entrega parquet/pyarrow)
+      • ISO 'YYYY-MM-DD[ HH:MM]'
+      • 'DD/MM/YYYY' y 'MM/DD/YYYY' (desambigua por >12; ambiguo → DD/MM)
+    Procesa la serie de forma vectorizada; si una fecha no parsea, queda NaT.
     """
-    def _una(v):
-        if pd.isna(v):
-            return None
-        # datetime/Timestamp directo
-        if isinstance(v, (pd.Timestamp,)) or hasattr(v, "year"):
-            try:
-                return pd.Timestamp(v).strftime("%d/%m/%Y")
-            except Exception:
-                pass
-        txt = str(v).strip()
-        if not txt or txt.lower() in ("nat", "nan", "none"):
-            return None
-        # quitar parte horaria si viene (ej "01/11/2026 00:00")
-        txt = txt.split(" ")[0].split("T")[0]
-        # ISO YYYY-MM-DD
-        import re as _re
-        m_iso = _re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", txt)
-        if m_iso:
-            y, mes, dia = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
-            try:
-                return pd.Timestamp(year=y, month=mes, day=dia).strftime("%d/%m/%Y")
-            except Exception:
-                return None
-        # formatos con / o -  (a/b/año)
-        m = _re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$", txt)
-        if m:
-            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if y < 100:
-                y += 2000
-            # Desambiguación GENÉRICA (sin asumir un mes concreto — las fechas
-            # son variables). Si un número > 12 no puede ser mes:
-            dia, mes = a, b
-            if a > 12 and b <= 12:          # a no puede ser mes → a=día, b=mes (DD/MM)
-                dia, mes = a, b
-            elif b > 12 and a <= 12:        # b no puede ser mes → b=día, a=mes (MM/DD)
-                dia, mes = b, a
-            else:                            # ambos ≤ 12 (ambiguo) → asumir DD/MM (día primero, formato MX)
-                dia, mes = a, b
-            try:
-                return pd.Timestamp(year=y, month=mes, day=dia).strftime("%d/%m/%Y")
-            except Exception:
-                return None
-        # último recurso: pandas con dayfirst
-        d = pd.to_datetime(txt, errors="coerce", dayfirst=True)
-        return d.strftime("%d/%m/%Y") if pd.notna(d) else None
+    s = pd.Series(serie)
 
-    return pd.Series(serie).map(_una)
+    # 1) Si ya es datetime (parquet suele entregar datetime64) → formato directo
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s.dt.strftime("%d/%m/%Y")
+
+    # 2) Normalizar a texto y limpiar hora
+    txt = s.astype(str).str.strip()
+    txt = txt.str.split(" ").str[0].str.split("T").str[0]
+    txt = txt.replace({"": None, "nan": None, "NaT": None, "None": None, "nat": None})
+
+    # 3) ISO YYYY-MM-DD  → parse directo (dayfirst no aplica)
+    _is_iso = txt.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$", na=False)
+    out = pd.Series([None] * len(s), index=s.index, dtype=object)
+    if _is_iso.any():
+        d_iso = pd.to_datetime(txt[_is_iso], errors="coerce", format="mixed")
+        out.loc[_is_iso] = d_iso.dt.strftime("%d/%m/%Y")
+
+    # 4) Resto (dd/mm o mm/dd) → desambiguar por número >12; default dayfirst
+    _resto = ~_is_iso & txt.notna()
+    if _resto.any():
+        d_day = pd.to_datetime(txt[_resto], errors="coerce", dayfirst=True)
+        out.loc[_resto] = d_day.dt.strftime("%d/%m/%Y")
+
+    return out
 
 
 def _fecha_a_dow(fecha_txt):
