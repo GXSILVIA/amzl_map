@@ -830,8 +830,42 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
         if "_fecha" in _rp.columns and _rp["_fecha"].notna().any():
             _rp = _rp[_rp["_fecha"] == dia]
         if nodo and "_nodo" in _rp.columns:
-            _rp = _rp[(_rp["_nodo"] == _norm_txt(nodo)) | (_rp["_nodo"] == "")]
+            # ESTRICTO: solo los del nodo seleccionado (no colar vacíos/otros nodos)
+            _rp = _rp[_rp["_nodo"] == _norm_txt(nodo)]
+        # DEDUPLICAR por tracking_id: el Raw repite el mismo paquete en varias
+        # filas (intentos/escaneos). Cada paquete debe contar UNA vez.
+        _rp = _rp.drop_duplicates(subset=["tracking_id"], keep="first")
+
+        # ── LIMPIAR coordenadas erróneas ──
+        # El employee del Raw = nombre de la zona (Store Name del seteo). Las
+        # coordenadas del Raw a veces están mal (de otro estado / GPS malo), lo
+        # que hace que un repartidor "aparezca por todo México". Anclamos cada
+        # punto a SU zona: si el empleado tiene zona en el seteo, descartamos los
+        # puntos que estén a más de RADIO_MAX del centro de su zona.
+        if len(_rp) and zonas:
+            _z_centro = {z["_sn"]: (z["LAT"], z["LON"]) for z in zonas}
+            _RADIO_MAX_M = 25000.0   # 25 km del centro de su zona (tolerante)
+            _emp_u = _rp["_emp"].map(_norm_txt).to_numpy()
+            _pla = _rp["latitude"].to_numpy(dtype=float)
+            _plo = _rp["longitude"].to_numpy(dtype=float)
+            _keep = np.ones(len(_rp), dtype=bool)
+            _cl = np.cos(np.radians(float(np.nanmean(_pla)))) if len(_pla) else 1.0
+            for _k in range(len(_rp)):
+                _c = _z_centro.get(_emp_u[_k])
+                if _c is None:
+                    continue  # empleado sin zona en el seteo → se deja (no se puede anclar)
+                _dla = (_pla[_k] - _c[0]) * M_GRADO
+                _dlo = (_plo[_k] - _c[1]) * M_GRADO * _cl
+                if (_dla*_dla + _dlo*_dlo) > (_RADIO_MAX_M ** 2):
+                    _keep[_k] = False   # punto absurdamente lejos de su zona → descartar
+            _rp = _rp[_keep]
         _raw_dia = _rp.copy()
+
+    # Conteo del RAW por zona (employee) = paquetes que CADA zona entregó ese día
+    # (coincide con los puntos amarillos que se resaltan al seleccionar la zona).
+    raw_por_sn = {}
+    if len(_raw_dia) and "_emp" in _raw_dia.columns:
+        raw_por_sn = _raw_dia["_emp"].map(_norm_txt).value_counts().to_dict()
 
     # Diagnóstico del MATCH tracking→Raw→zona:
     #   cuántos puntos cruzaron por tracking (tienen Employee en Raw) y cuántos
@@ -863,6 +897,7 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
         "total_pdnp": total_pdnp,
         "elig_diag": _elig_diag,
         "raw_pts": _raw_dia[["tracking_id", "latitude", "longitude", "_emp", "_nodo"]].copy() if len(_raw_dia) else _raw_dia,
+        "raw_por_sn": raw_por_sn,
     }
     return R
 
@@ -1534,6 +1569,8 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     for i, z in enumerate(zonas):
         tinfo = R["traslape_zona"].get(z["NOM"], {})
         desp = int(R["cap_por_zona"].get(z["_sn"], 0))
+        # Entregados por la zona según el RAW (= puntos amarillos al seleccionarla)
+        raw_zona = int(R.get("raw_por_sn", {}).get(z["_sn"], 0))
         pdp_in = int(R.get("pdp_por_sn", {}).get(z["_sn"], 0))
         pdnp_in = int(R.get("pdnp_por_sn", {}).get(z["_sn"], 0))
         tot_in = pdp_in + pdnp_in
@@ -1582,7 +1619,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         _tt_lines = [
             f"<b>Zona Operativa: {z['NOM']}</b>",
             f"Rango: {_rango_txt}",
-            f"Paquetes entregados (este día): {desp}",
+            f"Paquetes entregados por la zona (Raw): {raw_zona}",
             f"Radio: {int(z['RAD'])}m",
             f"SW Max Cap: {int(z['MAXCAP'])}",
             f"Capacidad usada: {ocup}%",
@@ -1639,187 +1676,104 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         ).add_to(fg_z)
     fg_z.add_to(m)
 
-    # ── PUNTOS: 🟢 PDP / 🔴 PDNP / ⚪ no asignado ──
-    #    Se dibujan como FeatureGroups nativos de Folium (aparecen en el control
-    #    de capas y se pueden prender/apagar) sobre un CANVAS renderer compartido
-    #    (rápido). Orden de dibujado: primero No asignados, luego PDNP, y PDP al
-    #    final → los verdes (cumplen perfil) quedan ENCIMA y no los tapan los rojos.
-    #    Si hay demasiados puntos en una categoría, se hace un muestreo para no
-    #    congelar el navegador (el heatmap conserva la densidad completa).
-    # ⚡ OPTIMIZADO: PDP/PDNP se dibujan con CANVAS JS (igual que el Raw), no con
-    #    miles de folium.CircleMarker (que generan un HTML gigante y congelan el
-    #    navegador). Se pasan como JSON y un script los pinta de golpe sobre un
-    #    canvas. Relleno = categoría; los ENTREGADOS por zona llevan borde+núcleo
-    #    negro. Las capas aparecen en el control para prender/apagar.
-    import json as _jsonp
+    # ══════════════════════════════════════════════════════════════════
+    # PUNTOS como FeatureGroups nativos de Folium → aparecen en el control
+    # de "Filtros", se pueden prender/apagar, y cada punto tiene HOVER + CLIC.
+    #   🟢 PDP (verde) · 🔴 PDNP (rojo) · ⚫ Raw (negro, entregados por zona)
+    # Límite por capa para no congelar el navegador (muestreo si hay más).
+    # ══════════════════════════════════════════════════════════════════
+    from folium.vector_layers import CircleMarker as _CM
+    _LIM = 8000  # máximo de puntos dibujados por capa
 
     _mask_pdp = (pts["_cat"] == "PDP") if "_cat" in pts.columns else pd.Series(True, index=pts.index)
     _pts_pdp = pts[_mask_pdp]
     _pts_pdnp = pts[~_mask_pdp]
 
-    def _arr_cat(df_cat):
-        """[[lat, lon, entregado(0/1), tracking, zona], ...] vía numpy (sin bucle Python por fila)."""
-        if df_cat is None or df_cat.empty:
-            return []
-        _la = df_cat["latitude"].to_numpy()
-        _lo = df_cat["longitude"].to_numpy()
-        _tk = df_cat["tracking_id"].astype(str).to_numpy()
-        _zn = (df_cat["_zona_final"].astype(str).to_numpy()
-               if "_zona_final" in df_cat.columns else np.array([""] * len(df_cat)))
-        if "_origen_asig" in df_cat.columns:
-            _ez = (df_cat["_origen_asig"].to_numpy() == "tracking").astype(int)
-        elif "_asignado" in df_cat.columns:
-            _ez = df_cat["_asignado"].to_numpy().astype(int)
-        else:
-            _ez = np.zeros(len(df_cat), dtype=int)
-        out = []
-        for k in range(len(df_cat)):
-            out.append([round(float(_la[k]), 6), round(float(_lo[k]), 6),
-                        int(_ez[k]), str(_tk[k]), str(_zn[k])])
-        return out
+    def _pinta_geo(df_cat, nombre_capa, fill, etiqueta, show=True):
+        """PDP/PDNP: relleno por categoría; borde+núcleo negro si lo entregó una zona."""
+        fg = folium.FeatureGroup(name=nombre_capa, show=show)
+        if df_cat is not None and len(df_cat):
+            _df = df_cat if len(df_cat) <= _LIM else df_cat.sample(_LIM, random_state=42)
+            _la = _df["latitude"].to_numpy(); _lo = _df["longitude"].to_numpy()
+            _tk = _df["tracking_id"].astype(str).to_numpy()
+            _zn = (_df["_zona_final"].astype(str).to_numpy()
+                   if "_zona_final" in _df.columns else np.array([""]*len(_df)))
+            _ez = ((_df["_origen_asig"].to_numpy() == "tracking")
+                   if "_origen_asig" in _df.columns else np.zeros(len(_df), dtype=bool))
+            for k in range(len(_df)):
+                _entregado = bool(_ez[k])
+                _borde = "#000000" if _entregado else "#ffffff"
+                _peso = 1.4 if _entregado else 0.4
+                _rad = 3.0 if _entregado else 2.3
+                _z = _zn[k]
+                _info = etiqueta + ("<br><b>Entregado por zona:</b> " + _z
+                         if (_entregado and _z and _z not in ("None","nan","")) else "<br><i>sin zona</i>")
+                _info += "<br>Tracking: " + _tk[k]
+                _CM(location=[float(_la[k]), float(_lo[k])], radius=_rad, weight=_peso,
+                    color=_borde, fill=True, fill_color=fill, fill_opacity=0.9,
+                    tooltip=_info, popup=_info).add_to(fg)
+        fg.add_to(m)
+        return fg
 
-    _cat_data = {
-        "pdnp": {"pts": _arr_cat(_pts_pdnp), "fill": "#e74c3c", "label": "🔴 PDNP (✘ perfil)",
-                 "capa": "🔴 PDNP (no cumplen)"},
-        "pdp":  {"pts": _arr_cat(_pts_pdp),  "fill": "#2ecc71", "label": "🟢 PDP (✔ perfil)",
-                 "capa": "🟢 PDP (cumplen perfil)"},
-    }
-    _n_pdnp = len(_cat_data["pdnp"]["pts"])
-    _n_pdp = len(_cat_data["pdp"]["pts"])
+    # Orden: PDNP primero (abajo), PDP después (arriba)
+    _pinta_geo(_pts_pdnp, "🔴 PDNP (no cumplen)", "#e74c3c", "🔴 PDNP (✘ perfil)")
+    _pinta_geo(_pts_pdp, "🟢 PDP (cumplen perfil)", "#2ecc71", "🟢 PDP (✔ perfil)")
 
-    _js_cat = """
-    <script>
-    (function() {
-      var _CAT = __CATDATA__;
-      function _bm() {
-        for (var k in window) { try { if (k.indexOf('map_')===0 && window[k] && window[k].eachLayer) return window[k]; } catch(e){} }
-        return null;
-      }
-      function _pintarCat(intentos) {
-        intentos = intentos || 0;
-        var mapa = _bm();
-        if (!mapa || typeof L === 'undefined') { if (intentos < 40) setTimeout(function(){ _pintarCat(intentos+1); }, 300); return; }
-        if (window._catDibujado) return; window._catDibujado = true;
-        var _cv = L.canvas({ padding: 0.5 });
-        ["pdnp","pdp"].forEach(function(cat) {   // pdnp abajo, pdp arriba
-          var cfg = _CAT[cat];
-          if (!cfg || !cfg.pts.length) return;
-          var grupo = L.layerGroup();
-          for (var i = 0; i < cfg.pts.length; i++) {
-            var r = cfg.pts[i];
-            var entregado = (r[2] === 1);
-            var _borde = entregado ? "#000000" : "#ffffff";
-            var _peso  = entregado ? 1.4 : 0.4;
-            var _rad   = entregado ? 3.0 : 2.2;
-            var cm = L.circleMarker([r[0], r[1]], {
-              renderer: _cv, radius: _rad, weight: _peso,
-              color: _borde, fillColor: cfg.fill, fillOpacity: 0.9
-            });
-            var tt = cfg.label + (entregado && r[4] && r[4] !== "None" && r[4] !== "nan"
-                     ? " · Entregado por zona: " + r[4] : " · sin zona") + "<br>" + r[3];
-            cm.bindTooltip(tt);
-            grupo.addLayer(cm);
-            // núcleo negro para los entregados por zona
-            if (entregado) {
-              grupo.addLayer(L.circleMarker([r[0], r[1]], {
-                renderer: _cv, radius: 1.0, weight: 0,
-                color: "#000000", fillColor: "#000000", fillOpacity: 1.0
-              }));
-            }
-          }
-          grupo.addTo(mapa);
-        });
-      }
-      if (document.readyState === "complete") { setTimeout(function(){ _pintarCat(0); }, 550); }
-      else { window.addEventListener("load", function(){ setTimeout(function(){ _pintarCat(0); }, 550); }); }
-    })();
-    </script>
-    """
-    _js_cat = _js_cat.replace("__CATDATA__", _jsonp.dumps(_cat_data))
-    m.get_root().html.add_child(folium.Element(_js_cat))
-
-    # ── PUNTOS RAW (negros) = paquetes ENTREGADOS por zona ──
-    #    Siempre visibles. Cada punto guarda su zona (_emp) como clase CSS para
-    #    poder RESALTARLO cuando se selecciona esa zona en el buscador.
-    #    Se dibujan vía JS (canvas) para poder RESALTARLOS por zona (_emp) al
-    #    seleccionar/buscar una zona. Cada punto guarda su zona para el resaltado.
+    # ── RAW (negros) = entregados por zona. FeatureGroup con hover+clic+resaltado.
     _raw_dia = R.get("raw_pts", None)
-    _raw_data_js = []
+    fg_raw = folium.FeatureGroup(name="⚫ Entregados por zona (Raw)", show=True)
     if _raw_dia is not None and len(_raw_dia):
-        _rla = _raw_dia["latitude"].to_numpy()
-        _rlo = _raw_dia["longitude"].to_numpy()
-        _rtk = _raw_dia["tracking_id"].astype(str).to_numpy()
-        _remp = (_raw_dia["_emp"].astype(str).to_numpy()
-                 if "_emp" in _raw_dia.columns else np.array(["" for _ in range(len(_raw_dia))]))
-        _RAW_MAX = 25000
-        _rng_idx = list(range(len(_raw_dia)))
-        if len(_raw_dia) > _RAW_MAX:
-            _rng_idx = np.random.RandomState(42).choice(len(_raw_dia), _RAW_MAX, replace=False).tolist()
-        for k in _rng_idx:
-            _raw_data_js.append([
-                round(float(_rla[k]), 6), round(float(_rlo[k]), 6),
-                str(_remp[k]), str(_rtk[k]),
-            ])
+        _rd = _raw_dia if len(_raw_dia) <= _LIM*2 else _raw_dia.sample(_LIM*2, random_state=42)
+        _rla = _rd["latitude"].to_numpy(); _rlo = _rd["longitude"].to_numpy()
+        _rtk = _rd["tracking_id"].astype(str).to_numpy()
+        _remp = (_rd["_emp"].astype(str).to_numpy()
+                 if "_emp" in _rd.columns else np.array([""]*len(_rd)))
+        for k in range(len(_rd)):
+            _info = "<b>⚫ Repartidor:</b> " + _remp[k] + "<br>Tracking: " + _rtk[k]
+            _cm = _CM(location=[float(_rla[k]), float(_rlo[k])], radius=2.4, weight=0.4,
+                      color="#000000", fill=True, fill_color="#000000", fill_opacity=0.85,
+                      tooltip=_info, popup=_info)
+            # clase CSS con la zona para el resaltado JS (atributo via options)
+            _cm.options["className"] = "rawpt"
+            _cm.add_to(fg_raw)
+    fg_raw.add_to(m)
 
-    import json as _json2
-    _js_raw = """
+    # JS de resaltado Raw por zona: guarda los markers con su employee leyendo
+    # el tooltip (que contiene 'Repartidor: NOMBRE').
+    _js_resalta = """
     <script>
     (function() {
-      var _RAW = __RAWDATA__;
-      window._rawMarkers = [];   // {marker, zona}
-      function _buscarMapaRaw() {
-        for (var k in window) {
-          try { if (k.indexOf('map_')===0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
-        }
-        return null;
-      }
-      function _pintarRaw(intentos) {
-        intentos = intentos || 0;
-        var mapa = _buscarMapaRaw();
-        if (!mapa || typeof L === 'undefined') {
-          if (intentos < 40) setTimeout(function(){ _pintarRaw(intentos+1); }, 300);
-          return;
-        }
-        if (window._rawDibujado) return;
-        window._rawDibujado = true;
-        var _cv = L.canvas({ padding: 0.5 });
-        var grupo = L.layerGroup();
-        for (var i = 0; i < _RAW.length; i++) {
-          var r = _RAW[i];
-          var cm = L.circleMarker([r[0], r[1]], {
-            renderer: _cv, radius: 2.2, weight: 0.3,
-            color: "#000000", fillColor: "#000000", fillOpacity: 0.85
-          });
-          cm.bindTooltip("<b>⚫ Repartidor:</b> " + r[2] + "<br>Tracking: " + r[3]);
-          window._rawMarkers.push({ marker: cm, zona: (r[2]||"").toUpperCase().replace(/\\s+/g," ").trim() });
-          grupo.addLayer(cm);
-        }
-        grupo.addTo(mapa);
-        window._rawLayerGroup = grupo;
-      }
-      // Resalta (amarillo grande) los puntos Raw de una zona; "" restaura todos.
-      window.resaltarZonaRaw = function(nombreZona) {
-        var z = (nombreZona || "").toUpperCase().replace(/\\s+/g," ").trim();
-        if (!window._rawMarkers) return;
-        for (var i = 0; i < window._rawMarkers.length; i++) {
-          var it = window._rawMarkers[i];
-          if (z && it.zona === z) {
-            it.marker.setStyle({ radius: 5, color: "#ff9800", weight: 1.5,
-                                 fillColor: "#ffeb3b", fillOpacity: 1.0 });
-            if (it.marker.bringToFront) { try { it.marker.bringToFront(); } catch(e){} }
-          } else {
-            it.marker.setStyle({ radius: 2.2, color: "#000000", weight: 0.3,
-                                 fillColor: "#000000", fillOpacity: 0.85 });
+      function _bmR() { for (var k in window){ try{ if(k.indexOf('map_')===0 && window[k] && window[k].eachLayer) return window[k]; }catch(e){} } return null; }
+      function _initRaw(intentos) {
+        intentos = intentos || 0; var mapa = _bmR();
+        if (!mapa) { if (intentos<40) setTimeout(function(){_initRaw(intentos+1);}, 300); return; }
+        window._rawMarkers = [];
+        function _walk(ly){ if(ly.options && ly.options.className==='rawpt'){ 
+            var tt = ly.getTooltip ? ly.getTooltip() : null;
+            var c = tt ? String(tt.getContent()) : '';
+            var m = c.match(/Repartidor:<\\/b>\\s*([^<]+)/);
+            var zona = m ? m[1].toUpperCase().replace(/\\s+/g,' ').trim() : '';
+            window._rawMarkers.push({marker:ly, zona:zona});
           }
+          if(ly.eachLayer) ly.eachLayer(_walk);
+          if(ly._layers){ for(var id in ly._layers) _walk(ly._layers[id]); }
+        }
+        _walk(mapa);
+      }
+      window.resaltarZonaRaw = function(nombreZona) {
+        var z = (nombreZona||'').toUpperCase().replace(/\\s+/g,' ').trim();
+        if(!window._rawMarkers) return;
+        for(var i=0;i<window._rawMarkers.length;i++){ var it=window._rawMarkers[i];
+          if(z && it.zona===z){ it.marker.setStyle({radius:5,color:'#ff9800',weight:1.5,fillColor:'#ffeb3b',fillOpacity:1.0}); try{it.marker.bringToFront();}catch(e){} }
+          else { it.marker.setStyle({radius:2.4,color:'#000000',weight:0.4,fillColor:'#000000',fillOpacity:0.85}); }
         }
       };
-      if (document.readyState === "complete") { setTimeout(function(){ _pintarRaw(0); }, 600); }
-      else { window.addEventListener("load", function(){ setTimeout(function(){ _pintarRaw(0); }, 600); }); }
+      if(document.readyState==='complete'){ setTimeout(function(){_initRaw(0);}, 700); }
+      else { window.addEventListener('load', function(){ setTimeout(function(){_initRaw(0);}, 700); }); }
     })();
     </script>
     """
-    _js_raw = _js_raw.replace("__RAWDATA__", _json2.dumps(_raw_data_js))
-    m.get_root().html.add_child(folium.Element(_js_raw))
+    m.get_root().html.add_child(folium.Element(_js_resalta))
 
     # ── HEATMap ──
     if HeatMap is not None and len(pts) > 0:
