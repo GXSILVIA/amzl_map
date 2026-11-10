@@ -121,17 +121,27 @@ def _split_geocodes(serie):
 
 def _read_tabla(data_bytes, nombre="", sheet=None, usecols=None):
     """
-    Lee CSV o XLSX desde bytes según extensión/nombre.
+    Lee CSV / XLSX / CSV.GZ / PARQUET desde bytes según extensión/nombre.
     OPTIMIZADO para velocidad en archivos grandes:
-      • CSV  → intenta engine 'pyarrow' (multinúcleo, muy rápido); si no está,
-               cae al engine C de pandas. usecols reduce memoria/tiempo.
-      • XLSX → openpyxl en modo read_only vía pandas (más ligero en RAM).
-    usecols: lista opcional de columnas a leer (acelera mucho si el archivo
-             trae muchas columnas que no se usan).
+      • PARQUET (.parquet/.pq) → el más rápido y compacto (recomendado para
+        PDP/PDNP/Raw pesados). Lee solo las columnas de usecols si se indica.
+      • CSV.GZ (.csv.gz/.gz)   → CSV comprimido; pandas lo descomprime solo.
+      • CSV  → engine 'pyarrow' (multinúcleo, muy rápido); fallback a C-engine.
+      • XLSX → openpyxl (ligero en RAM).
+    usecols: lista opcional de columnas a leer (acelera y reduce memoria).
     """
     nombre = (nombre or "").lower()
-    es_excel = nombre.endswith((".xlsx", ".xls", ".xlsm"))
-    if es_excel:
+
+    # ── PARQUET ──
+    if nombre.endswith((".parquet", ".pq")):
+        try:
+            return pd.read_parquet(io.BytesIO(data_bytes), columns=usecols)
+        except Exception:
+            # si usecols no coincide con el esquema, leer todo
+            return pd.read_parquet(io.BytesIO(data_bytes))
+
+    # ── EXCEL ──
+    if nombre.endswith((".xlsx", ".xls", ".xlsm")):
         try:
             return pd.read_excel(io.BytesIO(data_bytes),
                                  sheet_name=sheet if sheet is not None else 0,
@@ -139,7 +149,17 @@ def _read_tabla(data_bytes, nombre="", sheet=None, usecols=None):
         except Exception:
             return pd.read_excel(io.BytesIO(data_bytes),
                                  sheet_name=sheet if sheet is not None else 0)
-    # CSV: pyarrow primero (muy rápido), luego C-engine como respaldo
+
+    # ── CSV GZIP ── (pandas detecta compresión por extensión; forzamos gzip)
+    if nombre.endswith((".csv.gz", ".gz", ".gzip")):
+        try:
+            return pd.read_csv(io.BytesIO(data_bytes), usecols=usecols,
+                               compression="gzip", low_memory=False)
+        except Exception:
+            return pd.read_csv(io.BytesIO(data_bytes), compression="gzip",
+                               low_memory=False)
+
+    # ── CSV normal: pyarrow primero (muy rápido), luego C-engine ──
     try:
         return pd.read_csv(io.BytesIO(data_bytes), usecols=usecols,
                            engine="pyarrow")
@@ -166,7 +186,110 @@ def clasificar_nivel_traslape(pct):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 📥 CARGA + NORMALIZACIÓN de los archivos
+# 📥 CARGA + NORMALIZACIÓN — funciones INDIVIDUALES por archivo (cacheadas)
+#    Permiten mostrar progreso real archivo-por-archivo en la UI. Cada una
+#    está cacheada por sus propios bytes, así repetir un solo archivo no
+#    recarga los demás.
+# ═══════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
+def _leer_seteo(seteo_bytes, seteo_name):
+    """Lee y normaliza el SETEO (Store Active + SW ENABLED + día semana)."""
+    _cols_seteo = ["Store Name", "Status", "ZipCode", "Geocodes",
+                   "Day of Week", "Supply Window", "SW Max Cap",
+                   "SW Coverage", "SW Status"]
+    try:
+        seteo = _read_tabla(seteo_bytes, seteo_name, usecols=_cols_seteo)
+    except Exception:
+        seteo = _read_tabla(seteo_bytes, seteo_name)
+    seteo.columns = [str(c).strip() for c in seteo.columns]
+    seteo["_store_status"] = seteo["Status"].map(_norm_txt)
+    seteo = seteo[seteo["_store_status"] == "STORE ACTIVE"].copy()
+    seteo["_sw_status"] = seteo["SW Status"].map(_norm_txt)
+    seteo = seteo[seteo["_sw_status"] == "ENABLED"].copy()
+    seteo["_sn"] = seteo["Store Name"].map(_norm_txt)
+    seteo["_dow"] = seteo["Day of Week"].map(_norm_txt)
+    _lat, _lon = _split_geocodes(seteo["Geocodes"])
+    seteo["LATITUD"] = _lat
+    seteo["LONGITUD"] = _lon
+    for c in ["SW Coverage", "SW Max Cap"]:
+        seteo[c] = pd.to_numeric(seteo[c], errors="coerce")
+    seteo["_cp"] = seteo["ZipCode"].map(_norm_cp) if "ZipCode" in seteo.columns else ""
+    seteo = seteo.dropna(subset=["LATITUD", "LONGITUD", "SW Coverage"])
+    return seteo
+
+
+@st.cache_data(show_spinner=False)
+def _leer_geo(bts, name, categoria):
+    """Lee un archivo de geopuntos (PDP o PDNP) y lo normaliza."""
+    g = _read_tabla(bts, name)
+    g.columns = [str(c).strip() for c in g.columns]
+    g["tracking_id"] = g["tracking_id"].astype(str).str.strip()
+    col_lat = "latitud" if "latitud" in g.columns else ("latitude" if "latitude" in g.columns else None)
+    col_lon = "longitud" if "longitud" in g.columns else ("longitude" if "longitude" in g.columns else None)
+    g["latitude"] = pd.to_numeric(g[col_lat], errors="coerce") if col_lat else np.nan
+    g["longitude"] = pd.to_numeric(g[col_lon], errors="coerce") if col_lon else np.nan
+    g = g.dropna(subset=["latitude", "longitude"])
+    g = g[(g["latitude"] != 0) & (g["longitude"] != 0)]
+    col_f = "fecha" if "fecha" in g.columns else ("event_day" if "event_day" in g.columns else None)
+    g["_fecha"] = _norm_fecha(g[col_f]) if col_f else None
+    col_n = "nodo" if "nodo" in g.columns else ("zone" if "zone" in g.columns else None)
+    g["_nodo"] = g[col_n].map(_norm_txt) if col_n else ""
+    g["_cat"] = categoria
+    return g[["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"]].copy()
+
+
+@st.cache_data(show_spinner=False)
+def _leer_raw(raw_bytes, raw_name):
+    """Lee Raw Data → devuelve (tr2emp, tr2status)."""
+    raw = _read_tabla(raw_bytes, raw_name)
+    raw.columns = [str(c).strip() for c in raw.columns]
+    raw["tracking_id"] = raw["tracking_id"].astype(str).str.strip()
+    raw["_emp"] = raw["Employee"].map(_norm_txt)
+    tr2emp = dict(zip(raw["tracking_id"], raw["_emp"]))
+    _col_st = next((c for c in ["last_shipment_status", "last_shipment_status_code",
+                                "Delivery Status"] if c in raw.columns), None)
+    tr2status = dict(zip(raw["tracking_id"], raw[_col_st].map(_norm_txt))) if _col_st else {}
+    return tr2emp, tr2status
+
+
+@st.cache_data(show_spinner=False)
+def _leer_elig(elig_bytes, elig_name, elig_sheet):
+    """Lee Elegibilidad (Aurora) y normaliza columnas."""
+    elig = _read_tabla(elig_bytes, elig_name, sheet=elig_sheet)
+    elig.columns = [str(c).strip() for c in elig.columns]
+    _cf = next((c for c in ["event_day", "fecha"] if c in elig.columns), None)
+    _cz = next((c for c in ["zone", "nodo", "station_code"] if c in elig.columns), None)
+    _ccp = next((c for c in ["destination_postal_code", "postal_code", "ZipCode", "cp"] if c in elig.columns), None)
+    _cl = next((c for c in ["libre", "free", "disponible"] if c in elig.columns), None)
+    elig["_fecha"] = _norm_fecha(elig[_cf]) if _cf else None
+    elig["_cp"] = elig[_ccp].map(_norm_cp) if _ccp else ""
+    elig["_zona"] = elig[_cz].map(_norm_txt) if _cz else ""
+    elig["libre"] = pd.to_numeric(elig[_cl], errors="coerce").fillna(0) if _cl else 0
+    return elig
+
+
+@st.cache_data(show_spinner=False)
+def _leer_total(total_bytes, total_name):
+    """Lee Total_Data (opcional) y normaliza columnas."""
+    if total_bytes is None:
+        return None
+    try:
+        total = _read_tabla(total_bytes, total_name)
+        total.columns = [str(c).strip() for c in total.columns]
+        total["_sn"] = total["store_name"].map(_norm_txt)
+        total["_fecha"] = _norm_fecha(total["event_day"]) if "event_day" in total.columns else None
+        for c in ["set_capacity", "routed", "allocated_packages", "PVA"]:
+            if c in total.columns:
+                total[c] = pd.to_numeric(total[c], errors="coerce")
+        if "station_code" in total.columns:
+            total["_nodo"] = total["station_code"].map(_norm_txt)
+        return total
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 📥 CARGA + NORMALIZACIÓN de los archivos (versión monolítica — compatibilidad)
 # ═══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def cargar_archivos(seteo_bytes, seteo_name,
@@ -1318,61 +1441,85 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
     c1, c2 = st.columns(2)
     with c1:
-        f_seteo = st.file_uploader("1) Seteo (searchHubsResponse .csv)", type=["csv"], key="rd_seteo")
-        f_pdp = st.file_uploader("2a) PDP — entregados que CUMPLEN perfil (.xlsx/.csv)", type=["xlsx", "csv"], key="rd_pdp")
-        f_pdnp = st.file_uploader("2b) PDNP — entregados que NO cumplen (.xlsx/.csv)", type=["xlsx", "csv"], key="rd_pdnp")
+        f_seteo = st.file_uploader("1) Seteo (searchHubsResponse — csv/xlsx/parquet/csv.gz)", type=["csv", "xlsx", "parquet", "pq", "gz"], key="rd_seteo")
+        f_pdp = st.file_uploader("2a) PDP — CUMPLEN perfil (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdp")
+        f_pdnp = st.file_uploader("2b) PDNP — NO cumplen (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdnp")
     with c2:
-        f_raw = st.file_uploader("3) Raw Data at Tracking (.xlsx/.csv)", type=["xlsx", "csv"], key="rd_raw")
+        f_raw = st.file_uploader("3) Raw Data at Tracking (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_raw")
         f_elig = st.file_uploader("4) Elegibilidad / Data Aurora Dia (.xlsx)", type=["xlsx"], key="rd_elig")
-        f_total = st.file_uploader("5) Total_Data (opcional — enriquece plan)", type=["xlsx", "csv"], key="rd_total")
+        f_total = st.file_uploader("5) Total_Data (opcional — csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_total")
 
     if not (f_seteo and f_pdp and f_pdnp and f_raw and f_elig):
         st.info("Sube al menos los archivos 1–4 (Total_Data es opcional) para habilitar el análisis.")
         return
 
+    # ── Tamaño total de los archivos subidos (feedback inmediato) ──
+    def _mb(f):
+        try:
+            return f.size / (1024 * 1024)
+        except Exception:
+            try:
+                return len(f.getvalue()) / (1024 * 1024)
+            except Exception:
+                return 0.0
+    _tot_mb = sum(_mb(f) for f in [f_seteo, f_pdp, f_pdnp, f_raw, f_elig] if f)
+    if f_total:
+        _tot_mb += _mb(f_total)
+    st.caption(f"📁 Archivos subidos: **{_tot_mb:.0f} MB** en total. "
+               f"{'⚠️ Son archivos grandes; la primera carga puede tardar 1-2 min.' if _tot_mb > 120 else ''}")
+
+    # Leemos los bytes UNA sola vez (evita duplicar ~200MB en memoria).
+    _b_seteo = f_seteo.getvalue()
+    _b_pdp = f_pdp.getvalue()
+    _b_pdnp = f_pdnp.getvalue()
+    _b_raw = f_raw.getvalue()
+    _b_elig = f_elig.getvalue()
+    total_bytes = f_total.getvalue() if f_total else None
+    total_name = f_total.name if f_total else ""
+
     # Hoja de elegibilidad
     try:
-        xls = pd.ExcelFile(io.BytesIO(f_elig.getvalue()))
+        xls = pd.ExcelFile(io.BytesIO(_b_elig))
         hoja = next((h for h in xls.sheet_names if "aurora" in h.lower()), xls.sheet_names[0])
     except Exception:
         hoja = 0
 
-    total_bytes = f_total.getvalue() if f_total else None
-    total_name = f_total.name if f_total else ""
-
-    # ── BARRA DE PROGRESO de carga de archivos ──
-    # La carga real (cargar_archivos) está cacheada, así que al repetir el
-    # mismo set de archivos es casi instantánea. La barra informa las etapas;
-    # la primera vez acompaña la lectura/normalización real de los 4-5 archivos.
-    _firma = (f_seteo.name, len(f_seteo.getvalue()),
-              f_pdp.name, f_pdnp.name, f_raw.name, f_elig.name, total_name)
+    # ── Firma para cachear por set de archivos (por nombre + tamaño) ──
+    _firma = (f_seteo.name, len(_b_seteo), f_pdp.name, len(_b_pdp),
+              f_pdnp.name, len(_b_pdnp), f_raw.name, len(_b_raw),
+              f_elig.name, len(_b_elig), total_name,
+              (len(total_bytes) if total_bytes else 0))
     _ya_cargado = st.session_state.get("rd_firma") == _firma
 
     if _ya_cargado and "rd_cache" in st.session_state:
         seteo, geo, tr2emp, tr2status, elig, total = st.session_state["rd_cache"]
+        st.success("✅ Archivos ya cargados (usando caché) — listo para analizar.")
     else:
-        _prog = st.progress(0, text="Preparando carga de archivos…")
-        _etapas = [
-            (10, "📥 Leyendo SETEO (searchHubsResponse)…"),
-            (30, "🟢 Leyendo PDP (cumplen perfil)…"),
-            (45, "🔴 Leyendo PDNP (no cumplen)…"),
-            (60, "📦 Leyendo Raw Data (repartidores)…"),
-            (75, "📋 Leyendo Elegibilidad (Aurora)…"),
-            (88, "🎯 Leyendo Total_Data (opcional)…"),
-            (95, "⚙️ Normalizando y cruzando datos…"),
-        ]
-        for _pc, _msg in _etapas:
-            _prog.progress(_pc, text=_msg)
-        # Carga real (cacheada): se ejecuta una sola vez por set de archivos.
-        seteo, geo, tr2emp, tr2status, elig, total = cargar_archivos(
-            f_seteo.getvalue(), f_seteo.name,
-            f_pdp.getvalue(), f_pdp.name,
-            f_pdnp.getvalue(), f_pdnp.name,
-            f_raw.getvalue(), f_raw.name,
-            f_elig.getvalue(), f_elig.name, hoja,
-            total_bytes, total_name,
-        )
+        # ── BARRA DE PROGRESO REAL: avanza ANTES de cada lectura, no de golpe ──
+        _prog = st.progress(0, text="⏳ Iniciando lectura de archivos…")
+        import time as _t
+
+        _prog.progress(5, text=f"📥 Leyendo SETEO ({_mb(f_seteo):.0f} MB)…")
+        seteo = _leer_seteo(_b_seteo, f_seteo.name)
+
+        _prog.progress(30, text=f"🟢 Leyendo PDP ({_mb(f_pdp):.0f} MB)…")
+        pdp = _leer_geo(_b_pdp, f_pdp.name, "PDP")
+
+        _prog.progress(45, text=f"🔴 Leyendo PDNP ({_mb(f_pdnp):.0f} MB)…")
+        pdnp = _leer_geo(_b_pdnp, f_pdnp.name, "PDNP")
+        geo = pd.concat([pdp, pdnp], ignore_index=True)
+
+        _prog.progress(65, text=f"📦 Leyendo Raw Data ({_mb(f_raw):.0f} MB)…")
+        tr2emp, tr2status = _leer_raw(_b_raw, f_raw.name)
+
+        _prog.progress(80, text="📋 Leyendo Elegibilidad (Aurora)…")
+        elig = _leer_elig(_b_elig, f_elig.name, hoja)
+
+        _prog.progress(90, text="🎯 Leyendo Total_Data (opcional)…")
+        total = _leer_total(total_bytes, total_name) if total_bytes else None
+
         _prog.progress(100, text="✅ Archivos cargados")
+        _t.sleep(0.3)
         _prog.empty()
         st.session_state["rd_firma"] = _firma
         st.session_state["rd_cache"] = (seteo, geo, tr2emp, tr2status, elig, total)
