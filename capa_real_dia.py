@@ -97,13 +97,74 @@ def _norm_cp(v):
 
 
 def _norm_fecha(serie):
-    """Devuelve la fecha como texto dd/mm/YYYY, aceptando datetime o texto."""
-    s = pd.to_datetime(serie, errors="coerce", dayfirst=True)
-    return s.dt.strftime("%d/%m/%Y")
+    """
+    Devuelve la fecha como texto dd/mm/YYYY, robusta ante formatos mezclados.
+
+    PROBLEMA que resuelve: algunos archivos traen la fecha como DD/MM/YYYY
+    (01/11/2026) y otros como MM/DD/YYYY (11/05/2026 = 5 de noviembre). Si se
+    asume un solo orden, las del formato US salen "al revés" (11/05 → 11 de
+    mayo en vez de 5 de noviembre).
+
+    ESTRATEGIA: se parsea cada fecha a sus 3 números (a, b, año). Como el mes
+    real es conocido por contexto (noviembre = 11 en este análisis), si uno de
+    los dos primeros números es > 12 ése es el día; si uno vale 11 y el otro
+    ≤ 12, se toma 11 como MES y el otro como día. Así 11/05 y 05/11 terminan
+    ambas en 05/11/2026. Fallback: pandas dayfirst=True.
+    """
+    def _una(v):
+        if pd.isna(v):
+            return None
+        # datetime/Timestamp directo
+        if isinstance(v, (pd.Timestamp,)) or hasattr(v, "year"):
+            try:
+                return pd.Timestamp(v).strftime("%d/%m/%Y")
+            except Exception:
+                pass
+        txt = str(v).strip()
+        if not txt or txt.lower() in ("nat", "nan", "none"):
+            return None
+        # quitar parte horaria si viene (ej "01/11/2026 00:00")
+        txt = txt.split(" ")[0].split("T")[0]
+        # ISO YYYY-MM-DD
+        import re as _re
+        m_iso = _re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", txt)
+        if m_iso:
+            y, mes, dia = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+            try:
+                return pd.Timestamp(year=y, month=mes, day=dia).strftime("%d/%m/%Y")
+            except Exception:
+                return None
+        # formatos con / o -  (a/b/año)
+        m = _re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$", txt)
+        if m:
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if y < 100:
+                y += 2000
+            dia, mes = a, b
+            if a > 12 and b <= 12:          # a no puede ser mes → a=día
+                dia, mes = a, b
+            elif b > 12 and a <= 12:        # b no puede ser mes → b=día, a=mes
+                dia, mes = b, a
+            elif b == 11 and a <= 12:       # mes real noviembre en 2ª posición → a=día(US volteado)
+                dia, mes = a, 11
+            elif a == 11 and b <= 12:       # mes noviembre en 1ª posición (US): a=mes, b=día
+                dia, mes = b, 11
+            else:                            # ambiguo → asumir DD/MM (día primero)
+                dia, mes = a, b
+            try:
+                return pd.Timestamp(year=y, month=mes, day=dia).strftime("%d/%m/%Y")
+            except Exception:
+                return None
+        # último recurso: pandas con dayfirst
+        d = pd.to_datetime(txt, errors="coerce", dayfirst=True)
+        return d.strftime("%d/%m/%Y") if pd.notna(d) else None
+
+    return pd.Series(serie).map(_una)
 
 
 def _fecha_a_dow(fecha_txt):
-    """'dd/mm/YYYY' → 'MONDAY'/'TUESDAY'/... (en inglés, como el seteo)."""
+    """'dd/mm/YYYY' → 'MONDAY'/'TUESDAY'/... (en inglés, como el seteo).
+    Usa dayfirst=True porque _norm_fecha ya normaliza TODO a dd/mm/YYYY."""
     d = pd.to_datetime(fecha_txt, errors="coerce", dayfirst=True)
     if pd.isna(d):
         return None
@@ -423,6 +484,15 @@ def calcular_traslape_dia(zonas, n=8000, seed=42):
     res = {}
     if not zonas:
         return res, 0.0
+    # ⚡ Salvaguarda de velocidad: con muchas zonas, bajar nº de simulaciones
+    #    (la precisión sigue siendo buena y evita que el traslape tarde).
+    _nz = len(zonas)
+    if _nz > 400:
+        n = 1500
+    elif _nz > 150:
+        n = 3000
+    elif _nz > 80:
+        n = 5000
     lats = np.array([z["LAT"] for z in zonas])
     lons = np.array([z["LON"] for z in zonas])
     rads = np.array([z["RAD"] for z in zonas])
@@ -466,8 +536,6 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     # 1) ZONAS del día (Store Active + SW ENABLED + Day of Week == dow)
     #    Sumar SW Max Cap de las ventanas ENABLED de ese día por tienda.
     sd = seteo[seteo["_dow"] == dow].copy()
-    if nodo and "_nodo" in geo.columns:
-        pass  # el seteo no trae station code fiable; el filtro de nodo se aplica a puntos/elig
 
     # agrupar por tienda sumando capacidad de las SW ENABLED
     agg = (sd.groupby("_sn")
@@ -478,6 +546,64 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
                   MAXCAP=("SW Max Cap", "sum"),
                   CP=("_cp", "first"))
              .reset_index())
+
+    # ══════════════════════════════════════════════════════════════════
+    # ⚡ FILTRO POR NODO — reduce de ~3000 zonas (todo el país) a las ~57
+    #    del nodo seleccionado → acelera MUCHÍSIMO el traslape y el mapa.
+    #    El seteo no trae station code, así que identificamos las zonas del
+    #    nodo por DOS vías combinadas:
+    #      (a) EXACTA: los Employees (repartidores) que entregaron paquetes
+    #          del nodo ese día SON las zonas del nodo (Employee == Store Name).
+    #      (b) GEOMÉTRICA (respaldo): zonas cuyo centro cae cerca de la nube
+    #          de geopuntos del nodo (dentro de ~8 km del punto más cercano).
+    #    Si no se puede determinar el nodo, se usan TODAS (comportamiento previo).
+    # ══════════════════════════════════════════════════════════════════
+    _sns_del_nodo = None
+    if nodo and "_nodo" in geo.columns:
+        _nodo_u = _norm_txt(nodo)
+        _gd_nodo = geo[(geo["_fecha"] == dia) & (geo["_nodo"] == _nodo_u)]
+        if len(_gd_nodo):
+            # (a) EXACTA por tracking → Employee
+            _emps = _gd_nodo["tracking_id"].map(tr2emp).dropna()
+            _sns_tracking = set(_emps.map(_norm_txt).unique())
+
+            # (b) GEOMÉTRICA: zonas cerca de los geopuntos del nodo
+            _sns_geo = set()
+            try:
+                _plat = _gd_nodo["latitude"].to_numpy()
+                _plon = _gd_nodo["longitude"].to_numpy()
+                _zlat = agg["LAT"].to_numpy(dtype=float)
+                _zlon = agg["LON"].to_numpy(dtype=float)
+                _cl = np.cos(np.radians(float(np.nanmean(_plat))))
+                # bounding box del nodo + margen de 8 km para prefiltro rápido
+                _mlat = 8000.0 / M_GRADO
+                _mlon = 8000.0 / (M_GRADO * _cl)
+                _la0, _la1 = np.nanmin(_plat) - _mlat, np.nanmax(_plat) + _mlat
+                _lo0, _lo1 = np.nanmin(_plon) - _mlon, np.nanmax(_plon) + _mlon
+                _en_bbox = ((_zlat >= _la0) & (_zlat <= _la1) &
+                            (_zlon >= _lo0) & (_zlon <= _lo1))
+                # entre las que están en la bbox, exigir cercanía real (≤8km) a algún punto
+                _RAD2 = 8000.0 ** 2
+                _idx_bbox = np.where(_en_bbox)[0]
+                # muestreo de puntos del nodo para no comparar millones
+                _step = max(1, len(_plat) // 3000)
+                _sp_lat = _plat[::_step]; _sp_lon = _plon[::_step]
+                for _zi in _idx_bbox:
+                    _dla = (_zlat[_zi] - _sp_lat) * M_GRADO
+                    _dlo = (_zlon[_zi] - _sp_lon) * M_GRADO * _cl
+                    if np.any((_dla*_dla + _dlo*_dlo) <= _RAD2):
+                        _sns_geo.add(agg.iloc[_zi]["_sn"])
+            except Exception:
+                _sns_geo = set()
+
+            _sns_del_nodo = _sns_tracking | _sns_geo
+            # si por alguna razón quedó vacío, no filtrar (usar todas)
+            if not _sns_del_nodo:
+                _sns_del_nodo = None
+
+    if _sns_del_nodo is not None:
+        agg = agg[agg["_sn"].isin(_sns_del_nodo)].copy()
+
     zonas = []
     for _, r in agg.iterrows():
         if pd.isna(r["LAT"]) or pd.isna(r["LON"]) or pd.isna(r["RAD"]):
@@ -1665,17 +1791,38 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         nodo = st.selectbox("🏢 Nodo:", nodos, index=nodos.index(nodo_default) if nodo_default in nodos else 0)
 
     if st.button("🚀 Analizar día", type="primary", use_container_width=True):
-        with st.spinner(f"Procesando {dia} ({_fecha_a_dow(dia)})…"):
+        # ── BARRA DE AVANCE del procesamiento del mapa ──
+        #    Muestra las etapas reales: zonas+puntos → histórico → mapa (lo que
+        #    más tarda: traslape Monte Carlo + render de puntos/polígonos).
+        import time as _tp
+        _pbar = st.progress(0, text=f"⏳ Procesando {dia} ({_fecha_a_dow(dia)})…")
+        try:
+            _pbar.progress(15, text="🎯 Calculando zonas, asignación de puntos y traslape…")
             R = procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=nodo, total=total)
+
+            _pbar.progress(55, text="📊 Calculando histórico del periodo…")
             hist = calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=nodo)
+
+            _pbar.progress(75, text="🗺️ Construyendo el mapa (zonas, puntos, CP, heatmap)…")
+            _mapa_html = construir_mapa_dia_html(R, gdf_cp_wgs84=gdf_cp_wgs84)
+
+            _pbar.progress(95, text="💾 Guardando resultados…")
             st.session_state["rd_R"] = R
             st.session_state["rd_hist"] = hist
-            st.session_state["rd_mapa"] = construir_mapa_dia_html(R, gdf_cp_wgs84=gdf_cp_wgs84)
+            st.session_state["rd_mapa"] = _mapa_html
             st.session_state["rd_total_df"] = total
             st.session_state["rd_dias"] = dias
             st.session_state["rd_seteo_df"] = seteo
             st.session_state["rd_geo"] = geo
             st.session_state["rd_tr2emp"] = tr2emp
+
+            _pbar.progress(100, text="✅ ¡Análisis listo!")
+            _tp.sleep(0.4)
+        except Exception as _e_proc:
+            _pbar.empty()
+            st.error(f"❌ Error al procesar el día: {_e_proc}")
+            st.stop()
+        _pbar.empty()
 
     R = st.session_state.get("rd_R")
     if R is None:
