@@ -1152,36 +1152,98 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         ).add_to(fg_z)
     fg_z.add_to(m)
 
-    # ── PUNTOS: 🟢 PDP  /  🔴 PDNP  /  ⚪ no asignado ──
-    #    El color = categoría (PDP/PDNP). Los no asignados (sin zona) van en gris
-    #    aunque sean PDP/PDNP, para destacarlos como huérfanos.
+    # ── PUNTOS: 🟢 PDP / 🔴 PDNP / ⚪ no asignado ──
+    #    ⚡ OPTIMIZADO: con decenas/cientos de miles de puntos, crear un
+    #    folium.CircleMarker por fila (iterrows) genera un HTML gigantesco y
+    #    congela el navegador. En su lugar inyectamos UNA capa JS por categoría
+    #    que dibuja todos los puntos de golpe con L.circleMarker sobre un
+    #    canvas renderer (rapidísimo). Los colores/tooltip se conservan.
+    import json as _json
+
+    def _subset_xy(df):
+        return df[["latitude", "longitude", "tracking_id", "_zona_final"]].copy()
+
+    _mask_asig = pts["_asignado"].astype(bool) if "_asignado" in pts.columns else pd.Series(True, index=pts.index)
+    _mask_pdp = (pts["_cat"] == "PDP") if "_cat" in pts.columns else pd.Series(True, index=pts.index)
+
+    _pts_no = pts[~_mask_asig]
+    _pts_pdp = pts[_mask_asig & _mask_pdp]
+    _pts_pdnp = pts[_mask_asig & ~_mask_pdp]
+
+    def _arr(df):
+        # lista compacta [[lat, lon, tracking, zona], ...] vía numpy (sin iterrows)
+        if df.empty:
+            return []
+        return [
+            [round(float(la), 6), round(float(lo), 6), str(tk), str(zn)]
+            for la, lo, tk, zn in zip(
+                df["latitude"].to_numpy(), df["longitude"].to_numpy(),
+                df["tracking_id"].to_numpy(),
+                (df["_zona_final"].to_numpy() if "_zona_final" in df.columns
+                 else ["" for _ in range(len(df))]),
+            )
+        ]
+
+    _data_puntos = {
+        "pdp":  {"pts": _arr(_pts_pdp),  "stroke": "#1b5e20", "fill": "#2ecc71",
+                 "label": "🟢 PDP (✔ perfil)"},
+        "pdnp": {"pts": _arr(_pts_pdnp), "stroke": "#b71c1c", "fill": "#e74c3c",
+                 "label": "🔴 PDNP (✘ perfil)"},
+        "no":   {"pts": _arr(_pts_no),   "stroke": "#616161", "fill": "#bdbdbd",
+                 "label": "⚪ No asignado"},
+    }
+
+    # FeatureGroups vacíos (solo para que aparezcan en el LayerControl y se
+    # puedan prender/apagar). El dibujado real lo hace el JS de abajo.
     fg_pdp = folium.FeatureGroup(name="🟢 PDP (cumplen perfil)", show=True)
     fg_pdnp = folium.FeatureGroup(name="🔴 PDNP (no cumplen)", show=True)
     fg_no = folium.FeatureGroup(name="⚪ No asignados", show=True)
-    for _, p in pts.iterrows():
-        es_pdp = (p.get("_cat") == "PDP")
-        asignado = bool(p.get("_asignado"))
-        if not asignado:
-            folium.CircleMarker(
-                [p["latitude"], p["longitude"]], radius=2.5,
-                color="#616161", weight=0.5, fill=True, fill_color="#bdbdbd", fill_opacity=0.9,
-                tooltip=f"⚪ No asignado<br>{p['tracking_id']}<br>{p.get('_cat','')}",
-            ).add_to(fg_no)
-        elif es_pdp:
-            folium.CircleMarker(
-                [p["latitude"], p["longitude"]], radius=2.5,
-                color="#1b5e20", weight=0.5, fill=True, fill_color="#2ecc71", fill_opacity=0.95,
-                tooltip=f"🟢 PDP (✔ perfil)<br>{p['tracking_id']}<br>Zona: {p['_zona_final']}",
-            ).add_to(fg_pdp)
-        else:
-            folium.CircleMarker(
-                [p["latitude"], p["longitude"]], radius=2.5,
-                color="#b71c1c", weight=0.5, fill=True, fill_color="#e74c3c", fill_opacity=0.95,
-                tooltip=f"🔴 PDNP (✘ perfil)<br>{p['tracking_id']}<br>Zona: {p['_zona_final']}",
-            ).add_to(fg_pdnp)
     fg_pdp.add_to(m)
     fg_pdnp.add_to(m)
     fg_no.add_to(m)
+
+    _map_var = m.get_name()
+    _fg_pdp_var = fg_pdp.get_name()
+    _fg_pdnp_var = fg_pdnp.get_name()
+    _fg_no_var = fg_no.get_name()
+    _js_puntos = """
+    <script>
+    (function() {
+      var _DATA = __DATA__;
+      var _grupos = {"pdp": __FGPDP__, "pdnp": __FGPDNP__, "no": __FGNO__};
+      function _pintar() {
+        var mapa = __MAP__;
+        if (!mapa) { setTimeout(_pintar, 300); return; }
+        // canvas renderer compartido = muchísimo más rápido que SVG por punto
+        var _canvas = L.canvas({ padding: 0.5 });
+        Object.keys(_DATA).forEach(function(cat) {
+          var cfg = _DATA[cat];
+          var fg = _grupos[cat];
+          if (!fg) return;
+          for (var i = 0; i < cfg.pts.length; i++) {
+            var r = cfg.pts[i];
+            var cm = L.circleMarker([r[0], r[1]], {
+              renderer: _canvas, radius: 2.5, weight: 0.5,
+              color: cfg.stroke, fillColor: cfg.fill, fillOpacity: 0.9
+            });
+            cm.bindTooltip(cfg.label + "<br>" + r[2] +
+              (r[3] && r[3] !== "None" && r[3] !== "nan" ? "<br>Zona: " + r[3] : ""));
+            cm.addTo(fg);
+          }
+        });
+      }
+      if (document.readyState === "complete") { setTimeout(_pintar, 400); }
+      else { window.addEventListener("load", function() { setTimeout(_pintar, 400); }); }
+    })();
+    </script>
+    """
+    _js_puntos = (_js_puntos
+                  .replace("__DATA__", _json.dumps(_data_puntos))
+                  .replace("__MAP__", _map_var)
+                  .replace("__FGPDP__", _fg_pdp_var)
+                  .replace("__FGPDNP__", _fg_pdnp_var)
+                  .replace("__FGNO__", _fg_no_var))
+    m.get_root().html.add_child(folium.Element(_js_puntos))
 
     # ── HEATMap ──
     if HeatMap is not None and len(pts) > 0:
@@ -1495,32 +1557,95 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         seteo, geo, tr2emp, tr2status, elig, total = st.session_state["rd_cache"]
         st.success("✅ Archivos ya cargados (usando caché) — listo para analizar.")
     else:
-        # ── BARRA DE PROGRESO REAL: avanza ANTES de cada lectura, no de golpe ──
-        _prog = st.progress(0, text="⏳ Iniciando lectura de archivos…")
+        # ── BARRA DE PROGRESO de carga de los 5 archivos (+ Total_Data opcional) ──
+        #    Con checklist visible: cada archivo marca ✅ al terminar. Se añade una
+        #    micro-pausa para que el avance sea perceptible aunque la lectura sea
+        #    muy rápida (archivos .parquet). La barra y el checklist se limpian al
+        #    terminar; si algún archivo falla, se muestra el error y se detiene.
         import time as _t
+        _prog = st.progress(0, text="⏳ Iniciando lectura de archivos…")
+        _check = st.empty()
 
-        _prog.progress(5, text=f"📥 Leyendo SETEO ({_mb(f_seteo):.0f} MB)…")
-        seteo = _leer_seteo(_b_seteo, f_seteo.name)
+        # Pasos: (etiqueta visible, % al TERMINAR). Total_Data solo si se subió.
+        _pasos = [
+            ("1) Seteo (searchHubsResponse)", 20),
+            ("2a) PDP — cumplen perfil", 38),
+            ("2b) PDNP — no cumplen", 54),
+            ("3) Raw Data at Tracking", 72),
+            ("4) Elegibilidad (Aurora)", 88),
+        ]
+        if total_bytes:
+            _pasos.append(("5) Total_Data (opcional)", 98))
 
-        _prog.progress(30, text=f"🟢 Leyendo PDP ({_mb(f_pdp):.0f} MB)…")
-        pdp = _leer_geo(_b_pdp, f_pdp.name, "PDP")
+        def _pintar_checklist(idx_actual):
+            # ✅ los ya hechos, 🔄 el actual, ⬜ los pendientes
+            _lineas = []
+            for _k, (_lbl, _) in enumerate(_pasos):
+                if _k < idx_actual:
+                    _icono = "✅"
+                elif _k == idx_actual:
+                    _icono = "🔄"
+                else:
+                    _icono = "⬜"
+                _lineas.append(f"{_icono} {_lbl}")
+            _check.markdown("  \n".join(_lineas))
 
-        _prog.progress(45, text=f"🔴 Leyendo PDNP ({_mb(f_pdnp):.0f} MB)…")
-        pdnp = _leer_geo(_b_pdnp, f_pdnp.name, "PDNP")
-        geo = pd.concat([pdp, pdnp], ignore_index=True)
+        try:
+            # — 1) SETEO —
+            _pintar_checklist(0)
+            _prog.progress(5, text=f"📥 Leyendo Seteo ({_mb(f_seteo):.0f} MB)…")
+            seteo = _leer_seteo(_b_seteo, f_seteo.name)
+            _prog.progress(_pasos[0][1], text="✅ Seteo listo")
+            _t.sleep(0.25)
 
-        _prog.progress(65, text=f"📦 Leyendo Raw Data ({_mb(f_raw):.0f} MB)…")
-        tr2emp, tr2status = _leer_raw(_b_raw, f_raw.name)
+            # — 2a) PDP —
+            _pintar_checklist(1)
+            _prog.progress(_pasos[0][1], text=f"🟢 Leyendo PDP ({_mb(f_pdp):.0f} MB)…")
+            pdp = _leer_geo(_b_pdp, f_pdp.name, "PDP")
+            _prog.progress(_pasos[1][1], text="✅ PDP listo")
+            _t.sleep(0.25)
 
-        _prog.progress(80, text="📋 Leyendo Elegibilidad (Aurora)…")
-        elig = _leer_elig(_b_elig, f_elig.name, hoja)
+            # — 2b) PDNP —
+            _pintar_checklist(2)
+            _prog.progress(_pasos[1][1], text=f"🔴 Leyendo PDNP ({_mb(f_pdnp):.0f} MB)…")
+            pdnp = _leer_geo(_b_pdnp, f_pdnp.name, "PDNP")
+            geo = pd.concat([pdp, pdnp], ignore_index=True)
+            _prog.progress(_pasos[2][1], text="✅ PDNP listo")
+            _t.sleep(0.25)
 
-        _prog.progress(90, text="🎯 Leyendo Total_Data (opcional)…")
-        total = _leer_total(total_bytes, total_name) if total_bytes else None
+            # — 3) RAW —
+            _pintar_checklist(3)
+            _prog.progress(_pasos[2][1], text=f"📦 Leyendo Raw Data ({_mb(f_raw):.0f} MB)…")
+            tr2emp, tr2status = _leer_raw(_b_raw, f_raw.name)
+            _prog.progress(_pasos[3][1], text="✅ Raw Data listo")
+            _t.sleep(0.25)
 
-        _prog.progress(100, text="✅ Archivos cargados")
-        _t.sleep(0.3)
+            # — 4) ELEGIBILIDAD —
+            _pintar_checklist(4)
+            _prog.progress(_pasos[3][1], text=f"📋 Leyendo Elegibilidad ({_mb(f_elig):.0f} MB)…")
+            elig = _leer_elig(_b_elig, f_elig.name, hoja)
+            _prog.progress(_pasos[4][1], text="✅ Elegibilidad lista")
+            _t.sleep(0.25)
+
+            # — 5) TOTAL_DATA (opcional) —
+            if total_bytes:
+                _pintar_checklist(5)
+                _prog.progress(_pasos[4][1], text="🎯 Leyendo Total_Data…")
+                total = _leer_total(total_bytes, total_name)
+                _prog.progress(_pasos[5][1], text="✅ Total_Data listo")
+                _t.sleep(0.25)
+            else:
+                total = None
+        except Exception as _e_carga:
+            _prog.empty()
+            _check.empty()
+            st.error(f"❌ Error al leer un archivo: {_e_carga}")
+            st.stop()
+
+        _prog.progress(100, text="✅ ¡Los 5 archivos se cargaron correctamente!")
+        _t.sleep(0.5)
         _prog.empty()
+        _check.empty()
         st.session_state["rd_firma"] = _firma
         st.session_state["rd_cache"] = (seteo, geo, tr2emp, tr2status, elig, total)
 
@@ -1546,9 +1671,9 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
             st.session_state["rd_R"] = R
             st.session_state["rd_hist"] = hist
             st.session_state["rd_mapa"] = construir_mapa_dia_html(R, gdf_cp_wgs84=gdf_cp_wgs84)
-            st.session_state["rd_total"] = total
+            st.session_state["rd_total_df"] = total
             st.session_state["rd_dias"] = dias
-            st.session_state["rd_seteo"] = seteo
+            st.session_state["rd_seteo_df"] = seteo
             st.session_state["rd_geo"] = geo
             st.session_state["rd_tr2emp"] = tr2emp
 
@@ -1597,9 +1722,9 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     if _btn_plan and _plan_total > 0:
         with st.spinner("Distribuyendo el plan…"):
             _hist_z = historico_total_por_zona(
-                st.session_state.get("rd_seteo", seteo), st.session_state.get("rd_geo", geo),
+                st.session_state.get("rd_seteo_df", seteo), st.session_state.get("rd_geo", geo),
                 st.session_state.get("rd_tr2emp", tr2emp), st.session_state.get("rd_dias", dias),
-                total=st.session_state.get("rd_total", total))
+                total=st.session_state.get("rd_total_df", total))
             _dem_z = demanda_libre_por_zona(R, gdf_cp_wgs84=gdf_cp_wgs84)
             _df_plan = distribuir_confirmation_plan(R, int(_plan_total), _hist_z, _dem_z)
             st.session_state["rd_plan_df"] = _df_plan
