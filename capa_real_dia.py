@@ -242,13 +242,8 @@ def clasificar_nivel_traslape(pct):
 @st.cache_data(show_spinner=False)
 def _leer_seteo(seteo_bytes, seteo_name):
     """Lee y normaliza el SETEO (Store Active + SW ENABLED + día semana)."""
-    _cols_seteo = ["Store Name", "Status", "ZipCode", "Geocodes",
-                   "Day of Week", "Supply Window", "SW Max Cap",
-                   "SW Coverage", "SW Status"]
-    try:
-        seteo = _read_tabla(seteo_bytes, seteo_name, usecols=_cols_seteo)
-    except Exception:
-        seteo = _read_tabla(seteo_bytes, seteo_name)
+    # Leer todo el seteo (las columnas varían: algunas versiones no traen ZipCode).
+    seteo = _read_tabla(seteo_bytes, seteo_name)
     seteo.columns = [str(c).strip() for c in seteo.columns]
     seteo["_store_status"] = seteo["Status"].map(_norm_txt)
     seteo = seteo[seteo["_store_status"] == "STORE ACTIVE"].copy()
@@ -290,15 +285,23 @@ def _leer_geo(geo_items, categoria):
             else:
                 continue
         g["tracking_id"] = _norm_trk(g["tracking_id"])
-        col_lat = "latitud" if "latitud" in g.columns else ("latitude" if "latitude" in g.columns else None)
-        col_lon = "longitud" if "longitud" in g.columns else ("longitude" if "longitude" in g.columns else None)
+        # Detección CASE-INSENSITIVE y con nombres alternativos (los archivos
+        # nuevos usan vended_latitude/longitude, delivery_date, station_code).
+        _low = {str(c).strip().lower(): c for c in g.columns}
+        def _c(cands):
+            for cand in cands:
+                if cand.lower() in _low:
+                    return _low[cand.lower()]
+            return None
+        col_lat = _c(["latitud", "latitude", "vended_latitude", "lat"])
+        col_lon = _c(["longitud", "longitude", "vended_longitude", "lon", "lng"])
         g["latitude"] = pd.to_numeric(g[col_lat], errors="coerce") if col_lat else np.nan
         g["longitude"] = pd.to_numeric(g[col_lon], errors="coerce") if col_lon else np.nan
         g = g.dropna(subset=["latitude", "longitude"])
         g = g[(g["latitude"] != 0) & (g["longitude"] != 0)]
-        col_f = "fecha" if "fecha" in g.columns else ("event_day" if "event_day" in g.columns else None)
+        col_f = _c(["fecha", "event_day", "delivery_date", "date", "dispatch_day"])
         g["_fecha"] = _norm_fecha(g[col_f]) if col_f else None
-        col_n = "nodo" if "nodo" in g.columns else ("zone" if "zone" in g.columns else None)
+        col_n = _c(["nodo", "zone", "station_code", "delivery_station", "station"])
         g["_nodo"] = g[col_n].map(_norm_txt) if col_n else ""
         g["_cat"] = categoria
         _frames.append(g[["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"]].copy())
@@ -432,13 +435,8 @@ def cargar_archivos(seteo_bytes, seteo_name,
     # ───────────────── SETEO (NUEVO FORMATO) ─────────────────
     # Solo leemos las columnas que usamos (acelera mucho: el seteo trae 17
     # columnas y cientos de miles de filas). Si alguna no existe, se ignora.
-    _cols_seteo = ["Store Name", "Status", "ZipCode", "Geocodes",
-                   "Day of Week", "Supply Window", "SW Max Cap",
-                   "SW Coverage", "SW Status"]
-    try:
-        seteo = _read_tabla(seteo_bytes, seteo_name, usecols=_cols_seteo)
-    except Exception:
-        seteo = _read_tabla(seteo_bytes, seteo_name)
+    # Leer todo el seteo (las columnas varían: algunas versiones no traen ZipCode).
+    seteo = _read_tabla(seteo_bytes, seteo_name)
     seteo.columns = [str(c).strip() for c in seteo.columns]
     # Filtro 1: tienda activa
     seteo["_store_status"] = seteo["Status"].map(_norm_txt)
