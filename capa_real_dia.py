@@ -650,18 +650,33 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     #   Un repartidor pertenece a un único nodo, así que esto elimina de raíz
     #   que aparezcan círculos de nodos vecinos del mismo estado.
     _sns_del_nodo = None
-    if nodo and "_nodo" in geo.columns:
+    if nodo:
         _nodo_u = _norm_txt(nodo)
-        _gd_nodo = geo[(geo["_fecha"] == dia) & (geo["_nodo"] == _nodo_u)]
-        if len(_gd_nodo):
-            _emps = _gd_nodo["tracking_id"].map(tr2emp).dropna()
-            _sns_del_nodo = set(_emps.map(_norm_txt).unique())
-            # si ningún tracking cruzó (set vacío), no filtrar (mostrar todas)
-            if not _sns_del_nodo:
-                _sns_del_nodo = None
+        _emps_nodo = set()
+        # (1) FUENTE PRINCIPAL: el RAW (delivery_station = nodo, employee = zona).
+        #     Es lo más confiable: cada repartidor pertenece a un nodo.
+        if raw_pts is not None and len(raw_pts) and "_emp" in raw_pts.columns:
+            _rpn = raw_pts
+            if "_fecha" in _rpn.columns and _rpn["_fecha"].notna().any():
+                _rpn = _rpn[_rpn["_fecha"] == dia]
+            if "_nodo" in _rpn.columns:
+                _rpn = _rpn[_rpn["_nodo"] == _nodo_u]
+            _emps_nodo |= set(_rpn["_emp"].map(_norm_txt).dropna().unique())
+        # (2) RESPALDO: geopuntos PDP/PDNP del nodo cruzados por tracking → Employee.
+        if "_nodo" in geo.columns:
+            _gd_nodo = geo[(geo["_fecha"] == dia) & (geo["_nodo"] == _nodo_u)]
+            if len(_gd_nodo):
+                _emps2 = _gd_nodo["tracking_id"].map(tr2emp).dropna()
+                _emps_nodo |= set(_emps2.map(_norm_txt).unique())
+        _emps_nodo.discard("")
+        if _emps_nodo:
+            _sns_del_nodo = _emps_nodo
 
     if _sns_del_nodo is not None:
         agg = agg[agg["_sn"].isin(_sns_del_nodo)].copy()
+    # Nota: si _sns_del_nodo quedó None (no se pudo determinar el nodo), se
+    # muestran TODAS las zonas activas del día — es el único caso en que
+    # aparecerían círculos de toda la república.
 
     zonas = []
     for _, r in agg.iterrows():
@@ -1264,6 +1279,66 @@ def distribuir_confirmation_plan(R, plan_total, hist_zona, demanda_zona,
 # ═══════════════════════════════════════════════════════════════════════
 # 🗺️ MAPA del día (Folium)
 # ═══════════════════════════════════════════════════════════════════════
+def cargar_poligonos_cp(cps_interes, mapas_dir="mapas"):
+    """
+    Carga los polígonos de CP desde los GeoJSON de mapas_dir, filtrando a los
+    CPs de interés. Devuelve (gdf, diagnostico). El diagnóstico explica por qué
+    quedó vacío (geopandas faltante, carpeta no existe, CPs no coinciden...).
+    """
+    diag = {"ok": False, "motivo": "", "archivos": 0, "cps_en_geojson": 0, "cps_match": 0}
+    try:
+        import geopandas as _gpd
+    except Exception as e:
+        diag["motivo"] = f"geopandas no está instalado en el servidor ({e})"
+        return None, diag
+    if not os.path.isdir(mapas_dir):
+        diag["motivo"] = f"la carpeta '{mapas_dir}/' no existe en el repo"
+        return None, diag
+    cps_interes = set(str(_norm_cp(c)) for c in cps_interes)
+    if not cps_interes:
+        diag["motivo"] = "no hay CPs de elegibilidad para buscar"
+        return None, diag
+    _gdfs = []
+    _archivos = 0
+    _cps_todos = set()
+    for _f in os.listdir(mapas_dir):
+        if not _f.lower().endswith(".geojson"):
+            continue
+        _archivos += 1
+        try:
+            _g = _gpd.read_file(os.path.join(mapas_dir, _f))
+        except Exception:
+            continue
+        _cpcol = next((c for c in ["d_codigo", "d_cp", "CP", "CODIGOPOSTAL",
+                                    "cp", "codigo_postal", "CODIGO"] if c in _g.columns), None)
+        if _cpcol is None:
+            continue
+        _g["CP"] = _g[_cpcol].astype(str).map(_norm_cp)
+        _cps_todos |= set(_g["CP"].unique())
+        _g = _g[_g["CP"].isin(cps_interes)]
+        if not _g.empty:
+            _gdfs.append(_g[["CP", "geometry"]])
+    diag["archivos"] = _archivos
+    diag["cps_en_geojson"] = len(_cps_todos)
+    if _archivos == 0:
+        diag["motivo"] = f"no hay archivos .geojson en '{mapas_dir}/'"
+        return None, diag
+    if not _gdfs:
+        _muestra_interes = list(cps_interes)[:5]
+        _muestra_geo = list(_cps_todos)[:5]
+        diag["motivo"] = (f"ningún CP de elegibilidad coincide con los GeoJSON. "
+                          f"Ej. elegibilidad: {_muestra_interes} · GeoJSON: {_muestra_geo}")
+        return None, diag
+    try:
+        gdf = _gpd.GeoDataFrame(pd.concat(_gdfs, ignore_index=True), crs="EPSG:4326")
+        diag["ok"] = True
+        diag["cps_match"] = gdf["CP"].nunique()
+        return gdf, diag
+    except Exception as e:
+        diag["motivo"] = f"error al unir polígonos: {e}"
+        return None, diag
+
+
 def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     if folium is None:
         return "<p>Folium no disponible.</p>"
@@ -1305,8 +1380,23 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             pass
 
     m = folium.Map(location=[c_lat, c_lon], zoom_start=11,
-                   tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
-                   attr="&copy; OpenStreetMap", prefer_canvas=True)
+                   tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                   attr="&copy; OpenStreetMap &copy; CARTO", prefer_canvas=True,
+                   control_scale=True)
+
+    # ── ZOOM automático al NODO: ajustar la vista a las zonas del nodo ──
+    #    Así, al elegir un nodo, el mapa se acerca a donde están sus zonas
+    #    (en vez de mostrar todo el país).
+    if zonas:
+        _zlats = [z["LAT"] for z in zonas]
+        _zlons = [z["LON"] for z in zonas]
+        try:
+            _sw = [min(_zlats), min(_zlons)]
+            _ne = [max(_zlats), max(_zlons)]
+            if _sw != _ne:
+                m.fit_bounds([_sw, _ne], padding=(40, 40))
+        except Exception:
+            pass
 
     # ── POLÍGONOS DE CP (elegibilidad) ──
     fg_cp = folium.FeatureGroup(name="CP + Elegibilidad", show=True)
@@ -1322,6 +1412,13 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             )
             cob = gdf_cp_wgs84[["CP", "geometry"]].copy()
             cob["CP"] = cob["CP"].astype(str).map(_norm_cp)
+            # ⚡ Simplificar geometrías (~25 m) para aligerar el GeoJSON del mapa
+            #    sin perder la forma perceptible de los polígonos de CP.
+            try:
+                _TOL = 25 / 111139.0
+                cob["geometry"] = cob["geometry"].simplify(_TOL, preserve_topology=True)
+            except Exception:
+                pass
             join = gpd.sjoin(gpts, cob, how="left", predicate="within").dropna(subset=["CP"])
             _pdp_cp = join[join["_cat"] == "PDP"].groupby("CP").size().to_dict()
             _pdnp_cp = join[join["_cat"] == "PDNP"].groupby("CP").size().to_dict()
@@ -1508,80 +1605,97 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     #    final → los verdes (cumplen perfil) quedan ENCIMA y no los tapan los rojos.
     #    Si hay demasiados puntos en una categoría, se hace un muestreo para no
     #    congelar el navegador (el heatmap conserva la densidad completa).
-    from folium.vector_layers import CircleMarker as _CM
+    # ⚡ OPTIMIZADO: PDP/PDNP se dibujan con CANVAS JS (igual que el Raw), no con
+    #    miles de folium.CircleMarker (que generan un HTML gigante y congelan el
+    #    navegador). Se pasan como JSON y un script los pinta de golpe sobre un
+    #    canvas. Relleno = categoría; los ENTREGADOS por zona llevan borde+núcleo
+    #    negro. Las capas aparecen en el control para prender/apagar.
+    import json as _jsonp
 
-    _MAX_POR_CAPA = 15000  # tope de puntos dibujados por categoría
-
-    # Color del RELLENO = categoría (PDP verde / PDNP rojo). TODOS los PDP/PDNP
-    # se dibujan (caigan dentro o fuera de un círculo). El BORDE NEGRO GRUESO
-    # marca los que fueron ENTREGADOS POR UNA ZONA (cruzaron con Raw por
-    # tracking → tienen Employee = zona). Si no cruzó con Raw, borde fino claro.
     _mask_pdp = (pts["_cat"] == "PDP") if "_cat" in pts.columns else pd.Series(True, index=pts.index)
-    # "entregado por zona" = cruzó con Raw (origen de asignación == tracking)
-    if "_origen_asig" in pts.columns:
-        _mask_zona = pts["_origen_asig"] == "tracking"
-    else:
-        _mask_zona = pts["_asignado"].astype(bool) if "_asignado" in pts.columns else pd.Series(False, index=pts.index)
-
     _pts_pdp = pts[_mask_pdp]
     _pts_pdnp = pts[~_mask_pdp]
 
-    def _dibujar_categoria(df_cat, nombre_capa, fill, etiqueta):
-        """Dibuja una categoría (PDP o PDNP). Borde NEGRO grueso si la entregó
-        una zona (cruzó Raw); borde claro fino si no tiene zona."""
-        fg = folium.FeatureGroup(name=nombre_capa, show=True)
+    def _arr_cat(df_cat):
+        """[[lat, lon, entregado(0/1), tracking, zona], ...] vía numpy (sin bucle Python por fila)."""
         if df_cat is None or df_cat.empty:
-            fg.add_to(m)
-            return 0
-        _df = df_cat
-        if len(_df) > _MAX_POR_CAPA:
-            _df = _df.sample(_MAX_POR_CAPA, random_state=42)
-        _la = _df["latitude"].to_numpy()
-        _lo = _df["longitude"].to_numpy()
-        _tk = _df["tracking_id"].astype(str).to_numpy()
-        _zn = (_df["_zona_final"].astype(str).to_numpy()
-               if "_zona_final" in _df.columns else np.array(["" for _ in range(len(_df))]))
-        if "_origen_asig" in _df.columns:
-            _es_zona = (_df["_origen_asig"].to_numpy() == "tracking")
+            return []
+        _la = df_cat["latitude"].to_numpy()
+        _lo = df_cat["longitude"].to_numpy()
+        _tk = df_cat["tracking_id"].astype(str).to_numpy()
+        _zn = (df_cat["_zona_final"].astype(str).to_numpy()
+               if "_zona_final" in df_cat.columns else np.array([""] * len(df_cat)))
+        if "_origen_asig" in df_cat.columns:
+            _ez = (df_cat["_origen_asig"].to_numpy() == "tracking").astype(int)
+        elif "_asignado" in df_cat.columns:
+            _ez = df_cat["_asignado"].to_numpy().astype(int)
         else:
-            _es_zona = (_df["_asignado"].to_numpy() if "_asignado" in _df.columns
-                        else np.zeros(len(_df), dtype=bool))
-        for k in range(len(_df)):
-            _z = _zn[k]
-            _entregado = bool(_es_zona[k])
-            # BORDE: negro grueso si lo entregó una zona; claro fino si no
-            if _entregado:
-                _color_borde, _peso, _radio = "#000000", 1.6, 3.2
-            else:
-                _color_borde, _peso, _radio = "#ffffff", 0.4, 2.3
-            _tt = etiqueta
-            if _entregado and _z and _z not in ("None", "nan", ""):
-                _tt += " · <b>Entregado por zona:</b> " + _z
-            else:
-                _tt += " · <i>sin zona (no cruzó Raw)</i>"
-            _tt += "<br>" + _tk[k]
-            _CM(
-                location=[float(_la[k]), float(_lo[k])],
-                radius=_radio, weight=_peso, color=_color_borde,
-                fill=True, fill_color=fill, fill_opacity=0.9,
-                tooltip=_tt,
-            ).add_to(fg)
-            # Punto NEGRO en el centro para los ENTREGADOS POR ZONA → se
-            # distinguen de un vistazo (relleno de categoría + núcleo negro).
-            if _entregado:
-                _CM(
-                    location=[float(_la[k]), float(_lo[k])],
-                    radius=1.1, weight=0, color="#000000",
-                    fill=True, fill_color="#000000", fill_opacity=1.0,
-                    tooltip=_tt,
-                ).add_to(fg)
-        fg.add_to(m)
-        return len(_df)
+            _ez = np.zeros(len(df_cat), dtype=int)
+        out = []
+        for k in range(len(df_cat)):
+            out.append([round(float(_la[k]), 6), round(float(_lo[k]), 6),
+                        int(_ez[k]), str(_tk[k]), str(_zn[k])])
+        return out
 
-    # Orden: PDNP (abajo) → PDP (arriba, los que cumplen quedan visibles).
-    #   El borde negro grueso identifica los entregados por zona en ambas capas.
-    _n_pdnp = _dibujar_categoria(_pts_pdnp, "🔴 PDNP (no cumplen)", "#e74c3c", "🔴 PDNP (✘ perfil)")
-    _n_pdp = _dibujar_categoria(_pts_pdp, "🟢 PDP (cumplen perfil)", "#2ecc71", "🟢 PDP (✔ perfil)")
+    _cat_data = {
+        "pdnp": {"pts": _arr_cat(_pts_pdnp), "fill": "#e74c3c", "label": "🔴 PDNP (✘ perfil)",
+                 "capa": "🔴 PDNP (no cumplen)"},
+        "pdp":  {"pts": _arr_cat(_pts_pdp),  "fill": "#2ecc71", "label": "🟢 PDP (✔ perfil)",
+                 "capa": "🟢 PDP (cumplen perfil)"},
+    }
+    _n_pdnp = len(_cat_data["pdnp"]["pts"])
+    _n_pdp = len(_cat_data["pdp"]["pts"])
+
+    _js_cat = """
+    <script>
+    (function() {
+      var _CAT = __CATDATA__;
+      function _bm() {
+        for (var k in window) { try { if (k.indexOf('map_')===0 && window[k] && window[k].eachLayer) return window[k]; } catch(e){} }
+        return null;
+      }
+      function _pintarCat(intentos) {
+        intentos = intentos || 0;
+        var mapa = _bm();
+        if (!mapa || typeof L === 'undefined') { if (intentos < 40) setTimeout(function(){ _pintarCat(intentos+1); }, 300); return; }
+        if (window._catDibujado) return; window._catDibujado = true;
+        var _cv = L.canvas({ padding: 0.5 });
+        ["pdnp","pdp"].forEach(function(cat) {   // pdnp abajo, pdp arriba
+          var cfg = _CAT[cat];
+          if (!cfg || !cfg.pts.length) return;
+          var grupo = L.layerGroup();
+          for (var i = 0; i < cfg.pts.length; i++) {
+            var r = cfg.pts[i];
+            var entregado = (r[2] === 1);
+            var _borde = entregado ? "#000000" : "#ffffff";
+            var _peso  = entregado ? 1.4 : 0.4;
+            var _rad   = entregado ? 3.0 : 2.2;
+            var cm = L.circleMarker([r[0], r[1]], {
+              renderer: _cv, radius: _rad, weight: _peso,
+              color: _borde, fillColor: cfg.fill, fillOpacity: 0.9
+            });
+            var tt = cfg.label + (entregado && r[4] && r[4] !== "None" && r[4] !== "nan"
+                     ? " · Entregado por zona: " + r[4] : " · sin zona") + "<br>" + r[3];
+            cm.bindTooltip(tt);
+            grupo.addLayer(cm);
+            // núcleo negro para los entregados por zona
+            if (entregado) {
+              grupo.addLayer(L.circleMarker([r[0], r[1]], {
+                renderer: _cv, radius: 1.0, weight: 0,
+                color: "#000000", fillColor: "#000000", fillOpacity: 1.0
+              }));
+            }
+          }
+          grupo.addTo(mapa);
+        });
+      }
+      if (document.readyState === "complete") { setTimeout(function(){ _pintarCat(0); }, 550); }
+      else { window.addEventListener("load", function(){ setTimeout(function(){ _pintarCat(0); }, 550); }); }
+    })();
+    </script>
+    """
+    _js_cat = _js_cat.replace("__CATDATA__", _jsonp.dumps(_cat_data))
+    m.get_root().html.add_child(folium.Element(_js_cat))
 
     # ── PUNTOS RAW (negros) = paquetes ENTREGADOS por zona ──
     #    Siempre visibles. Cada punto guarda su zona (_emp) como clase CSS para
@@ -1722,12 +1836,60 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
 # JS: buscador (CP/zona), modo hover/click apilado, cuadro info izquierdo.
 _JS_BUSCADOR_APILADO = r"""
     <style>
+      /* ═══ CALIDAD AMAZON — tipografía, paleta y acabado profesional ═══ */
+      :root {
+        --amz-ink: #0F1111;          /* Squid Ink (texto principal Amazon) */
+        --amz-ink-soft: #565959;     /* gris secundario Amazon */
+        --amz-orange: #FF9900;       /* Amazon Orange */
+        --amz-blue: #146EB4;         /* Amazon Blue */
+        --amz-blue-dark: #0F5A94;
+        --amz-line: #D5D9D9;         /* borde suave Amazon */
+        --amz-bg: #FFFFFF;
+        --amz-shadow: 0 2px 8px rgba(15,17,17,0.12), 0 1px 2px rgba(15,17,17,0.08);
+        --amz-shadow-lg: 0 6px 20px rgba(15,17,17,0.16);
+        --amz-font: "Amazon Ember", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      /* Tooltips de Leaflet con acabado Amazon (tarjeta limpia, sombra suave) */
+      .leaflet-tooltip {
+        font-family: var(--amz-font) !important;
+        font-size: 12.5px !important; line-height: 1.5 !important;
+        color: var(--amz-ink) !important;
+        background: var(--amz-bg) !important;
+        border: 1px solid var(--amz-line) !important;
+        border-radius: 10px !important;
+        box-shadow: var(--amz-shadow) !important;
+        padding: 9px 12px !important;
+        max-width: 300px !important;
+      }
+      .leaflet-tooltip b { color: var(--amz-ink); font-weight: 700; }
+      .leaflet-tooltip-top:before, .leaflet-tooltip-bottom:before,
+      .leaflet-tooltip-left:before, .leaflet-tooltip-right:before { border: none !important; }
+      /* Popups Leaflet con el mismo lenguaje visual */
+      .leaflet-popup-content-wrapper {
+        font-family: var(--amz-font) !important; border-radius: 12px !important;
+        box-shadow: var(--amz-shadow-lg) !important; color: var(--amz-ink) !important;
+      }
+      .leaflet-popup-content { font-size: 12.5px !important; line-height: 1.5 !important; margin: 12px 14px !important; }
+      /* Control de capas elegante */
+      .leaflet-control-layers {
+        font-family: var(--amz-font) !important; border-radius: 10px !important;
+        border: 1px solid var(--amz-line) !important; box-shadow: var(--amz-shadow) !important;
+        padding: 4px !important;
+      }
+      .leaflet-control-layers-list { font-size: 12.5px !important; color: var(--amz-ink) !important; padding: 4px 6px !important; }
+      .leaflet-control-layers label { margin: 3px 0 !important; font-weight: 500; }
+      /* Controles de zoom con estilo Amazon */
+      .leaflet-bar a {
+        border-radius: 8px !important; color: var(--amz-ink) !important;
+        font-family: var(--amz-font) !important;
+      }
+      .leaflet-bar a:hover { background: #F7FAFA !important; color: var(--amz-blue) !important; }
       #cpSearchBar * { box-sizing:border-box; }
-      .api-zona-item { padding:7px 9px; margin:3px 0; border:1px solid #e2e8f0; border-radius:6px;
-          cursor:pointer; background:#f8fafc; transition:background .15s; }
-      .api-zona-item:hover { background:#e0edff; }
-      .api-volver { display:inline-block; margin-bottom:8px; padding:5px 10px; background:#2563eb;
-          color:white; border-radius:6px; cursor:pointer; font-weight:600; font-size:12px; }
+      .api-zona-item { padding:8px 11px; margin:4px 0; border:1px solid var(--amz-line); border-radius:8px;
+          cursor:pointer; background:#F7FAFA; transition:all .15s; font-family:var(--amz-font); }
+      .api-zona-item:hover { background:#EAF3FA; border-color:var(--amz-blue); }
+      .api-volver { display:inline-block; margin-bottom:8px; padding:6px 12px; background:var(--amz-blue);
+          color:white; border-radius:8px; cursor:pointer; font-weight:600; font-size:12px; font-family:var(--amz-font); }
       #infoPanel { position:fixed; left:12px; bottom:85px; z-index:9998; width:320px; max-height:46vh;
           overflow-y:auto; background:rgba(255,255,255,0.55); -webkit-backdrop-filter:blur(5px);
           backdrop-filter:blur(5px); border:1px solid rgba(203,213,225,0.6); border-radius:12px;
@@ -1739,17 +1901,18 @@ _JS_BUSCADOR_APILADO = r"""
       #infoPanel .ip-close:hover { background:#cbd5e1; }
     </style>
     <div id="cpSearchBar" style="position:fixed; top:10px; left:50%; transform:translateX(-50%);
-        z-index:9999; background:white; padding:8px 14px; border-radius:10px;
-        box-shadow:0 4px 16px rgba(0,0,0,0.25); display:flex; align-items:center; gap:8px;
-        font-family:sans-serif;">
+        z-index:9999; background:var(--amz-bg); padding:9px 14px; border-radius:12px;
+        box-shadow:var(--amz-shadow-lg); border:1px solid var(--amz-line);
+        display:flex; align-items:center; gap:8px; font-family:var(--amz-font);">
         <span style="font-size:16px">🔍</span>
         <input id="cpInput" type="text" placeholder="Buscar CP o Zona..."
             onkeyup="if(event.key==='Enter')buscarCP(this.value)"
-            style="border:1px solid #e2e8f0; border-radius:6px; padding:6px 12px;
-            font-size:14px; width:170px; outline:none;" />
+            style="border:1px solid var(--amz-line); border-radius:8px; padding:7px 12px;
+            font-size:14px; width:180px; outline:none; font-family:var(--amz-font);
+            color:var(--amz-ink);" />
         <button onclick="buscarCP(document.getElementById('cpInput').value)"
-            style="background:#2563eb; color:white; border:none; border-radius:6px;
-            padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer;">Buscar</button>
+            style="background:var(--amz-blue); color:white; border:none; border-radius:8px;
+            padding:7px 16px; font-size:13px; font-weight:600; cursor:pointer; transition:background .15s;">Buscar</button>
         <button id="cpClearBtn" onclick="limpiarBusqueda()" title="Quitar resaltado"
             style="background:#e2e8f0; color:#475569; border:none; border-radius:6px;
             padding:6px 11px; font-size:13px; font-weight:700; cursor:pointer;">✕</button>
@@ -1758,7 +1921,7 @@ _JS_BUSCADOR_APILADO = r"""
     </div>
     <div id="infoPanel">
         <div class="ip-head">
-            <div style="font-weight:bold;color:#2563eb;">ℹ️ Información</div>
+            <div style="font-weight:700;color:var(--amz-ink);font-family:var(--amz-font);">ℹ️ Información</div>
             <button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar">✕</button>
         </div>
         <div id="infoPanelBody"></div>
@@ -1818,7 +1981,7 @@ _JS_BUSCADOR_APILADO = r"""
     function _resaltarCapa(ly){
         var map=window._map||_findMap();
         _os={ fillColor:ly.options.fillColor||'#9e9e9e', fillOpacity:ly.options.fillOpacity||0.45, color:ly.options.color||'#ffffff', weight:ly.options.weight||1.5 };
-        ly.setStyle({fillColor:'#2563eb',fillOpacity:0.7,color:'#2563eb',weight:3});
+        ly.setStyle({fillColor:'#146EB4',fillOpacity:0.7,color:'#146EB4',weight:3});
         try{ if(ly.bringToFront)ly.bringToFront(); }catch(e){}
         _hl=ly; if(ly.getBounds&&map)map.fitBounds(ly.getBounds(),{padding:[50,50],maxZoom:14}); if(ly.openTooltip)ly.openTooltip();
     }
@@ -1864,9 +2027,9 @@ _JS_BUSCADOR_APILADO = r"""
     }
     function _vistaListaZonas(){
         var arr=window._apiladas||[];
-        var out=['<div style="font-weight:bold;color:#2563eb;margin-bottom:6px;">🔎 '+arr.length+' zonas aquí — elige una:</div>'];
+        var out=['<div style="font-weight:bold;color:#146EB4;margin-bottom:6px;">🔎 '+arr.length+' zonas aquí — elige una:</div>'];
         for(var i=0;i<arr.length;i++){ var nom=arr[i].nom||('Zona '+(i+1));
-            out.push('<div class="api-zona-item" data-idx="'+i+'"><span style="color:#2563eb;font-weight:600;">▸</span> <b>'+nom+'</b></div>'); }
+            out.push('<div class="api-zona-item" data-idx="'+i+'"><span style="color:#146EB4;font-weight:600;">▸</span> <b>'+nom+'</b></div>'); }
         return out.join('');
     }
     function _vistaDetalle(idx){ var arr=window._apiladas||[]; if(idx<0||idx>=arr.length)return '';
@@ -1884,14 +2047,14 @@ _JS_BUSCADOR_APILADO = r"""
     function _ensureInfoPanel(){ var panel=document.getElementById('infoPanel'); if(panel)return panel;
         panel=document.createElement('div'); panel.id='infoPanel';
         panel.style.cssText='position:fixed;left:12px;bottom:85px;z-index:99999;width:320px;max-height:46vh;overflow-y:auto;background:rgba(255,255,255,0.55);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);border:1px solid rgba(203,213,225,0.6);border-radius:12px;box-shadow:0 6px 22px rgba(0,0,0,0.20);padding:12px 14px;font-family:sans-serif;font-size:12px;color:#1e293b;display:none;';
-        panel.innerHTML='<div class="ip-head" style="display:flex;justify-content:space-between;align-items:center;margin:-2px 0 8px 0;"><div style="font-weight:bold;color:#2563eb;">ℹ️ Información</div><button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar" style="cursor:pointer;background:#e2e8f0;color:#475569;border:none;border-radius:6px;padding:2px 8px;font-weight:700;font-size:13px;">✕</button></div><div id="infoPanelBody"></div>';
+        panel.innerHTML='<div class="ip-head" style="display:flex;justify-content:space-between;align-items:center;margin:-2px 0 8px 0;"><div style="font-weight:700;color:var(--amz-ink);font-family:var(--amz-font);">ℹ️ Información</div><button class="ip-close" onclick="cerrarInfoPanel()" title="Cerrar" style="cursor:pointer;background:#e2e8f0;color:#475569;border:none;border-radius:6px;padding:2px 8px;font-weight:700;font-size:13px;">✕</button></div><div id="infoPanelBody"></div>';
         document.body.appendChild(panel); return panel;
     }
     function _panelMostrar(html){ var panel=_ensureInfoPanel(); var body=document.getElementById('infoPanelBody'); if(!panel||!body)return; body.innerHTML=html; panel.style.display='block'; }
     window.cerrarInfoPanel=function(){ var panel=document.getElementById('infoPanel'); if(panel)panel.style.display='none'; try{_quitarResaltadoZona();}catch(e){} };
     function _resaltarZonaPorZid(zid){ var map=window._map||_findMap(); var ly=(window._zonaLayerByZid||{})[zid]; _quitarResaltadoZona(); if(!ly)return;
         _zonaHL_os={ fillColor:ly.options.fillColor||'#9e9e9e', fillOpacity:(typeof ly.options.fillOpacity!=='undefined')?ly.options.fillOpacity:0.45, color:ly.options.color||'black', weight:ly.options.weight||1 };
-        try{ ly.setStyle({fillColor:'#2563eb',fillOpacity:0.7,color:'#2563eb',weight:3}); }catch(e){}
+        try{ ly.setStyle({fillColor:'#146EB4',fillOpacity:0.7,color:'#146EB4',weight:3}); }catch(e){}
         try{ if(ly.bringToFront)ly.bringToFront(); }catch(e){} _zonaHL=ly;
         try{ var _nz=(ly.feature&&ly.feature.properties)?(ly.feature.properties.NOMBRE||''):''; if(window.resaltarZonaRaw) window.resaltarZonaRaw(_nz); }catch(e){}
         if(ly.getBounds&&map){ try{map.fitBounds(ly.getBounds(),{padding:[60,60],maxZoom:14});}catch(e){} }
@@ -1945,7 +2108,7 @@ _JS_BUSCADOR_APILADO = r"""
                 if(ly.feature&&ly.feature.properties&&ly.on&&(typeof ly.feature.properties._rad_m!=='undefined'||typeof ly.feature.properties.CP!=='undefined')){ try{ly.on('click',_onLayerClick);}catch(e){} }
             });
             window._clickHandler=_onMapClick; map.on('click',window._clickHandler); window._ttMode='click';
-            if(btn){btn.innerHTML='👆 Info: Click (apilado)';btn.style.background='#2563eb';} if(hint)hint.innerHTML='Clic → elige entre las encimadas';
+            if(btn){btn.innerHTML='👆 Info: Click (apilado)';btn.style.background='#146EB4';} if(hint)hint.innerHTML='Clic → elige entre las encimadas';
         } else {
             if(window._clickHandler){ try{map.off('click',window._clickHandler);}catch(e){} window._clickHandler=null; }
             try{map.closePopup();}catch(e){} try{ if(typeof cerrarInfoPanel==='function')cerrarInfoPanel(); }catch(e){}
@@ -2126,10 +2289,17 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     with cc1:
         dia = st.selectbox("📅 Día a analizar:", dias, index=len(dias) - 1)
     with cc2:
-        # nodos desde los geopuntos (nodo/zone)
-        nodos = sorted([n for n in geo["_nodo"].dropna().unique() if n]) if "_nodo" in geo.columns else [nodo_default]
-        if not nodos:
-            nodos = [nodo_default]
+        # Nodos: combinar los de geopuntos (PDP/PDNP) Y los del RAW (delivery_station),
+        # porque el Raw es la fuente de los puntos "entregados por zona".
+        _nodos_set = set()
+        if "_nodo" in geo.columns:
+            _nodos_set |= set(n for n in geo["_nodo"].dropna().unique() if n)
+        try:
+            if raw_pts is not None and len(raw_pts) and "_nodo" in raw_pts.columns:
+                _nodos_set |= set(n for n in raw_pts["_nodo"].dropna().unique() if n)
+        except Exception:
+            pass
+        nodos = sorted(_nodos_set) if _nodos_set else [nodo_default]
         nodo = st.selectbox("🏢 Nodo:", nodos, index=nodos.index(nodo_default) if nodo_default in nodos else 0)
 
     if st.button("🚀 Analizar día", type="primary", use_container_width=True):
@@ -2146,7 +2316,15 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
             hist = calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=nodo)
 
             _pbar.progress(75, text="🗺️ Construyendo el mapa (zonas, puntos, CP, heatmap)…")
-            _mapa_html = construir_mapa_dia_html(R, gdf_cp_wgs84=gdf_cp_wgs84)
+            # Si no llegaron polígonos de CP, intentar cargarlos desde mapas/ con
+            # diagnóstico (para que el aviso sea real y no engañoso).
+            _gdf_cp_usar = gdf_cp_wgs84
+            _poly_diag = None
+            if _gdf_cp_usar is None or getattr(_gdf_cp_usar, "empty", True):
+                _gdf_cp_usar, _poly_diag = cargar_poligonos_cp(
+                    R.get("elig_por_cp", {}).keys(), mapas_dir="mapas")
+            st.session_state["rd_poly_diag"] = _poly_diag
+            _mapa_html = construir_mapa_dia_html(R, gdf_cp_wgs84=_gdf_cp_usar)
 
             _pbar.progress(95, text="💾 Guardando resultados…")
             st.session_state["rd_R"] = R
@@ -2206,10 +2384,16 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         st.warning(f"⚠️ No hay elegibilidad (Aurora) para el {dia}: 0 CPs. "
                    f"Revisa que el archivo Aurora tenga filas con esa fecha "
                    f"(el formato de 'event_day' debe coincidir).")
-    elif gdf_cp_wgs84 is None or getattr(gdf_cp_wgs84, "empty", True):
-        st.info(f"ℹ️ Hay {_n_cps_elig} CPs con elegibilidad, pero no se recibieron "
-                "los polígonos de CP para dibujarlos. Para verlos: procesa primero "
-                "la capa de Cobertura, o coloca los GeoJSON en la carpeta `mapas/`.")
+    else:
+        _pd = st.session_state.get("rd_poly_diag")
+        if _pd is not None and not _pd.get("ok"):
+            st.warning(f"⚠️ Hay {_n_cps_elig} CPs con elegibilidad, pero los polígonos "
+                       f"NO se pudieron cargar: {_pd.get('motivo','?')}. "
+                       f"(Archivos .geojson detectados: {_pd.get('archivos',0)}, "
+                       f"CPs en GeoJSON: {_pd.get('cps_en_geojson',0)})")
+        elif _pd is not None and _pd.get("ok"):
+            st.success(f"✅ Polígonos de CP cargados desde mapas/: "
+                       f"{_pd.get('cps_match',0)} CPs coincidieron y se dibujaron.")
 
     mapa = st.session_state.get("rd_mapa")
     if mapa:
