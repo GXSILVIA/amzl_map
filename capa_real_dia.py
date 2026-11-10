@@ -158,16 +158,14 @@ def _norm_fecha(serie):
             a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
             if y < 100:
                 y += 2000
+            # Desambiguación GENÉRICA (sin asumir un mes concreto — las fechas
+            # son variables). Si un número > 12 no puede ser mes:
             dia, mes = a, b
-            if a > 12 and b <= 12:          # a no puede ser mes → a=día
+            if a > 12 and b <= 12:          # a no puede ser mes → a=día, b=mes (DD/MM)
                 dia, mes = a, b
-            elif b > 12 and a <= 12:        # b no puede ser mes → b=día, a=mes
+            elif b > 12 and a <= 12:        # b no puede ser mes → b=día, a=mes (MM/DD)
                 dia, mes = b, a
-            elif b == 11 and a <= 12:       # mes real noviembre en 2ª posición → a=día(US volteado)
-                dia, mes = a, 11
-            elif a == 11 and b <= 12:       # mes noviembre en 1ª posición (US): a=mes, b=día
-                dia, mes = b, 11
-            else:                            # ambiguo → asumir DD/MM (día primero)
+            else:                            # ambos ≤ 12 (ambiguo) → asumir DD/MM (día primero, formato MX)
                 dia, mes = a, b
             try:
                 return pd.Timestamp(year=y, month=mes, day=dia).strftime("%d/%m/%Y")
@@ -571,16 +569,36 @@ def cargar_archivos(seteo_bytes, seteo_name,
     return seteo, geo, tr2emp, tr2status, elig, total
 
 
-def fechas_disponibles(seteo, geo):
+def fechas_disponibles(seteo, geo, raw_pts=None):
     """
-    Días con geopuntos cuyo DÍA DE LA SEMANA existe en el seteo (ENABLED+Activo).
-    El seteo no tiene fecha calendario, así que la disponibilidad la marcan
-    los geopuntos; cada fecha se valida contra Day of Week del seteo.
+    Días disponibles para analizar. La disponibilidad la marcan los GEOPUNTOS
+    (PDP/PDNP) y/o el RAW (entregados por zona) — cualquier fuente que tenga
+    fechas sirve. Se valida que el día de la semana exista en el seteo, PERO
+    si el seteo cubre todos los días (lo normal), no descarta nada.
+
+    Devuelve lista de fechas 'dd/mm/YYYY' ordenadas cronológicamente.
     """
-    dows_set = set(seteo["_dow"].dropna().unique())
-    f_geo = sorted(set(geo["_fecha"].dropna()),
-                   key=lambda d: (d[6:], d[3:5], d[:2]))
-    out = [d for d in f_geo if _fecha_a_dow(d) in dows_set]
+    dows_set = set(str(d).strip().upper() for d in seteo["_dow"].dropna().unique())
+    # Reunir fechas de TODAS las fuentes con fecha
+    _fechas = set()
+    if geo is not None and "_fecha" in geo.columns:
+        _fechas |= set(geo["_fecha"].dropna())
+    if raw_pts is not None and "_fecha" in getattr(raw_pts, "columns", []):
+        _fechas |= set(raw_pts["_fecha"].dropna())
+    def _key(d):
+        try:
+            return (d[6:10], d[3:5], d[:2])
+        except Exception:
+            return ("", "", "")
+    f_todas = sorted(_fechas, key=_key)
+    # Filtrar por día de semana del seteo SOLO si el seteo no cubre todos los días
+    if dows_set and len(dows_set) < 7:
+        out = [d for d in f_todas if _fecha_a_dow(d) in dows_set]
+        # si el filtro vacía todo pero hay fechas, no descartar (mostrar todas)
+        if not out and f_todas:
+            out = f_todas
+    else:
+        out = f_todas
     return out
 
 
@@ -2313,9 +2331,18 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         st.session_state["rd_firma"] = _firma
         st.session_state["rd_cache"] = (seteo, geo, tr2emp, tr2status, elig, total, raw_pts)
 
-    dias = fechas_disponibles(seteo, geo)
+    dias = fechas_disponibles(seteo, geo, raw_pts=raw_pts)
     if not dias:
-        st.warning("No hay días con seteo (Store Active + SW ENABLED en ese día de la semana) y geopuntos.")
+        # Diagnóstico claro de por qué no hay días
+        _d_geo = sorted(set(geo["_fecha"].dropna())) if "_fecha" in geo.columns else []
+        _d_raw = sorted(set(raw_pts["_fecha"].dropna())) if (raw_pts is not None and "_fecha" in getattr(raw_pts, "columns", [])) else []
+        _dows = sorted(set(seteo["_dow"].dropna().unique())) if "_dow" in seteo.columns else []
+        st.warning("⚠️ No se encontraron días para analizar.")
+        st.caption(f"• Fechas en geopuntos (PDP/PDNP): {', '.join(_d_geo[:12]) or '(ninguna)'}  \n"
+                   f"• Fechas en Raw: {', '.join(_d_raw[:12]) or '(ninguna)'}  \n"
+                   f"• Días de semana en el seteo: {', '.join(_dows) or '(ninguno)'}  \n"
+                   f"Revisa que los archivos tengan columna de fecha legible y que el seteo "
+                   f"tenga filas Store Active + SW ENABLED.")
         return
 
     cc1, cc2 = st.columns([2, 1])
