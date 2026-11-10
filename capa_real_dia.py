@@ -119,16 +119,39 @@ def _split_geocodes(serie):
     return lat, lon
 
 
-def _read_tabla(data_bytes, nombre="", sheet=None):
-    """Lee CSV o XLSX desde bytes según extensión/nombre."""
+def _read_tabla(data_bytes, nombre="", sheet=None, usecols=None):
+    """
+    Lee CSV o XLSX desde bytes según extensión/nombre.
+    OPTIMIZADO para velocidad en archivos grandes:
+      • CSV  → intenta engine 'pyarrow' (multinúcleo, muy rápido); si no está,
+               cae al engine C de pandas. usecols reduce memoria/tiempo.
+      • XLSX → openpyxl en modo read_only vía pandas (más ligero en RAM).
+    usecols: lista opcional de columnas a leer (acelera mucho si el archivo
+             trae muchas columnas que no se usan).
+    """
     nombre = (nombre or "").lower()
-    if nombre.endswith((".xlsx", ".xls", ".xlsm")):
-        return pd.read_excel(io.BytesIO(data_bytes), sheet_name=sheet if sheet is not None else 0)
-    # intento CSV; si falla, intento excel
+    es_excel = nombre.endswith((".xlsx", ".xls", ".xlsm"))
+    if es_excel:
+        try:
+            return pd.read_excel(io.BytesIO(data_bytes),
+                                 sheet_name=sheet if sheet is not None else 0,
+                                 usecols=usecols, engine="openpyxl")
+        except Exception:
+            return pd.read_excel(io.BytesIO(data_bytes),
+                                 sheet_name=sheet if sheet is not None else 0)
+    # CSV: pyarrow primero (muy rápido), luego C-engine como respaldo
     try:
-        return pd.read_csv(io.BytesIO(data_bytes))
+        return pd.read_csv(io.BytesIO(data_bytes), usecols=usecols,
+                           engine="pyarrow")
     except Exception:
-        return pd.read_excel(io.BytesIO(data_bytes), sheet_name=sheet if sheet is not None else 0)
+        pass
+    try:
+        return pd.read_csv(io.BytesIO(data_bytes), usecols=usecols,
+                           low_memory=False)
+    except Exception:
+        # última opción: era excel disfrazado de csv
+        return pd.read_excel(io.BytesIO(data_bytes),
+                             sheet_name=sheet if sheet is not None else 0)
 
 
 def clasificar_nivel_traslape(pct):
@@ -155,7 +178,15 @@ def cargar_archivos(seteo_bytes, seteo_name,
     """Lee todos los archivos (desde bytes para que el cache funcione) y normaliza."""
 
     # ───────────────── SETEO (NUEVO FORMATO) ─────────────────
-    seteo = _read_tabla(seteo_bytes, seteo_name)
+    # Solo leemos las columnas que usamos (acelera mucho: el seteo trae 17
+    # columnas y cientos de miles de filas). Si alguna no existe, se ignora.
+    _cols_seteo = ["Store Name", "Status", "ZipCode", "Geocodes",
+                   "Day of Week", "Supply Window", "SW Max Cap",
+                   "SW Coverage", "SW Status"]
+    try:
+        seteo = _read_tabla(seteo_bytes, seteo_name, usecols=_cols_seteo)
+    except Exception:
+        seteo = _read_tabla(seteo_bytes, seteo_name)
     seteo.columns = [str(c).strip() for c in seteo.columns]
     # Filtro 1: tienda activa
     seteo["_store_status"] = seteo["Status"].map(_norm_txt)
@@ -850,11 +881,13 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
                     "color": "#ffffff", "weight": 1.2, "fillOpacity": 0.45},
                 tooltip=folium.GeoJsonTooltip(
                     fields=["CP", "_pdp", "_pdnp", "_elegibles"],
-                    aliases=["CP:", "PDP (✔):", "PDNP (✘):", "Elegibles:"],
+                    aliases=["Código Postal:", "PDP (✔ perfil):", "PDNP (✘ perfil):",
+                             "Elegibles (Aurora):"],
                     localize=True),
                 popup=folium.GeoJsonPopup(
                     fields=["CP", "_pdp", "_pdnp", "_elegibles"],
-                    aliases=["CP:", "PDP (✔):", "PDNP (✘):", "Elegibles:"]),
+                    aliases=["Código Postal:", "PDP (✔ perfil):", "PDNP (✘ perfil):",
+                             "Elegibles (Aurora):"], localize=True),
             ).add_to(fg_cp)
         except Exception as e:
             folium.map.Marker([c_lat, c_lon],
@@ -864,6 +897,41 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     # ── CÍRCULOS de zonas (con conteo PDP/PDNP en tooltip) ──
     fg_z = folium.FeatureGroup(name="Zonas", show=True)
     features = []
+
+    # 📮 DESGLOSE POR CP de cada zona: qué CPs cubre, % del CP que ocupa el
+    #    círculo y la elegibilidad libre (Aurora) de cada CP. Se calcula solo
+    #    si hay polígonos de CP (gdf_cp_wgs84). Usa proyección métrica 6372
+    #    para áreas reales (intersección círculo ∩ polígono de CP).
+    _cps_detalle_por_sn = {}
+    try:
+        if gdf_cp_wgs84 is not None and not getattr(gdf_cp_wgs84, "empty", True):
+            import geopandas as _gpd2
+            import shapely as _shp2
+            _cpm = gdf_cp_wgs84[["CP", "geometry"]].copy()
+            _cpm["CP"] = _cpm["CP"].astype(str).map(_norm_cp)
+            _cpm = _cpm.to_crs("EPSG:6372")             # métrico para áreas
+            _cpm["geometry"] = _cpm.geometry.buffer(0)   # repara geometrías
+            _cpm["_acp"] = _cpm.geometry.area
+            for _z in zonas:
+                _cen = _gpd2.GeoSeries(
+                    [_shp2.geometry.Point(_z["LON"], _z["LAT"])],
+                    crs="EPSG:4326").to_crs("EPSG:6372").iloc[0]
+                _circ = _cen.buffer(_z["RAD"])
+                _sub = _cpm[_cpm.geometry.intersects(_circ)]
+                _det = []
+                for _, _cr in _sub.iterrows():
+                    if _cr["_acp"] <= 0:
+                        continue
+                    _ai = _cr.geometry.intersection(_circ).area
+                    _pct = round(min(100.0, _ai / _cr["_acp"] * 100.0))
+                    if _pct <= 0:
+                        continue
+                    _lib = int(R.get("elig_por_cp", {}).get(_cr["CP"], 0))
+                    _det.append((_cr["CP"], _pct, _lib))
+                _det.sort(key=lambda t: t[1], reverse=True)
+                _cps_detalle_por_sn[_z["_sn"]] = _det
+    except Exception:
+        _cps_detalle_por_sn = {}
     for i, z in enumerate(zonas):
         tinfo = R["traslape_zona"].get(z["NOM"], {})
         desp = int(R["cap_por_zona"].get(z["_sn"], 0))
@@ -881,19 +949,61 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
                 rt=int(td["routed"]) if td.get("routed") is not None else "—",
                 sc=int(td["set_capacity"]) if td.get("set_capacity") is not None else "—",
                 rk=td.get("risk", "—"))
-        tt = ("<b>Zona: {nom}</b><br>"
-              "SW Max Cap: {mc}<br>"
-              "SW Coverage: {rad} m<br>"
-              "Despachados (asignados): {d}<br>"
-              "<b>🟢 PDP dentro (✔ perfil): {pdp}</b><br>"
-              "<b>🔴 PDNP dentro (✘ perfil): {pdnp}</b><br>"
-              "Total dentro: {tin} — Cumplimiento: {pc}%<br>"
-              "Capacidad usada: {o}%<br>"
-              "{extra}"
-              "Traslape: {t}% — {nv}").format(
-            nom=z["NOM"], mc=int(z["MAXCAP"]), rad=int(z["RAD"]), d=desp,
-            pdp=pdp_in, pdnp=pdnp_in, tin=tot_in, pc=pct_cumpl, o=ocup,
-            extra=_extra, t=tinfo.get("pct", 0.0), nv=tinfo.get("nivel", "⚪"))
+        # ── Tooltip estilo CAPA DE COBERTURA ──
+        # Estructura idéntica: Zona Operativa / Rango / Volumen / Radio / Traslape
+        # / ── Detalle Traslape ── / separador / CPs Ocupados (CP (%)), más las
+        # líneas propias del análisis real (PDP/PDNP/cumplimiento/capacidad/Total_Data).
+        # Rango de volumen (mismos cortes que obtener_color_rango_circulo de cobertura).
+        _vol_zona = desp  # volumen despachado/asignado de la zona
+        if _vol_zona == 0:
+            _rango_txt = "⚪ R0"
+        elif _vol_zona <= 15:
+            _rango_txt = "🟡 R1-15"
+        elif _vol_zona <= 20:
+            _rango_txt = "🟠 R16-20"
+        elif _vol_zona <= 30:
+            _rango_txt = "🔴 R21-30"
+        elif _vol_zona <= 40:
+            _rango_txt = "🟣 R31-40"
+        else:
+            _rango_txt = "🟤 R41+"
+        # Detalle de traslape (zonas que se enciman), igual que cobertura.
+        _desg = tinfo.get("desglose", [])
+        _det_tras_lines = ""
+        if _desg:
+            _det_tras_lines = "── Detalle Traslape ──<br>" + "".join(
+                [f"&nbsp;&nbsp;• {d['NOM']}: {d['PCT']}%<br>" for d in _desg])
+        # CPs ocupados con su % (mismo formato "CP (NN%)" de la capa de cobertura).
+        _det_cp = _cps_detalle_por_sn.get(z["_sn"], [])
+        _elig_total = sum(l for _, _, l in _det_cp)
+        if _det_cp:
+            _txt_cps = ", ".join([f"{c} ({p}%)" for c, p, l in _det_cp])
+        else:
+            _txt_cps = "Ninguno"
+        _tt_lines = [
+            f"<b>Zona Operativa: {z['NOM']}</b>",
+            f"Rango: {_rango_txt}",
+            f"Volumen Promedio: {desp}",
+            f"Radio: {int(z['RAD'])}m",
+            f"SW Max Cap: {int(z['MAXCAP'])}",
+            f"Capacidad usada: {ocup}%",
+            f"<b>🟢 PDP (✔ perfil): {pdp_in}</b>",
+            f"<b>🔴 PDNP (✘ perfil): {pdnp_in}</b>",
+            f"Total dentro: {tot_in} — Cumplimiento: {pct_cumpl}%",
+        ]
+        if _extra:
+            # _extra viene con <br> al final de cada línea; lo integramos como líneas.
+            for _ln in _extra.split("<br>"):
+                _ln = _ln.strip()
+                if _ln:
+                    _tt_lines.append(_ln)
+        _tt_lines.append(f"<b>Traslape: {tinfo.get('pct', 0.0)}% — {tinfo.get('nivel', '⚪ Sin datos')}</b>")
+        if _det_tras_lines:
+            _tt_lines.append(_det_tras_lines.rstrip("<br>"))
+        _tt_lines.append("-------------------------")
+        _tt_lines.append(f"<b>Elegibilidad libre (Aurora): {int(_elig_total)}</b>")
+        _tt_lines.append(f"<b>CPs Ocupados:</b> {_txt_cps}")
+        tt = "<br>".join(_tt_lines)
         ang = np.linspace(0, 2 * np.pi, 48)
         cos_lat = np.cos(np.radians(z["LAT"]))
         ring = [[z["LON"] + (z["RAD"] * np.cos(a)) / (M_GRADO * cos_lat),
@@ -915,7 +1025,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             style_function=lambda f: {"fillColor": f["properties"]["_color"],
                                       "color": "black", "weight": 1, "fillOpacity": 0.25},
             tooltip=folium.GeoJsonTooltip(fields=["_tt"], aliases=[""], localize=True),
-            popup=folium.GeoJsonPopup(fields=["_tt"], aliases=[""], max_width=320),
+            popup=folium.GeoJsonPopup(fields=["_tt"], aliases=[""], max_width=360),
         ).add_to(fg_z)
     fg_z.add_to(m)
 
@@ -1115,7 +1225,7 @@ _JS_BUSCADOR_APILADO = r"""
     function _fmtCP(pr){
         if(!pr)return '';
         var cp=(pr.CP!==undefined&&pr.CP!==null)?String(pr.CP).replace(/\.0$/,''):'';
-        var filas=[['Código Postal',cp],['PDP (✔)',pr._pdp!=null?pr._pdp:0],['PDNP (✘)',pr._pdnp!=null?pr._pdnp:0],['Elegibles',pr._elegibles!=null?pr._elegibles:0]];
+        var filas=[['Código Postal',cp],['PDP (✔ perfil)',pr._pdp!=null?pr._pdp:0],['PDNP (✘ perfil)',pr._pdnp!=null?pr._pdnp:0],['Elegibles (Aurora)',pr._elegibles!=null?pr._elegibles:0]];
         var out=['<div style="font-weight:bold;color:#0e7490;margin-bottom:4px;">📮 CP '+cp+'</div>'];
         for(var i=0;i<filas.length;i++){ out.push('<div><b>'+filas[i][0]+':</b> '+filas[i][1]+'</div>'); }
         return out.join('');
@@ -1230,14 +1340,42 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     total_bytes = f_total.getvalue() if f_total else None
     total_name = f_total.name if f_total else ""
 
-    seteo, geo, tr2emp, tr2status, elig, total = cargar_archivos(
-        f_seteo.getvalue(), f_seteo.name,
-        f_pdp.getvalue(), f_pdp.name,
-        f_pdnp.getvalue(), f_pdnp.name,
-        f_raw.getvalue(), f_raw.name,
-        f_elig.getvalue(), f_elig.name, hoja,
-        total_bytes, total_name,
-    )
+    # ── BARRA DE PROGRESO de carga de archivos ──
+    # La carga real (cargar_archivos) está cacheada, así que al repetir el
+    # mismo set de archivos es casi instantánea. La barra informa las etapas;
+    # la primera vez acompaña la lectura/normalización real de los 4-5 archivos.
+    _firma = (f_seteo.name, len(f_seteo.getvalue()),
+              f_pdp.name, f_pdnp.name, f_raw.name, f_elig.name, total_name)
+    _ya_cargado = st.session_state.get("rd_firma") == _firma
+
+    if _ya_cargado and "rd_cache" in st.session_state:
+        seteo, geo, tr2emp, tr2status, elig, total = st.session_state["rd_cache"]
+    else:
+        _prog = st.progress(0, text="Preparando carga de archivos…")
+        _etapas = [
+            (10, "📥 Leyendo SETEO (searchHubsResponse)…"),
+            (30, "🟢 Leyendo PDP (cumplen perfil)…"),
+            (45, "🔴 Leyendo PDNP (no cumplen)…"),
+            (60, "📦 Leyendo Raw Data (repartidores)…"),
+            (75, "📋 Leyendo Elegibilidad (Aurora)…"),
+            (88, "🎯 Leyendo Total_Data (opcional)…"),
+            (95, "⚙️ Normalizando y cruzando datos…"),
+        ]
+        for _pc, _msg in _etapas:
+            _prog.progress(_pc, text=_msg)
+        # Carga real (cacheada): se ejecuta una sola vez por set de archivos.
+        seteo, geo, tr2emp, tr2status, elig, total = cargar_archivos(
+            f_seteo.getvalue(), f_seteo.name,
+            f_pdp.getvalue(), f_pdp.name,
+            f_pdnp.getvalue(), f_pdnp.name,
+            f_raw.getvalue(), f_raw.name,
+            f_elig.getvalue(), f_elig.name, hoja,
+            total_bytes, total_name,
+        )
+        _prog.progress(100, text="✅ Archivos cargados")
+        _prog.empty()
+        st.session_state["rd_firma"] = _firma
+        st.session_state["rd_cache"] = (seteo, geo, tr2emp, tr2status, elig, total)
 
     dias = fechas_disponibles(seteo, geo)
     if not dias:
