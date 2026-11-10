@@ -1171,153 +1171,180 @@ W_HIST = 0.5
 W_DEMANDA = 0.5
 
 
-def historico_total_por_zona(seteo, geo, tr2emp, dias, total=None):
+def historico_neto_max_por_zona(raw_pts_full, seteo, dias):
     """
-    Peso histórico por zona. Si hay Total_Data, usa 'routed' real (promedio por
-    zona); si no, promedio de despacho reconstruido de geopuntos.
+    Histórico NETO MÁXIMO por zona: para cada día, cuenta los paquetes del Raw
+    que cada zona (employee) entregó DENTRO de su propio círculo (volumen neto),
+    y toma el MÁXIMO de la semana (capacidad probada).
+
+    raw_pts_full: DataFrame del Raw SIN filtrar por día (con _fecha, _emp, coords).
+    Devuelve dict: sn_upper -> volumen neto máximo semanal.
     """
-    if total is not None and "routed" in total.columns:
-        g = total.groupby("_sn")["routed"].mean()
-        d = {sn: float(v) for sn, v in g.items() if pd.notna(v)}
-        if d:
-            return d
-    acum = {}
+    out = {}
+    if raw_pts_full is None or len(raw_pts_full) == 0:
+        return out
+    # Centro y radio de cada zona del seteo (por Store Name = employee)
+    set_all = seteo[seteo["_sw_status"] == "ENABLED"] if "_sw_status" in seteo.columns else seteo
+    # centro/radio por _sn (tomando el primero)
+    z_cen = {}
+    for _, r in set_all.drop_duplicates("_sn").iterrows():
+        if pd.notna(r.get("LATITUD")) and pd.notna(r.get("LONGITUD")) and pd.notna(r.get("SW Coverage")):
+            z_cen[r["_sn"]] = (float(r["LATITUD"]), float(r["LONGITUD"]), float(r["SW Coverage"]))
+    if not z_cen:
+        return out
+    rp = raw_pts_full.copy()
+    rp["_emp"] = rp["_emp"].map(_norm_txt)
+    # por día
+    acum = {}  # sn -> lista de netos por día
     for d in dias:
-        dow = _fecha_a_dow(d)
-        sd = seteo[seteo["_dow"] == dow]
-        sns = set(sd["_sn"])
-        gd = geo[geo["_fecha"] == d]
-        if gd.empty:
+        sub = rp[rp["_fecha"] == d]
+        if sub.empty:
             continue
-        emp = gd["tracking_id"].map(tr2emp)
-        z = emp.where(emp.isin(sns))
-        vc = z.dropna().map(_norm_txt).value_counts().to_dict()
-        for sn in sns:
-            acum.setdefault(sn, []).append(int(vc.get(sn, 0)))
-    return {sn: float(np.mean(v)) for sn, v in acum.items() if v}
+        sub = sub.drop_duplicates(subset=["tracking_id"])
+        for sn, g in sub.groupby("_emp"):
+            c = z_cen.get(sn)
+            if c is None:
+                continue
+            _cl = np.cos(np.radians(c[0]))
+            _dla = (g["latitude"].to_numpy() - c[0]) * M_GRADO
+            _dlo = (g["longitude"].to_numpy() - c[1]) * M_GRADO * _cl
+            _neto = int(np.sum((_dla*_dla + _dlo*_dlo) <= (c[2] ** 2)))
+            acum.setdefault(sn, []).append(_neto)
+    for sn, vals in acum.items():
+        if vals:
+            out[sn] = int(np.max(vals))   # MÁXIMO de la semana
+    return out
+
+
+def pdp_en_zona_por_sn(R):
+    """PDP que caen dentro del círculo de cada zona (ya calculado en R)."""
+    return {sn: int(v) for sn, v in R.get("pdp_por_sn", {}).items()}
 
 
 def demanda_libre_por_zona(R, gdf_cp_wgs84=None):
-    """Demanda libre (elegibles 'libre') asociada a cada zona ENABLED del día."""
+    """
+    Demanda LIBRE por zona = suma de 'libre' (Aurora) de los CPs cuyo territorio
+    cae dentro del círculo de la zona, ponderado por el % del CP que ocupa.
+    Si no hay polígonos de CP, se calcula geométricamente por centroide (del
+    GeoJSON) — y si tampoco hay, por el CP sede de la zona.
+    """
     zonas = R["zonas"]
-    elig_cp = R["elig_por_cp"]
+    elig_cp = R.get("elig_por_cp", {})
     demanda = {z["_sn"]: 0.0 for z in zonas}
-    if not zonas:
+    if not zonas or not elig_cp:
         return demanda
-    if gdf_cp_wgs84 is None or getattr(gdf_cp_wgs84, "empty", True):
+    # Con polígonos: % del CP dentro del círculo × libre del CP
+    _det = R.get("_cps_detalle_por_sn", None)
+    if _det:
         for z in zonas:
-            demanda[z["_sn"]] = float(elig_cp.get(_norm_cp(z.get("CP", "")), 0.0))
+            tot = 0.0
+            for (cp, pct, lib) in _det.get(z["_sn"], []):
+                tot += float(lib) * (pct / 100.0)
+            demanda[z["_sn"]] = tot
         return demanda
-    try:
-        import geopandas as gpd
-        cob = gdf_cp_wgs84[["CP", "geometry"]].copy()
-        cob["CP"] = cob["CP"].astype(str).map(_norm_cp)
-        cent = cob.geometry.centroid
-        cx = cent.x.to_numpy(); cy = cent.y.to_numpy()
-        cps = cob["CP"].to_numpy()
-        sz_lat = np.array([z["LAT"] for z in zonas])
-        sz_lon = np.array([z["LON"] for z in zonas])
-        sz_rad = np.array([z["RAD"] for z in zonas])
-        sz_sn = np.array([z["_sn"] for z in zonas])
-        cos_lat = np.cos(np.radians(float(sz_lat.mean())))
-        dlat = (cy[:, None] - sz_lat[None, :]) * M_GRADO
-        dlon = (cx[:, None] - sz_lon[None, :]) * M_GRADO * cos_lat
-        d2 = dlat ** 2 + dlon ** 2
-        dentro = d2 <= (sz_rad[None, :] ** 2)
-        d2m = np.where(dentro, d2, np.inf)
-        idx = np.argmin(d2m, axis=1)
-        tiene = np.isfinite(d2m[np.arange(len(cps)), idx])
-        for k in range(len(cps)):
-            if tiene[k]:
-                sn = sz_sn[idx[k]]
-                demanda[sn] = demanda.get(sn, 0.0) + float(elig_cp.get(cps[k], 0.0))
-    except Exception:
+    # Sin detalle: repartir la elegibilidad del nodo equitativamente como aprox.
+    _tot_elig = sum(float(v) for v in elig_cp.values())
+    if _tot_elig > 0 and zonas:
+        _por_zona = _tot_elig / len(zonas)
         for z in zonas:
-            demanda[z["_sn"]] = float(elig_cp.get(_norm_cp(z.get("CP", "")), 0.0))
+            demanda[z["_sn"]] = _por_zona
     return demanda
 
 
-def distribuir_confirmation_plan(R, plan_total, hist_zona, demanda_zona,
-                                 w_hist=W_HIST, w_dem=W_DEMANDA, tope=TOPE_ZONA):
-    """Reparte plan_total entre las zonas ENABLED del día (histórico + demanda, ajustado por traslape)."""
+# Pesos de la fórmula de seteo sugerido (confirmados):
+#   30% histórico NETO máx · 45% PDP en zona · 25% libre en CP.
+#   Si una zona NO tiene PDP, su peso (45%) pasa al histórico (preferencia hist).
+W_HIST_PLAN = 0.30
+W_PDP_PLAN = 0.45
+W_LIBRE_PLAN = 0.25
+
+
+def distribuir_confirmation_plan(R, plan_total, hist_zona, pdp_zona, demanda_zona,
+                                 tope=TOPE_ZONA):
+    """
+    Reparte plan_total entre las zonas ENABLED del día con la fórmula:
+      peso = 0.30*hist_neto_norm + 0.45*pdp_norm + 0.25*libre_norm
+    Si una zona no tiene PDP, su 45% se suma al histórico (preferencia).
+    Respeta mínimo (32) y tope (96) por zona; redistribuye excedentes.
+    """
     zonas = R["zonas"]
+    cols = ["VR (Store Name)", "Histórico neto (máx sem)", "PDP en zona",
+            "Libre (CP)", "Seteo actual", "Seteo sugerido", "% del plan", "Δ", "Razón"]
     if not zonas or plan_total <= 0:
-        return pd.DataFrame(columns=["VR (Store Name)", "Seteo actual", "Seteo sugerido",
-                                     "% del plan", "Δ", "Razón"])
-    total_por_sn = R.get("total_por_sn", {})
+        return pd.DataFrame(columns=cols)
+
     sns = [z["_sn"] for z in zonas]
-    hist = np.array([max(0.0, hist_zona.get(sn, 0.0)) for sn in sns])
-    dem = np.array([max(0.0, demanda_zona.get(sn, 0.0)) for sn in sns])
-    tras = np.array([R["traslape_zona"].get(z["NOM"], {}).get("pct", 0.0) for z in zonas]) / 100.0
+    hist = np.array([max(0.0, float(hist_zona.get(sn, 0.0))) for sn in sns])
+    pdp = np.array([max(0.0, float(pdp_zona.get(sn, 0.0))) for sn in sns])
+    libre = np.array([max(0.0, float(demanda_zona.get(sn, 0.0))) for sn in sns])
 
     def _norm(a):
         s = a.sum()
-        return a / s if s > 0 else np.ones_like(a) / len(a)
+        return a / s if s > 0 else np.zeros_like(a)
 
-    peso = (w_hist * _norm(hist) + w_dem * _norm(dem)) * (1.0 - tras * 0.5)
-    peso = np.where(peso < 0, 0, peso)
+    _h, _p, _l = _norm(hist), _norm(pdp), _norm(libre)
+    # Peso por zona: si no tiene PDP, su 45% pasa al histórico
+    peso = np.zeros(len(sns))
+    for i in range(len(sns)):
+        if pdp[i] > 0:
+            peso[i] = W_HIST_PLAN*_h[i] + W_PDP_PLAN*_p[i] + W_LIBRE_PLAN*_l[i]
+        else:
+            # sin PDP → histórico toma el 30%+45% = 75%, libre 25%
+            peso[i] = (W_HIST_PLAN + W_PDP_PLAN)*_h[i] + W_LIBRE_PLAN*_l[i]
     if peso.sum() <= 0:
         peso = np.ones(len(sns))
 
+    # Reparto con PISO (32) y TECHO (96); excedente redistribuido.
     n = len(sns)
-    piso_total = MIN_ZONA * n
-    techo_total = tope * n
     asign = np.full(n, float(MIN_ZONA))
-    restante = float(plan_total) - piso_total
-
+    restante = float(plan_total) - MIN_ZONA * n
     if restante > 0:
         libres = np.ones(n, dtype=bool)
         for _ in range(200):
-            p = peso * libres
-            if p.sum() <= 0 or restante <= 0.5:
+            pp = peso * libres
+            if pp.sum() <= 0 or restante <= 0.5:
                 break
-            add = restante * (p / p.sum())
-            nuevo_val = asign + add
-            exceso = (nuevo_val > tope) & libres
-            if exceso.any():
-                asign[exceso] = tope
-                libres[exceso] = False
+            add = restante * (pp / pp.sum())
+            nuevo = asign + add
+            exc = (nuevo > tope) & libres
+            if exc.any():
+                asign[exc] = tope; libres[exc] = False
                 restante = float(plan_total) - asign.sum()
             else:
-                asign = np.where(libres, nuevo_val, asign)
-                restante = 0.0
-                break
+                asign = np.where(libres, nuevo, asign); restante = 0.0; break
     elif restante < 0:
         asign = np.clip(float(plan_total) * (peso / peso.sum()), 0, tope)
 
     sugerido = np.round(asign).astype(int)
+    # Ajuste fino para cuadrar al plan
     diff = int(plan_total) - int(sugerido.sum())
-    if diff != 0 and piso_total <= plan_total <= techo_total:
+    if diff != 0 and MIN_ZONA*n <= plan_total <= tope*n:
         orden = np.argsort(-peso) if diff > 0 else np.argsort(peso)
         i = 0
-        while diff != 0 and i < len(orden) * 6:
+        while diff != 0 and i < len(orden)*6:
             k = orden[i % len(orden)]
             cand = sugerido[k] + (1 if diff > 0 else -1)
             if MIN_ZONA <= cand <= tope:
-                sugerido[k] = cand
-                diff += -1 if diff > 0 else 1
+                sugerido[k] = cand; diff += -1 if diff > 0 else 1
             i += 1
 
+    total_por_sn = R.get("total_por_sn", {})
     filas = []
     plan = max(1, int(plan_total))
     for j, z in enumerate(zonas):
         td = total_por_sn.get(z["_sn"], {})
-        # Seteo actual: preferir set_capacity real si existe, si no SW Max Cap
         actual = int(td["set_capacity"]) if td.get("set_capacity") is not None else int(z["MAXCAP"])
-        sug = int(sugerido[j])
-        delta = sug - actual
-        razon = [f"hist≈{hist[j]:.0f}", f"libre≈{dem[j]:.0f}"]
-        if td.get("risk"):
-            razon.append(td["risk"].split("-")[0].strip().lower())
-        if tras[j] >= 0.5:
-            razon.append(f"⚠️traslape {tras[j]*100:.0f}%")
-        if sug >= tope:
-            razon.append("tope 96")
-        if sug <= MIN_ZONA:
-            razon.append("mín 32")
+        sug = int(sugerido[j]); delta = sug - actual
+        razon = [f"histN≈{hist[j]:.0f}", f"pdp≈{pdp[j]:.0f}", f"libre≈{libre[j]:.0f}"]
+        if pdp[j] == 0:
+            razon.append("sin PDP→hist")
+        if sug >= tope: razon.append("tope 96")
+        if sug <= MIN_ZONA: razon.append("mín 32")
         filas.append({
             "VR (Store Name)": z["NOM"],
-            "Histórico (routed/despacho)": int(round(hist[j])),
+            "Histórico neto (máx sem)": int(round(hist[j])),
+            "PDP en zona": int(round(pdp[j])),
+            "Libre (CP)": int(round(libre[j])),
             "Seteo actual": actual,
             "Seteo sugerido": sug,
             "% del plan": f"{round(sug/plan*100,1)}%",
@@ -1566,6 +1593,9 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
                 _cps_detalle_por_sn[_z["_sn"]] = _det
     except Exception:
         _cps_detalle_por_sn = {}
+    # Guardar el detalle de CP en R para que el Plan de Confirmación calcule
+    # la demanda LIBRE ponderada por % del CP dentro del círculo.
+    R["_cps_detalle_por_sn"] = _cps_detalle_por_sn
     for i, z in enumerate(zonas):
         tinfo = R["traslape_zona"].get(z["NOM"], {})
         desp = int(R["cap_por_zona"].get(z["_sn"], 0))
@@ -1703,8 +1733,8 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             for k in range(len(_df)):
                 _entregado = bool(_ez[k])
                 _borde = "#000000" if _entregado else "#ffffff"
-                _peso = 1.4 if _entregado else 0.4
-                _rad = 3.0 if _entregado else 2.3
+                _peso = 1.4 if _entregado else 0.6
+                _rad = 4.2 if _entregado else 3.6
                 _z = _zn[k]
                 _info = etiqueta + ("<br><b>Entregado por zona:</b> " + _z
                          if (_entregado and _z and _z not in ("None","nan","")) else "<br><i>sin zona</i>")
@@ -1989,6 +2019,7 @@ _JS_BUSCADOR_APILADO = r"""
     }
     window.limpiarBusqueda=function(){
         try{ if(window.resaltarZonaRaw) window.resaltarZonaRaw(""); }catch(e){}
+        try{ if(typeof _quitarResaltadoZona==='function') _quitarResaltadoZona(); }catch(e){}
         if(_hl&&_os){ try{ _hl.setStyle(_os); if(_hl.closeTooltip)_hl.closeTooltip(); }catch(e){} }
         _hl=null;_os=null; window._ultimaBusqueda=null;
         var inp=document.getElementById('cpInput'); if(inp)inp.value='';
@@ -2000,6 +2031,9 @@ _JS_BUSCADOR_APILADO = r"""
         if(!raw){ window.limpiarBusqueda(); if(rd){rd.innerHTML='Escribe un CP o nombre de zona';rd.style.color='#64748b';} return; }
         if(window._ultimaBusqueda&&window._ultimaBusqueda===raw.toUpperCase()&&_hl){ window.limpiarBusqueda(); return; }
         if(_hl&&_os){ try{_hl.setStyle(_os);}catch(e){} }
+        // Limpiar TODO resaltado previo (círculo del apilado + puntos amarillos)
+        try{ if(typeof _quitarResaltadoZona==='function') _quitarResaltadoZona(); }catch(e){}
+        try{ if(window.resaltarZonaRaw) window.resaltarZonaRaw(""); }catch(e){}
         window._ultimaBusqueda=raw.toUpperCase();
         var esCP=/^[0-9]+(\.0)?$/.test(raw);
         if(esCP){
@@ -2444,12 +2478,16 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
     if _btn_plan and _plan_total > 0:
         with st.spinner("Distribuyendo el plan…"):
-            _hist_z = historico_total_por_zona(
-                st.session_state.get("rd_seteo_df", seteo), st.session_state.get("rd_geo", geo),
-                st.session_state.get("rd_tr2emp", tr2emp), st.session_state.get("rd_dias", dias),
-                total=st.session_state.get("rd_total_df", total))
+            # Histórico NETO máximo semanal (volumen dentro de su propia zona)
+            _hist_z = historico_neto_max_por_zona(
+                raw_pts,  # Raw COMPLETO (todos los días)
+                st.session_state.get("rd_seteo_df", seteo),
+                st.session_state.get("rd_dias", dias))
+            # PDP que caen en cada zona (del día analizado)
+            _pdp_z = pdp_en_zona_por_sn(R)
+            # Libre (Aurora) ponderado por % del CP dentro del círculo
             _dem_z = demanda_libre_por_zona(R, gdf_cp_wgs84=gdf_cp_wgs84)
-            _df_plan = distribuir_confirmation_plan(R, int(_plan_total), _hist_z, _dem_z)
+            _df_plan = distribuir_confirmation_plan(R, int(_plan_total), _hist_z, _pdp_z, _dem_z)
             st.session_state["rd_plan_df"] = _df_plan
             st.session_state["rd_plan_total"] = int(_plan_total)
 
