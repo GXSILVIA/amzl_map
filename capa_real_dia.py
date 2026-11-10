@@ -297,8 +297,10 @@ def _leer_geo(geo_items, categoria):
         col_lon = _c(["longitud", "longitude", "vended_longitude", "lon", "lng"])
         g["latitude"] = pd.to_numeric(g[col_lat], errors="coerce") if col_lat else np.nan
         g["longitude"] = pd.to_numeric(g[col_lon], errors="coerce") if col_lon else np.nan
-        g = g.dropna(subset=["latitude", "longitude"])
-        g = g[(g["latitude"] != 0) & (g["longitude"] != 0)]
+        # coords 0 → NaN (se tratan como "sin coordenada", pero NO se descartan:
+        # un tracking distinto con coord vacía igual se dibuja dentro de su zona)
+        g.loc[g["latitude"] == 0, "latitude"] = np.nan
+        g.loc[g["longitude"] == 0, "longitude"] = np.nan
         col_f = _c(["fecha", "event_day", "delivery_date", "date", "dispatch_day"])
         g["_fecha"] = _norm_fecha(g[col_f]) if col_f else None
         col_n = _c(["nodo", "zone", "station_code", "delivery_station", "station"])
@@ -307,7 +309,12 @@ def _leer_geo(geo_items, categoria):
         _frames.append(g[["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"]].copy())
     if not _frames:
         return pd.DataFrame(columns=["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"])
-    return pd.concat(_frames, ignore_index=True)
+    _out = pd.concat(_frames, ignore_index=True)
+    # DEDUPLICAR por tracking_id: el MISMO paquete (tracking) no se cuenta/dibuja
+    # dos veces, aunque venga repetido con distintas coords. Tracking distinto
+    # (aunque coords iguales/vacías) SÍ se conserva.
+    _out = _out.drop_duplicates(subset=["tracking_id"], keep="first").reset_index(drop=True)
+    return _out
 
 
 @st.cache_data(show_spinner=False)
@@ -712,6 +719,32 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     gd["_emp"] = gd["tracking_id"].map(tr2emp)
     gd["_status_entrega"] = gd["tracking_id"].map(tr2status)
     gd["_zona_tracking"] = gd["_emp"].where(gd["_emp"].isin(set_sn))
+
+    # Asignar coordenada a los geopuntos (PDP/PDNP) SIN coord: se dibujan DENTRO
+    # del círculo de su zona (la del employee vía tracking→Raw), posición
+    # determinística por tracking_id. Los que no tienen zona conocida se descartan.
+    _sin_g = gd["latitude"].isna() | gd["longitude"].isna()
+    if _sin_g.any() and zonas:
+        _zc = {z["_sn"]: (z["LAT"], z["LON"], z["RAD"]) for z in zonas}
+        _emp_g = gd["_emp"].map(lambda e: _norm_txt(e) if pd.notna(e) else "")
+        _trk_g = gd["tracking_id"].astype(str)
+        _gla = gd["latitude"].to_numpy(dtype=float).copy()
+        _glo = gd["longitude"].to_numpy(dtype=float).copy()
+        for _k in np.where(_sin_g.to_numpy())[0]:
+            _c = _zc.get(_emp_g.iloc[_k])
+            if _c is None:
+                continue
+            _hh = abs(hash(_trk_g.iloc[_k]))
+            _ang = (_hh % 3600) / 3600.0 * 2 * np.pi
+            _rr = ((_hh // 3600) % 1000) / 1000.0
+            _radpt = np.sqrt(_rr) * _c[2] * 0.9
+            _cl = np.cos(np.radians(_c[0]))
+            _gla[_k] = _c[0] + (_radpt * np.sin(_ang)) / M_GRADO
+            _glo[_k] = _c[1] + (_radpt * np.cos(_ang)) / (M_GRADO * _cl)
+        gd["latitude"] = _gla
+        gd["longitude"] = _glo
+    # descartar los que siguen sin coord (sin zona conocida)
+    gd = gd.dropna(subset=["latitude", "longitude"]).copy()
 
     plat = gd["latitude"].to_numpy()
     plon = gd["longitude"].to_numpy()
@@ -1191,8 +1224,19 @@ def calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=None):
             acum.setdefault(sn, []).append(int(vc.get(sn, 0)))
     hist = {}
     for sn, vals in acum.items():
-        if vals:
-            hist[sn] = {"hist": int(round(np.mean(vals))), "max": int(np.max(vals)), "min": int(np.min(vals))}
+        # Solo días CON volumen (>0) cuentan para histórico/máx/mín:
+        #   • Histórico = suma ÷ nº de días con volumen (promedio de días activos)
+        #   • Máximo    = el día que más entregó
+        #   • Mínimo    = el menor volumen entregado (ignorando los días en 0)
+        _con_vol = [v for v in vals if v > 0]
+        if _con_vol:
+            hist[sn] = {
+                "hist": int(round(sum(_con_vol) / len(_con_vol))),
+                "max": int(max(_con_vol)),
+                "min": int(min(_con_vol)),
+            }
+        else:
+            hist[sn] = {"hist": 0, "max": 0, "min": 0}
     return hist
 
 
@@ -1747,7 +1791,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     # Límite por capa para no congelar el navegador (muestreo si hay más).
     # ══════════════════════════════════════════════════════════════════
     from folium.vector_layers import CircleMarker as _CM
-    _LIM = 8000  # máximo de puntos dibujados por capa
+    # Sin límite: con el filtro día+nodo los puntos ya son pocos; se dibujan TODOS.
 
     _mask_pdp = (pts["_cat"] == "PDP") if "_cat" in pts.columns else pd.Series(True, index=pts.index)
     _pts_pdp = pts[_mask_pdp]
@@ -1757,7 +1801,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         """PDP/PDNP: relleno por categoría; borde+núcleo negro si lo entregó una zona."""
         fg = folium.FeatureGroup(name=nombre_capa, show=show)
         if df_cat is not None and len(df_cat):
-            _df = df_cat if len(df_cat) <= _LIM else df_cat.sample(_LIM, random_state=42)
+            _df = df_cat   # TODOS los puntos del día/nodo (sin muestreo)
             _la = _df["latitude"].to_numpy(); _lo = _df["longitude"].to_numpy()
             _tk = _df["tracking_id"].astype(str).to_numpy()
             _zn = (_df["_zona_final"].astype(str).to_numpy()
@@ -1787,7 +1831,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     _raw_dia = R.get("raw_pts", None)
     fg_raw = folium.FeatureGroup(name="⚫ Entregados por zona (Raw)", show=True)
     if _raw_dia is not None and len(_raw_dia):
-        _rd = _raw_dia if len(_raw_dia) <= _LIM*2 else _raw_dia.sample(_LIM*2, random_state=42)
+        _rd = _raw_dia   # TODOS los puntos Raw del día/nodo (sin muestreo)
         _rla = _rd["latitude"].to_numpy(); _rlo = _rd["longitude"].to_numpy()
         _rtk = _rd["tracking_id"].astype(str).to_numpy()
         _remp = (_rd["_emp"].astype(str).to_numpy()
