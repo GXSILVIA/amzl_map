@@ -716,6 +716,10 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     gd = geo[geo["_fecha"] == dia].copy()
     if nodo and "_nodo" in gd.columns:
         gd = gd[(gd["_nodo"] == _norm_txt(nodo)) | (gd["_nodo"] == "")]
+    # DEDUP robusto por tracking_id (POR CATEGORÍA): el MISMO paquete no se cuenta
+    # ni se dibuja dos veces. Se hace aquí para que TODO (tooltip CP, conteos,
+    # dibujo, tablas, Excel) use el mismo número de paquetes únicos.
+    gd = gd.drop_duplicates(subset=["tracking_id", "_cat"], keep="first").copy()
     gd["_emp"] = gd["tracking_id"].map(tr2emp)
     gd["_status_entrega"] = gd["tracking_id"].map(tr2status)
     gd["_zona_tracking"] = gd["_emp"].where(gd["_emp"].isin(set_sn))
@@ -1159,10 +1163,32 @@ def construir_tabla_zonas(R, hist_por_zona=None):
     Si hay Total_Data, añade columnas reales (routed, set_capacity, PVA, riesgo).
     """
     total_por_sn = R.get("total_por_sn", {})
+
+    # ── Volumen BRUTO y NETO por zona (del Raw del día) ──
+    #   bruto = total de paquetes que el repartidor (zona) entregó ese día
+    #   neto  = los que entregó DENTRO de su propio círculo
+    _bruto_sn = dict(R.get("raw_por_sn", {}))   # bruto = raw_por_sn (ya dedup)
+    _neto_sn = {}
+    _rawd = R.get("raw_pts", None)
+    if _rawd is not None and len(_rawd) and R.get("zonas"):
+        _zc = {z["_sn"]: (z["LAT"], z["LON"], z["RAD"]) for z in R["zonas"]}
+        _rr = _rawd.copy()
+        _rr["_emp"] = _rr["_emp"].map(_norm_txt)
+        for sn, g in _rr.groupby("_emp"):
+            c = _zc.get(sn)
+            if c is None:
+                continue
+            _cl = np.cos(np.radians(c[0]))
+            _dla = (g["latitude"].to_numpy() - c[0]) * M_GRADO
+            _dlo = (g["longitude"].to_numpy() - c[1]) * M_GRADO * _cl
+            _neto_sn[sn] = int(np.sum((_dla*_dla + _dlo*_dlo) <= (c[2] ** 2)))
+
     filas = []
     for z in R["zonas"]:
         sn = z["_sn"]
         desp = int(R["cap_por_zona"].get(sn, 0))
+        _bruto = int(_bruto_sn.get(sn, 0))
+        _neto = int(_neto_sn.get(sn, 0))
         pdp_in = int(R.get("pdp_por_sn", {}).get(sn, 0))
         pdnp_in = int(R.get("pdnp_por_sn", {}).get(sn, 0))
         tot_in = pdp_in + pdnp_in
@@ -1184,6 +1210,8 @@ def construir_tabla_zonas(R, hist_por_zona=None):
             "Seteo (SW Max Cap)": maxcap,
             "SW Coverage (m)": int(z["RAD"]),
             "Volumen Despachado": desp,
+            "Volumen Bruto (Raw total)": _bruto,
+            "Volumen Neto (de su zona)": _neto,
             "PDP dentro (✔ perfil)": pdp_in,
             "PDNP dentro (✘ perfil)": pdnp_in,
             "% Cumplimiento": f"{pct_cumpl}%",
@@ -2294,6 +2322,158 @@ _JS_BUSCADOR_APILADO = r"""
 # ═══════════════════════════════════════════════════════════════════════
 # 🖥️ UI de Streamlit — bloque completo para incrustar en la app
 # ═══════════════════════════════════════════════════════════════════════
+def construir_mapa_semanal_completo(raw_pts_full, seteo, dias, gdf_cp_wgs84=None):
+    """
+    Mapa HTML del PERIODO COMPLETO: TODAS las zonas de TODOS los nodos (círculos
+    coloreados por su histórico semanal) + los puntos del Raw de TODA la semana
+    (dedup por tracking+día). Cada círculo muestra en el tooltip el histórico
+    (prom/máx/mín) de la semana.
+
+    ⚠️ Puede ser pesado con muchos nodos/puntos.
+    """
+    if folium is None:
+        return "<p>Folium no disponible.</p>"
+
+    # Histórico semanal por zona (todos los nodos)
+    df_z, _, _ = construir_analisis_semanal_completo(raw_pts_full, seteo, dias)
+    _hist_map = {}
+    for _, r in df_z.iterrows():
+        _hist_map[_norm_txt(r["Zona (empleado)"])] = {
+            "hist": int(r["Histórico (prom)"]), "max": int(r["Máximo"]),
+            "min": int(r["Mínimo"]), "nodo": r["Nodo"], "dias": int(r["Días activos"]),
+            "total": int(r["Total semana"])}
+
+    # Zonas (centro/radio) desde el seteo — todas las activas (cualquier día)
+    set_all = seteo[seteo["_sw_status"] == "ENABLED"] if "_sw_status" in seteo.columns else seteo
+    zagg = (set_all.dropna(subset=["LATITUD", "LONGITUD", "SW Coverage"])
+            .drop_duplicates("_sn"))
+    zonas = []
+    for _, r in zagg.iterrows():
+        zonas.append({"NOM": str(r["Store Name"]).strip(), "_sn": r["_sn"],
+                      "LAT": float(r["LATITUD"]), "LON": float(r["LONGITUD"]),
+                      "RAD": float(r["SW Coverage"])})
+    if not zonas:
+        return "<p>No hay zonas para el mapa semanal.</p>"
+
+    c_lat = float(np.mean([z["LAT"] for z in zonas]))
+    c_lon = float(np.mean([z["LON"] for z in zonas]))
+    m = folium.Map(location=[c_lat, c_lon], zoom_start=6, tiles=None, prefer_canvas=True)
+    folium.TileLayer(tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
+                     attr="&copy; OpenStreetMap", name="Mapa base", control=False).add_to(m)
+
+    # Círculos coloreados por histórico semanal (prom)
+    from folium.vector_layers import Circle as _Circ
+    fg_z = folium.FeatureGroup(name="Zonas (histórico semanal)", show=True)
+    for z in zonas:
+        h = _hist_map.get(z["_sn"], {})
+        _prom = h.get("hist", 0)
+        _col = ("#9e9e9e" if _prom == 0 else "#f1c40f" if _prom <= 15 else
+                "#e67e22" if _prom <= 20 else "#e74c3c" if _prom <= 30 else
+                "#8e44ad" if _prom <= 40 else "#6d4c41")
+        _tt = ("<b>{nom}</b><br>Nodo: {nod}<br>Histórico (prom): {h}<br>"
+               "Máximo: {mx}<br>Mínimo: {mn}<br>Días activos: {d}<br>"
+               "Total semana: {t}").format(
+            nom=z["NOM"], nod=h.get("nodo", "?"), h=_prom, mx=h.get("max", 0),
+            mn=h.get("min", 0), d=h.get("dias", 0), t=h.get("total", 0))
+        _Circ(location=[z["LAT"], z["LON"]], radius=z["RAD"], color="black",
+              weight=1, fill=True, fill_color=_col, fill_opacity=0.35,
+              tooltip=_tt, popup=_tt).add_to(fg_z)
+    fg_z.add_to(m)
+
+    # Puntos del Raw de TODA la semana (dedup por tracking+día), en negro
+    from folium.vector_layers import CircleMarker as _CM
+    fg_p = folium.FeatureGroup(name="Entregados (toda la semana)", show=True)
+    rp = raw_pts_full.copy()
+    rp["_emp"] = rp["_emp"].map(_norm_txt)
+    _frames = []
+    for d in dias:
+        sub = rp[rp["_fecha"] == d].drop_duplicates(subset=["tracking_id"])
+        _frames.append(sub)
+    if _frames:
+        allp = pd.concat(_frames, ignore_index=True)
+        allp = allp.dropna(subset=["latitude", "longitude"])
+        for _, p in allp.iterrows():
+            _CM(location=[float(p["latitude"]), float(p["longitude"])],
+                radius=2.0, weight=0.3, color="#000000", fill=True,
+                fill_color="#000000", fill_opacity=0.7,
+                tooltip="⚫ " + str(p["_emp"]) + "<br>" + str(p["tracking_id"])).add_to(fg_p)
+    fg_p.add_to(m)
+
+    folium.LayerControl(position="topright", collapsed=False).add_to(m)
+    return m.get_root().render()
+
+
+def construir_analisis_semanal_completo(raw_pts_full, seteo, dias):
+    """
+    Devuelve 3 DataFrames del PERIODO COMPLETO (todas las zonas, todos los nodos):
+      • resumen_zona : por zona → nodo, histórico (prom días activos), máx, mín,
+                       días activos, total semana.
+      • matriz_dia   : zona × día (volumen entregado cada día).
+      • resumen_nodo : por nodo → total semana, prom día, nº zonas, nº días.
+    Basado en el RAW (dedup por tracking por día), empleado = zona.
+    """
+    cols_z = ["Nodo", "Zona (empleado)", "Histórico (prom)", "Máximo", "Mínimo",
+              "Días activos", "Total semana"]
+    if raw_pts_full is None or len(raw_pts_full) == 0:
+        return (pd.DataFrame(columns=cols_z), pd.DataFrame(), pd.DataFrame())
+
+    rp = raw_pts_full.copy()
+    rp["_emp"] = rp["_emp"].map(_norm_txt)
+    rp["_nodo"] = rp["_nodo"].map(_norm_txt) if "_nodo" in rp.columns else ""
+
+    # conteo por zona × día (dedup por tracking dentro de cada día)
+    por_zona_dia = {}   # (nodo, emp) -> {dia: conteo}
+    for d in dias:
+        sub = rp[rp["_fecha"] == d]
+        if sub.empty:
+            continue
+        sub = sub.drop_duplicates(subset=["tracking_id"])
+        for (nod, emp), g in sub.groupby(["_nodo", "_emp"]):
+            por_zona_dia.setdefault((nod, emp), {})[d] = len(g)
+
+    # Resumen por zona
+    filas_z = []
+    matriz_rows = []
+    for (nod, emp), dd in por_zona_dia.items():
+        vals = [v for v in dd.values() if v > 0]
+        if not vals:
+            continue
+        filas_z.append({
+            "Nodo": nod, "Zona (empleado)": emp,
+            "Histórico (prom)": int(round(sum(vals) / len(vals))),
+            "Máximo": int(max(vals)), "Mínimo": int(min(vals)),
+            "Días activos": len(vals), "Total semana": int(sum(vals)),
+        })
+        _row = {"Nodo": nod, "Zona (empleado)": emp}
+        for d in dias:
+            _row[d] = int(dd.get(d, 0))
+        matriz_rows.append(_row)
+
+    df_z = pd.DataFrame(filas_z, columns=cols_z)
+    if not df_z.empty:
+        df_z = df_z.sort_values(["Nodo", "Total semana"], ascending=[True, False]).reset_index(drop=True)
+    df_m = pd.DataFrame(matriz_rows)
+    if not df_m.empty:
+        df_m = df_m.sort_values(["Nodo", "Zona (empleado)"]).reset_index(drop=True)
+
+    # Resumen por nodo
+    filas_n = []
+    if not df_z.empty:
+        for nod, g in df_z.groupby("Nodo"):
+            _tot = int(g["Total semana"].sum())
+            filas_n.append({
+                "Nodo": nod,
+                "Total semana": _tot,
+                "Promedio día (nodo)": int(round(_tot / max(1, len(dias)))),
+                "Nº zonas": int(g["Zona (empleado)"].nunique()),
+                "Días del periodo": len(dias),
+            })
+    df_n = pd.DataFrame(filas_n)
+    if not df_n.empty:
+        df_n = df_n.sort_values("Total semana", ascending=False).reset_index(drop=True)
+    return df_z, df_m, df_n
+
+
 def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     st.markdown("## Análisis Real por Día")
 
@@ -2718,3 +2898,46 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         st.download_button("📊 Descargar Análisis Excel", data=buf.getvalue(),
                            file_name=f"Analisis_Real_{R['nodo']}_{dia.replace('/','-')}.xlsx",
                            mime="application/vnd.ms-excel", use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # 📦 ANÁLISIS SEMANAL COMPLETO (todas las zonas, todos los nodos)
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown("### 📦 Análisis semanal completo (todos los nodos)")
+    st.caption("Histórico de TODAS las zonas de TODOS los nodos a lo largo de "
+               "todos los días del análisis. Para el mapa, los puntos de toda la "
+               "semana pueden ser muchos — puede tardar en abrir.")
+
+    _raw_full = st.session_state.get("rd_raw_full", raw_pts)
+    _seteo_full = st.session_state.get("rd_seteo_df", seteo)
+    _dias_full = st.session_state.get("rd_dias", dias)
+
+    ce1, ce2 = st.columns(2)
+
+    # ── Excel completo (3 pestañas) ──
+    with ce1:
+        if st.button("📊 Generar Excel semanal completo", use_container_width=True, key="rd_excel_full"):
+            with st.spinner("Calculando histórico semanal de todos los nodos…"):
+                _dfz, _dfm, _dfn = construir_analisis_semanal_completo(_raw_full, _seteo_full, _dias_full)
+                _bufc = io.BytesIO()
+                with pd.ExcelWriter(_bufc, engine="xlsxwriter") as _wc:
+                    _dfz.to_excel(_wc, index=False, sheet_name="Resumen semanal por zona")
+                    _dfm.to_excel(_wc, index=False, sheet_name="Detalle dia x dia")
+                    _dfn.to_excel(_wc, index=False, sheet_name="Resumen por nodo")
+                st.session_state["rd_excel_full_data"] = _bufc.getvalue()
+        if st.session_state.get("rd_excel_full_data"):
+            st.download_button("⬇️ Descargar Excel completo", data=st.session_state["rd_excel_full_data"],
+                               file_name="Analisis_Semanal_Completo.xlsx",
+                               mime="application/vnd.ms-excel", use_container_width=True)
+
+    # ── Mapa semanal completo (todas las zonas + puntos de la semana) ──
+    with ce2:
+        if st.button("🗺️ Generar Mapa semanal completo", use_container_width=True, key="rd_mapa_full"):
+            with st.spinner("Construyendo mapa de todas las zonas y puntos de la semana… (puede tardar)"):
+                _mapa_full = construir_mapa_semanal_completo(
+                    _raw_full, _seteo_full, _dias_full, gdf_cp_wgs84=gdf_cp_wgs84)
+                st.session_state["rd_mapa_full_data"] = _mapa_full
+        if st.session_state.get("rd_mapa_full_data"):
+            st.download_button("⬇️ Descargar Mapa completo (HTML)",
+                               data=st.session_state["rd_mapa_full_data"],
+                               file_name="Mapa_Semanal_Completo.html",
+                               mime="text/html", use_container_width=True)
