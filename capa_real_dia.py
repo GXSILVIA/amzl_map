@@ -89,6 +89,24 @@ def _norm_txt(s):
     return str(s).strip().upper()
 
 
+def _norm_trk(serie):
+    """
+    Normaliza tracking_id para que el MATCH entre PDP/PDNP y Raw sea robusto.
+    Resuelve los casos que rompen el cruce:
+      • float '762817576009.0' → '762817576009' (quita el .0 que mete excel/parquet)
+      • espacios, mayúsculas, caracteres invisibles
+      • NaN/None → cadena vacía
+    Se aplica IGUAL en ambos lados (geo y raw) para que coincidan.
+    """
+    s = serie.astype(str).str.strip().str.upper()
+    # quitar sufijo .0 (y .00, etc.) típico de lecturas numéricas
+    s = s.str.replace(r"\.0+$", "", regex=True)
+    # quitar espacios internos y caracteres no imprimibles
+    s = s.str.replace(r"\s+", "", regex=True)
+    s = s.replace({"NAN": "", "NONE": "", "NAT": ""})
+    return s
+
+
 def _norm_cp(v):
     try:
         return str(int(float(v))).strip().zfill(5)
@@ -284,7 +302,7 @@ def _leer_geo(bts, name, categoria):
     """Lee un archivo de geopuntos (PDP o PDNP) y lo normaliza."""
     g = _read_tabla(bts, name)
     g.columns = [str(c).strip() for c in g.columns]
-    g["tracking_id"] = g["tracking_id"].astype(str).str.strip()
+    g["tracking_id"] = _norm_trk(g["tracking_id"])
     col_lat = "latitud" if "latitud" in g.columns else ("latitude" if "latitude" in g.columns else None)
     col_lon = "longitud" if "longitud" in g.columns else ("longitude" if "longitude" in g.columns else None)
     g["latitude"] = pd.to_numeric(g[col_lat], errors="coerce") if col_lat else np.nan
@@ -304,7 +322,7 @@ def _leer_raw(raw_bytes, raw_name):
     """Lee Raw Data → devuelve (tr2emp, tr2status)."""
     raw = _read_tabla(raw_bytes, raw_name)
     raw.columns = [str(c).strip() for c in raw.columns]
-    raw["tracking_id"] = raw["tracking_id"].astype(str).str.strip()
+    raw["tracking_id"] = _norm_trk(raw["tracking_id"])
     raw["_emp"] = raw["Employee"].map(_norm_txt)
     tr2emp = dict(zip(raw["tracking_id"], raw["_emp"]))
     _col_st = next((c for c in ["last_shipment_status", "last_shipment_status_code",
@@ -558,46 +576,18 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     #          de geopuntos del nodo (dentro de ~8 km del punto más cercano).
     #    Si no se puede determinar el nodo, se usan TODAS (comportamiento previo).
     # ══════════════════════════════════════════════════════════════════
+    #   SOLO por tracking → Employee: las zonas del nodo son EXACTAMENTE los
+    #   repartidores (Employee) que entregaron paquetes de ese nodo ese día.
+    #   Un repartidor pertenece a un único nodo, así que esto elimina de raíz
+    #   que aparezcan círculos de nodos vecinos del mismo estado.
     _sns_del_nodo = None
     if nodo and "_nodo" in geo.columns:
         _nodo_u = _norm_txt(nodo)
         _gd_nodo = geo[(geo["_fecha"] == dia) & (geo["_nodo"] == _nodo_u)]
         if len(_gd_nodo):
-            # (a) EXACTA por tracking → Employee
             _emps = _gd_nodo["tracking_id"].map(tr2emp).dropna()
-            _sns_tracking = set(_emps.map(_norm_txt).unique())
-
-            # (b) GEOMÉTRICA: zonas cerca de los geopuntos del nodo
-            _sns_geo = set()
-            try:
-                _plat = _gd_nodo["latitude"].to_numpy()
-                _plon = _gd_nodo["longitude"].to_numpy()
-                _zlat = agg["LAT"].to_numpy(dtype=float)
-                _zlon = agg["LON"].to_numpy(dtype=float)
-                _cl = np.cos(np.radians(float(np.nanmean(_plat))))
-                # bounding box del nodo + margen de 8 km para prefiltro rápido
-                _mlat = 8000.0 / M_GRADO
-                _mlon = 8000.0 / (M_GRADO * _cl)
-                _la0, _la1 = np.nanmin(_plat) - _mlat, np.nanmax(_plat) + _mlat
-                _lo0, _lo1 = np.nanmin(_plon) - _mlon, np.nanmax(_plon) + _mlon
-                _en_bbox = ((_zlat >= _la0) & (_zlat <= _la1) &
-                            (_zlon >= _lo0) & (_zlon <= _lo1))
-                # entre las que están en la bbox, exigir cercanía real (≤8km) a algún punto
-                _RAD2 = 8000.0 ** 2
-                _idx_bbox = np.where(_en_bbox)[0]
-                # muestreo de puntos del nodo para no comparar millones
-                _step = max(1, len(_plat) // 3000)
-                _sp_lat = _plat[::_step]; _sp_lon = _plon[::_step]
-                for _zi in _idx_bbox:
-                    _dla = (_zlat[_zi] - _sp_lat) * M_GRADO
-                    _dlo = (_zlon[_zi] - _sp_lon) * M_GRADO * _cl
-                    if np.any((_dla*_dla + _dlo*_dlo) <= _RAD2):
-                        _sns_geo.add(agg.iloc[_zi]["_sn"])
-            except Exception:
-                _sns_geo = set()
-
-            _sns_del_nodo = _sns_tracking | _sns_geo
-            # si por alguna razón quedó vacío, no filtrar (usar todas)
+            _sns_del_nodo = set(_emps.map(_norm_txt).unique())
+            # si ningún tracking cruzó (set vacío), no filtrar (mostrar todas)
             if not _sns_del_nodo:
                 _sns_del_nodo = None
 
@@ -718,8 +708,15 @@ def procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=None, total=None
     total_dentro_zonas = int(gd["_dentro_zona"].sum())
     total_pdp = int((gd["_cat"] == "PDP").sum())
     total_pdnp = int((gd["_cat"] == "PDNP").sum())
+    # Diagnóstico del MATCH tracking→Raw→zona:
+    #   cuántos puntos cruzaron por tracking (tienen Employee en Raw) y cuántos
+    #   de esos cayeron en una zona ENABLED del nodo.
+    _tiene_emp = int(gd["_emp"].notna().sum()) if "_emp" in gd.columns else 0
+    total_match_tracking = int((gd["_origen_asig"] == "tracking").sum()) if "_origen_asig" in gd.columns else 0
 
     R = {
+        "total_con_employee": _tiene_emp,
+        "total_match_tracking": total_match_tracking,
         "dia": dia,
         "dow": dow,
         "nodo": nodo or "DVR2",
@@ -1232,7 +1229,7 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         _tt_lines = [
             f"<b>Zona Operativa: {z['NOM']}</b>",
             f"Rango: {_rango_txt}",
-            f"Volumen Promedio: {desp}",
+            f"Paquetes entregados (este día): {desp}",
             f"Radio: {int(z['RAD'])}m",
             f"SW Max Cap: {int(z['MAXCAP'])}",
             f"Capacidad usada: {ocup}%",
@@ -1286,104 +1283,86 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
     fg_z.add_to(m)
 
     # ── PUNTOS: 🟢 PDP / 🔴 PDNP / ⚪ no asignado ──
-    #    ⚡ OPTIMIZADO: con decenas/cientos de miles de puntos, crear un
-    #    folium.CircleMarker por fila (iterrows) genera un HTML gigantesco y
-    #    congela el navegador. En su lugar inyectamos UNA capa JS por categoría
-    #    que dibuja todos los puntos de golpe con L.circleMarker sobre un
-    #    canvas renderer (rapidísimo). Los colores/tooltip se conservan.
-    import json as _json
+    #    Se dibujan como FeatureGroups nativos de Folium (aparecen en el control
+    #    de capas y se pueden prender/apagar) sobre un CANVAS renderer compartido
+    #    (rápido). Orden de dibujado: primero No asignados, luego PDNP, y PDP al
+    #    final → los verdes (cumplen perfil) quedan ENCIMA y no los tapan los rojos.
+    #    Si hay demasiados puntos en una categoría, se hace un muestreo para no
+    #    congelar el navegador (el heatmap conserva la densidad completa).
+    from folium.vector_layers import CircleMarker as _CM
 
-    def _subset_xy(df):
-        return df[["latitude", "longitude", "tracking_id", "_zona_final"]].copy()
+    _MAX_POR_CAPA = 15000  # tope de puntos dibujados por categoría
 
-    _mask_asig = pts["_asignado"].astype(bool) if "_asignado" in pts.columns else pd.Series(True, index=pts.index)
+    # Color del RELLENO = categoría (PDP verde / PDNP rojo). TODOS los PDP/PDNP
+    # se dibujan (caigan dentro o fuera de un círculo). El BORDE NEGRO GRUESO
+    # marca los que fueron ENTREGADOS POR UNA ZONA (cruzaron con Raw por
+    # tracking → tienen Employee = zona). Si no cruzó con Raw, borde fino claro.
     _mask_pdp = (pts["_cat"] == "PDP") if "_cat" in pts.columns else pd.Series(True, index=pts.index)
+    # "entregado por zona" = cruzó con Raw (origen de asignación == tracking)
+    if "_origen_asig" in pts.columns:
+        _mask_zona = pts["_origen_asig"] == "tracking"
+    else:
+        _mask_zona = pts["_asignado"].astype(bool) if "_asignado" in pts.columns else pd.Series(False, index=pts.index)
 
-    _pts_no = pts[~_mask_asig]
-    _pts_pdp = pts[_mask_asig & _mask_pdp]
-    _pts_pdnp = pts[_mask_asig & ~_mask_pdp]
+    _pts_pdp = pts[_mask_pdp]
+    _pts_pdnp = pts[~_mask_pdp]
 
-    def _arr(df):
-        # lista compacta [[lat, lon, tracking, zona], ...] vía numpy (sin iterrows)
-        if df.empty:
-            return []
-        return [
-            [round(float(la), 6), round(float(lo), 6), str(tk), str(zn)]
-            for la, lo, tk, zn in zip(
-                df["latitude"].to_numpy(), df["longitude"].to_numpy(),
-                df["tracking_id"].to_numpy(),
-                (df["_zona_final"].to_numpy() if "_zona_final" in df.columns
-                 else ["" for _ in range(len(df))]),
-            )
-        ]
+    def _dibujar_categoria(df_cat, nombre_capa, fill, etiqueta):
+        """Dibuja una categoría (PDP o PDNP). Borde NEGRO grueso si la entregó
+        una zona (cruzó Raw); borde claro fino si no tiene zona."""
+        fg = folium.FeatureGroup(name=nombre_capa, show=True)
+        if df_cat is None or df_cat.empty:
+            fg.add_to(m)
+            return 0
+        _df = df_cat
+        if len(_df) > _MAX_POR_CAPA:
+            _df = _df.sample(_MAX_POR_CAPA, random_state=42)
+        _la = _df["latitude"].to_numpy()
+        _lo = _df["longitude"].to_numpy()
+        _tk = _df["tracking_id"].astype(str).to_numpy()
+        _zn = (_df["_zona_final"].astype(str).to_numpy()
+               if "_zona_final" in _df.columns else np.array(["" for _ in range(len(_df))]))
+        if "_origen_asig" in _df.columns:
+            _es_zona = (_df["_origen_asig"].to_numpy() == "tracking")
+        else:
+            _es_zona = (_df["_asignado"].to_numpy() if "_asignado" in _df.columns
+                        else np.zeros(len(_df), dtype=bool))
+        for k in range(len(_df)):
+            _z = _zn[k]
+            _entregado = bool(_es_zona[k])
+            # BORDE: negro grueso si lo entregó una zona; claro fino si no
+            if _entregado:
+                _color_borde, _peso, _radio = "#000000", 1.6, 3.2
+            else:
+                _color_borde, _peso, _radio = "#ffffff", 0.4, 2.3
+            _tt = etiqueta
+            if _entregado and _z and _z not in ("None", "nan", ""):
+                _tt += " · <b>Entregado por zona:</b> " + _z
+            else:
+                _tt += " · <i>sin zona (no cruzó Raw)</i>"
+            _tt += "<br>" + _tk[k]
+            _CM(
+                location=[float(_la[k]), float(_lo[k])],
+                radius=_radio, weight=_peso, color=_color_borde,
+                fill=True, fill_color=fill, fill_opacity=0.9,
+                tooltip=_tt,
+            ).add_to(fg)
+            # Punto NEGRO en el centro para los ENTREGADOS POR ZONA → se
+            # distinguen de un vistazo (relleno de categoría + núcleo negro).
+            if _entregado:
+                _CM(
+                    location=[float(_la[k]), float(_lo[k])],
+                    radius=1.1, weight=0, color="#000000",
+                    fill=True, fill_color="#000000", fill_opacity=1.0,
+                    tooltip=_tt,
+                ).add_to(fg)
+        fg.add_to(m)
+        return len(_df)
 
-    _data_puntos = {
-        "pdp":  {"pts": _arr(_pts_pdp),  "stroke": "#1b5e20", "fill": "#2ecc71",
-                 "label": "🟢 PDP (✔ perfil)"},
-        "pdnp": {"pts": _arr(_pts_pdnp), "stroke": "#b71c1c", "fill": "#e74c3c",
-                 "label": "🔴 PDNP (✘ perfil)"},
-        "no":   {"pts": _arr(_pts_no),   "stroke": "#616161", "fill": "#bdbdbd",
-                 "label": "⚪ No asignado"},
-    }
-
-    # (Los puntos los dibuja el JS de abajo directamente sobre el mapa, en capas
-    #  L.layerGroup por categoría — sin crear un objeto Python por punto.)
-
-    # El JS busca el mapa dinámicamente (robusto dentro del iframe de Streamlit),
-    # crea una capa (L.layerGroup) por categoría sobre un canvas compartido y la
-    # registra en el LayerControl para poder prender/apagar. Dibuja TODOS los
-    # puntos de golpe (sin un objeto Python por punto → rápido y sin HTML gigante).
-    _js_puntos = """
-    <script>
-    (function() {
-      var _DATA = __DATA__;
-      function _buscarMapa() {
-        for (var k in window) {
-          try { if (k.indexOf('map_') === 0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
-        }
-        for (var k2 in window) {
-          try { if (window[k2] && window[k2]._leaflet_id && window[k2]._container) return window[k2]; } catch(e) {}
-        }
-        return null;
-      }
-      function _pintar(intentos) {
-        intentos = intentos || 0;
-        var mapa = _buscarMapa();
-        if (!mapa || typeof L === 'undefined') {
-          if (intentos < 40) { setTimeout(function(){ _pintar(intentos+1); }, 300); }
-          return;
-        }
-        if (window.__puntosDibujados) return;  // evitar doble dibujado
-        window.__puntosDibujados = true;
-        var _canvas = L.canvas({ padding: 0.5 });
-        Object.keys(_DATA).forEach(function(cat) {
-          var cfg = _DATA[cat];
-          if (!cfg.pts || !cfg.pts.length) return;
-          var grupo = L.layerGroup();
-          for (var i = 0; i < cfg.pts.length; i++) {
-            var r = cfg.pts[i];
-            var cm = L.circleMarker([r[0], r[1]], {
-              renderer: _canvas, radius: 2.5, weight: 0.5,
-              color: cfg.stroke, fillColor: cfg.fill, fillOpacity: 0.9
-            });
-            cm.bindTooltip(cfg.label + "<br>" + r[2] +
-              (r[3] && r[3] !== "None" && r[3] !== "nan" ? "<br>Zona: " + r[3] : ""));
-            grupo.addLayer(cm);
-          }
-          grupo.addTo(mapa);
-          // registrar en el control de capas si existe
-          try {
-            if (mapa._qwLayerControl) { mapa._qwLayerControl.addOverlay(grupo, cfg.label); }
-          } catch(e) {}
-        });
-      }
-      if (document.readyState === "complete") { setTimeout(function(){ _pintar(0); }, 500); }
-      else { window.addEventListener("load", function() { setTimeout(function(){ _pintar(0); }, 500); }); }
-    })();
-    </script>
-    """
-    _js_puntos = _js_puntos.replace("__DATA__", _json.dumps(_data_puntos))
-    m.get_root().html.add_child(folium.Element(_js_puntos))
+    # Orden: PDNP (abajo) → PDP (arriba, los que cumplen quedan visibles).
+    #   El borde negro grueso identifica los entregados por zona en ambas capas.
+    _n_pdnp = _dibujar_categoria(_pts_pdnp, "🔴 PDNP (no cumplen)", "#e74c3c", "🔴 PDNP (✘ perfil)")
+    _n_pdp = _dibujar_categoria(_pts_pdp, "🟢 PDP (cumplen perfil)", "#2ecc71", "🟢 PDP (✔ perfil)")
 
     # ── HEATMap ──
     if HeatMap is not None and len(pts) > 0:
@@ -1849,6 +1828,32 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     k3.metric("🟢 PDP", R.get("total_pdp", 0))
     k4.metric("🔴 PDNP", R.get("total_pdnp", 0))
     k5.metric("Traslape total", f"{R['traslape_total']}%")
+
+    # ── Diagnóstico del MATCH tracking → Raw → zona ──
+    _tp = R.get("total_puntos", 0)
+    _tcm = R.get("total_match_tracking", 0)
+    _tce = R.get("total_con_employee", 0)
+    _pct_match = round(_tcm / _tp * 100, 1) if _tp else 0.0
+    st.caption(
+        f"🔗 **Match tracking→Raw→zona:** {_tce:,} de {_tp:,} puntos cruzaron con un "
+        f"repartidor (Employee) en Raw; **{_tcm:,} ({_pct_match}%) quedaron asignados "
+        f"a una zona ENABLED del nodo**. El resto se asigna por geometría o queda sin asignar."
+    )
+    if _tp and _tce == 0:
+        st.error("⚠️ NINGÚN tracking de PDP/PDNP cruzó con el Raw. Revisa que la "
+                 "columna 'tracking_id' tenga el MISMO formato en los 3 archivos "
+                 "(p. ej. que no venga como número con '.0', o con/sin prefijo 'TBM').")
+
+    # Diagnóstico de polígonos de CP (elegibilidad): si no hay, avisar por qué.
+    _n_cps_elig = len(R.get("elig_por_cp", {}))
+    if _n_cps_elig == 0:
+        st.warning("⚠️ No hay elegibilidad (polígonos de CP) para dibujar: la "
+                   "elegibilidad (Aurora) de este día/nodo vino vacía. Revisa que "
+                   "el archivo Aurora tenga filas para esta fecha y este nodo.")
+    elif gdf_cp_wgs84 is None or getattr(gdf_cp_wgs84, "empty", True):
+        st.info(f"ℹ️ Hay {_n_cps_elig} CPs con elegibilidad, pero no se recibieron "
+                "los polígonos de CP para dibujarlos. Para verlos: procesa primero "
+                "la capa de Cobertura, o coloca los GeoJSON en la carpeta `mapas/`.")
 
     mapa = st.session_state.get("rd_mapa")
     if mapa:
