@@ -298,23 +298,44 @@ def _leer_seteo(seteo_bytes, seteo_name):
 
 
 @st.cache_data(show_spinner=False)
-def _leer_geo(bts, name, categoria):
-    """Lee un archivo de geopuntos (PDP o PDNP) y lo normaliza."""
-    g = _read_tabla(bts, name)
-    g.columns = [str(c).strip() for c in g.columns]
-    g["tracking_id"] = _norm_trk(g["tracking_id"])
-    col_lat = "latitud" if "latitud" in g.columns else ("latitude" if "latitude" in g.columns else None)
-    col_lon = "longitud" if "longitud" in g.columns else ("longitude" if "longitude" in g.columns else None)
-    g["latitude"] = pd.to_numeric(g[col_lat], errors="coerce") if col_lat else np.nan
-    g["longitude"] = pd.to_numeric(g[col_lon], errors="coerce") if col_lon else np.nan
-    g = g.dropna(subset=["latitude", "longitude"])
-    g = g[(g["latitude"] != 0) & (g["longitude"] != 0)]
-    col_f = "fecha" if "fecha" in g.columns else ("event_day" if "event_day" in g.columns else None)
-    g["_fecha"] = _norm_fecha(g[col_f]) if col_f else None
-    col_n = "nodo" if "nodo" in g.columns else ("zone" if "zone" in g.columns else None)
-    g["_nodo"] = g[col_n].map(_norm_txt) if col_n else ""
-    g["_cat"] = categoria
-    return g[["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"]].copy()
+def _leer_geo(geo_items, categoria):
+    """
+    Lee UNO o VARIOS archivos de geopuntos (PDP o PDNP) y los combina.
+    geo_items: lista de tuplas (bytes, nombre) — acepta varios parquet/csv/xlsx.
+    Detecta columnas de lat/lon, fecha y nodo con flexibilidad.
+    Devuelve un DataFrame combinado con _cat = categoria.
+    """
+    if not isinstance(geo_items, (list, tuple)):
+        geo_items = [geo_items]
+    _frames = []
+    for _bts, _name in geo_items:
+        if _bts is None:
+            continue
+        g = _read_tabla(_bts, _name)
+        g.columns = [str(c).strip() for c in g.columns]
+        if "tracking_id" not in g.columns:
+            # buscar variante
+            _ct = next((c for c in g.columns if c.lower() in ("tracking_id", "tracking", "trackingid")), None)
+            if _ct:
+                g = g.rename(columns={_ct: "tracking_id"})
+            else:
+                continue
+        g["tracking_id"] = _norm_trk(g["tracking_id"])
+        col_lat = "latitud" if "latitud" in g.columns else ("latitude" if "latitude" in g.columns else None)
+        col_lon = "longitud" if "longitud" in g.columns else ("longitude" if "longitude" in g.columns else None)
+        g["latitude"] = pd.to_numeric(g[col_lat], errors="coerce") if col_lat else np.nan
+        g["longitude"] = pd.to_numeric(g[col_lon], errors="coerce") if col_lon else np.nan
+        g = g.dropna(subset=["latitude", "longitude"])
+        g = g[(g["latitude"] != 0) & (g["longitude"] != 0)]
+        col_f = "fecha" if "fecha" in g.columns else ("event_day" if "event_day" in g.columns else None)
+        g["_fecha"] = _norm_fecha(g[col_f]) if col_f else None
+        col_n = "nodo" if "nodo" in g.columns else ("zone" if "zone" in g.columns else None)
+        g["_nodo"] = g[col_n].map(_norm_txt) if col_n else ""
+        g["_cat"] = categoria
+        _frames.append(g[["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"]].copy())
+    if not _frames:
+        return pd.DataFrame(columns=["tracking_id", "latitude", "longitude", "_fecha", "_nodo", "_cat"])
+    return pd.concat(_frames, ignore_index=True)
 
 
 @st.cache_data(show_spinner=False)
@@ -1380,8 +1401,8 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             pass
 
     m = folium.Map(location=[c_lat, c_lon], zoom_start=11,
-                   tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-                   attr="&copy; OpenStreetMap &copy; CARTO", prefer_canvas=True,
+                   tiles="https://tile.openstreetmap.de/{z}/{x}/{y}.png",
+                   attr="&copy; OpenStreetMap", prefer_canvas=True,
                    control_scale=True)
 
     # ── ZOOM automático al NODO: ajustar la vista a las zonas del nodo ──
@@ -1969,6 +1990,13 @@ _JS_BUSCADOR_APILADO = r"""
         else if(rd){ rd.innerHTML='⚠ 0 CPs encontrados'; rd.style.color='#d97706'; }
         try {
             var _lc=document.querySelector('.leaflet-control-layers-list');
+            // Título "Filtros" al inicio del control de capas (encabezado Amazon)
+            if(_lc && !document.getElementById('lcTitulo')){
+                var _tit=document.createElement('div'); _tit.id='lcTitulo';
+                _tit.style.cssText='font-family:var(--amz-font,sans-serif); font-weight:700; font-size:13px; color:var(--amz-ink,#0F1111); padding:2px 4px 6px 4px; border-bottom:1px solid var(--amz-line,#D5D9D9); margin-bottom:6px;';
+                _tit.innerHTML='🎛️ Filtros';
+                _lc.insertBefore(_tit, _lc.firstChild);
+            }
             if(_lc && !document.getElementById('ttModeRow')){
                 var _sep=document.createElement('div'); _sep.className='leaflet-control-layers-separator'; _lc.appendChild(_sep);
                 var _row=document.createElement('div'); _row.id='ttModeRow'; _row.style.cssText='padding:4px 2px; font-family:sans-serif;';
@@ -2132,14 +2160,14 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
     c1, c2 = st.columns(2)
     with c1:
         f_seteo = st.file_uploader("1) Seteo (searchHubsResponse — csv/xlsx/parquet/csv.gz)", type=["csv", "xlsx", "parquet", "pq", "gz"], key="rd_seteo")
-        f_pdp = st.file_uploader("2a) PDP — CUMPLEN perfil (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdp")
-        f_pdnp = st.file_uploader("2b) PDNP — NO cumplen (csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdnp")
+        f_pdp = st.file_uploader("2a) PDP — CUMPLEN perfil (1 o 2 archivos: csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdp", accept_multiple_files=True)
+        f_pdnp = st.file_uploader("2b) PDNP — NO cumplen (1 o 2 archivos: csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_pdnp", accept_multiple_files=True)
     with c2:
-        f_raw = st.file_uploader("3) Raw Data at Tracking — paquetes entregados por zona (puedes subir VARIOS: csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_raw", accept_multiple_files=True)
+        f_raw = st.file_uploader("3) Raw Data — entregados por zona (1 o 2 archivos: csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_raw", accept_multiple_files=True)
         f_elig = st.file_uploader("4) Elegibilidad / Data Aurora Dia (.xlsx)", type=["xlsx"], key="rd_elig")
         f_total = st.file_uploader("5) Total_Data (opcional — csv/xlsx/parquet/csv.gz)", type=["xlsx", "csv", "parquet", "pq", "gz"], key="rd_total")
 
-    if not (f_seteo and f_pdp and f_pdnp and f_raw and len(f_raw) > 0 and f_elig):
+    if not (f_seteo and f_pdp and len(f_pdp) > 0 and f_pdnp and len(f_pdnp) > 0 and f_raw and len(f_raw) > 0 and f_elig):
         st.info("Sube al menos los archivos 1–4 (Total_Data es opcional) para habilitar el análisis.")
         return
 
@@ -2152,8 +2180,10 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
                 return len(f.getvalue()) / (1024 * 1024)
             except Exception:
                 return 0.0
-    _tot_mb = sum(_mb(f) for f in [f_seteo, f_pdp, f_pdnp, f_elig] if f)
-    _tot_mb += sum(_mb(fr) for fr in f_raw)  # f_raw es lista
+    _tot_mb = sum(_mb(f) for f in [f_seteo, f_elig] if f)
+    _tot_mb += sum(_mb(fp) for fp in f_pdp)
+    _tot_mb += sum(_mb(fp) for fp in f_pdnp)
+    _tot_mb += sum(_mb(fr) for fr in f_raw)
     if f_total:
         _tot_mb += _mb(f_total)
     st.caption(f"📁 Archivos subidos: **{_tot_mb:.0f} MB** en total. "
@@ -2161,8 +2191,10 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
     # Leemos los bytes UNA sola vez (evita duplicar ~200MB en memoria).
     _b_seteo = f_seteo.getvalue()
-    _b_pdp = f_pdp.getvalue()
-    _b_pdnp = f_pdnp.getvalue()
+    _pdp_items = [(fp.getvalue(), fp.name) for fp in f_pdp]    # lista de PDP
+    _pdnp_items = [(fp.getvalue(), fp.name) for fp in f_pdnp]  # lista de PDNP
+    _b_pdp_sizes = tuple(len(b) for b, _ in _pdp_items)
+    _b_pdnp_sizes = tuple(len(b) for b, _ in _pdnp_items)
     _raw_items = [(fr.getvalue(), fr.name) for fr in f_raw]  # lista de los Raw
     _b_raw_sizes = tuple(len(b) for b, _ in _raw_items)
     _b_elig = f_elig.getvalue()
@@ -2177,8 +2209,9 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         hoja = 0
 
     # ── Firma para cachear por set de archivos (por nombre + tamaño) ──
-    _firma = (f_seteo.name, len(_b_seteo), f_pdp.name, len(_b_pdp),
-              f_pdnp.name, len(_b_pdnp),
+    _firma = (f_seteo.name, len(_b_seteo),
+              tuple(sorted(fp.name for fp in f_pdp)), _b_pdp_sizes,
+              tuple(sorted(fp.name for fp in f_pdnp)), _b_pdnp_sizes,
               tuple(sorted(fr.name for fr in f_raw)), _b_raw_sizes,
               f_elig.name, len(_b_elig), total_name,
               (len(total_bytes) if total_bytes else 0))
@@ -2231,15 +2264,15 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
 
             # — 2a) PDP —
             _pintar_checklist(1)
-            _prog.progress(_pasos[0][1], text=f"🟢 Leyendo PDP ({_mb(f_pdp):.0f} MB)…")
-            pdp = _leer_geo(_b_pdp, f_pdp.name, "PDP")
+            _prog.progress(_pasos[0][1], text=f"🟢 Leyendo PDP ({sum(_mb(fp) for fp in f_pdp):.0f} MB)…")
+            pdp = _leer_geo(_pdp_items, "PDP")
             _prog.progress(_pasos[1][1], text="✅ PDP listo")
             _t.sleep(0.25)
 
             # — 2b) PDNP —
             _pintar_checklist(2)
-            _prog.progress(_pasos[1][1], text=f"🔴 Leyendo PDNP ({_mb(f_pdnp):.0f} MB)…")
-            pdnp = _leer_geo(_b_pdnp, f_pdnp.name, "PDNP")
+            _prog.progress(_pasos[1][1], text=f"🔴 Leyendo PDNP ({sum(_mb(fp) for fp in f_pdnp):.0f} MB)…")
+            pdnp = _leer_geo(_pdnp_items, "PDNP")
             geo = pd.concat([pdp, pdnp], ignore_index=True)
             _prog.progress(_pasos[2][1], text="✅ PDNP listo")
             _t.sleep(0.25)
@@ -2367,9 +2400,9 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
         f"a una zona ENABLED del nodo**. El resto se asigna por geometría o queda sin asignar."
     )
     if _tp and _tce == 0:
-        st.error("⚠️ NINGÚN tracking de PDP/PDNP cruzó con el Raw. Revisa que la "
-                 "columna 'tracking_id' tenga el MISMO formato en los 3 archivos "
-                 "(p. ej. que no venga como número con '.0', o con/sin prefijo 'TBM').")
+        st.caption("ℹ️ Nota: ningún tracking cruzó con el Raw este día/nodo. No afecta "
+                   "el dibujado — cada capa (PDP/PDNP/Raw) usa sus propias coordenadas. "
+                   "El cruce con Raw solo marca el borde negro de 'entregado por zona'.")
 
     # Diagnóstico de polígonos de CP (elegibilidad): si no hay, avisar por qué.
     _n_cps_elig = len(R.get("elig_por_cp", {}))
