@@ -1371,6 +1371,48 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
         fg_heat.add_to(m)
 
     folium.LayerControl(position="topright", collapsed=False).add_to(m)
+
+    # ── FIX HOVER ZONAS ──
+    #    Los puntos (PDP/PDNP) se dibujan ENCIMA de los círculos y capturaban el
+    #    hover, impidiendo ver el tooltip de la zona. Este JS trae al FRENTE las
+    #    capas de zona (las que tienen _rad_m) tras cargar el mapa, para que
+    #    reciban el hover. Como el relleno de la zona es semitransparente
+    #    (fillOpacity 0.25), los puntos se siguen viendo a través de ellas.
+    _js_hover_fix = """
+    <script>
+    (function() {
+      function _buscarMapa() {
+        for (var k in window) {
+          try { if (k.indexOf('map_')===0 && window[k] && window[k].eachLayer) return window[k]; } catch(e) {}
+        }
+        return null;
+      }
+      function _traerZonasAlFrente(intentos) {
+        intentos = intentos || 0;
+        var mapa = _buscarMapa();
+        if (!mapa) { if (intentos < 40) setTimeout(function(){ _traerZonasAlFrente(intentos+1); }, 300); return; }
+        function _walk(layer, cb) {
+          cb(layer);
+          if (layer.eachLayer) layer.eachLayer(function(s){ _walk(s, cb); });
+          if (layer._layers) { for (var id in layer._layers) _walk(layer._layers[id], cb); }
+        }
+        _walk(mapa, function(ly) {
+          try {
+            if (ly.feature && ly.feature.properties &&
+                typeof ly.feature.properties._rad_m !== 'undefined' &&
+                ly.bringToFront) {
+              ly.bringToFront();
+            }
+          } catch(e) {}
+        });
+      }
+      if (document.readyState === "complete") { setTimeout(function(){ _traerZonasAlFrente(0); }, 900); }
+      else { window.addEventListener("load", function(){ setTimeout(function(){ _traerZonasAlFrente(0); }, 900); }); }
+    })();
+    </script>
+    """
+    m.get_root().html.add_child(folium.Element(_js_hover_fix))
+
     m.get_root().html.add_child(folium.Element(_JS_BUSCADOR_APILADO))
     return m.get_root().render()
 
