@@ -1207,6 +1207,40 @@ def construir_tabla_zonas(R, hist_por_zona=None):
     return df
 
 
+def calcular_historico_raw(raw_pts_full, seteo, dias, nodo=None):
+    """
+    Histórico/Máx/Mín por zona basado en el RAW (coincide con 'Paquetes
+    entregados por la zona' del panel). Por día, cuenta los paquetes que cada
+    zona (employee) entregó según el Raw (dedup por tracking). Solo días CON
+    volumen cuentan:
+      • Histórico = suma ÷ nº de días con volumen
+      • Máximo    = el día que más entregó
+      • Mínimo    = el menor volumen entregado (>0)
+    """
+    out = {}
+    if raw_pts_full is None or len(raw_pts_full) == 0:
+        return out
+    rp = raw_pts_full.copy()
+    rp["_emp"] = rp["_emp"].map(_norm_txt)
+    if nodo and "_nodo" in rp.columns:
+        rp = rp[rp["_nodo"] == _norm_txt(nodo)]
+    acum = {}  # sn -> lista de conteos por día (solo días con entregas)
+    for d in dias:
+        sub = rp[rp["_fecha"] == d]
+        if sub.empty:
+            continue
+        sub = sub.drop_duplicates(subset=["tracking_id"])
+        vc = sub["_emp"].value_counts().to_dict()
+        for sn, c in vc.items():
+            acum.setdefault(sn, []).append(int(c))
+    for sn, vals in acum.items():
+        _cv = [v for v in vals if v > 0]
+        if _cv:
+            out[sn] = {"hist": int(round(sum(_cv) / len(_cv))),
+                       "max": int(max(_cv)), "min": int(min(_cv))}
+    return out
+
+
 def calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=None):
     """Histórico/Máx/Mín del volumen despachado por zona a lo largo de los días."""
     acum = {}
@@ -1289,8 +1323,9 @@ def historico_neto_max_por_zona(raw_pts_full, seteo, dias):
             _neto = int(np.sum((_dla*_dla + _dlo*_dlo) <= (c[2] ** 2)))
             acum.setdefault(sn, []).append(_neto)
     for sn, vals in acum.items():
-        if vals:
-            out[sn] = int(np.max(vals))   # MÁXIMO de la semana
+        _cv = [v for v in vals if v > 0]   # solo días CON volumen (consistente con la tabla)
+        if _cv:
+            out[sn] = int(max(_cv))   # MÁXIMO neto de la semana (capacidad probada)
     return out
 
 
@@ -1391,9 +1426,14 @@ def distribuir_confirmation_plan(R, plan_total, hist_zona, pdp_zona, demanda_zon
             else:
                 asign = np.where(libres, nuevo, asign); restante = 0.0; break
     elif restante < 0:
-        asign = np.clip(float(plan_total) * (peso / peso.sum()), 0, tope)
+        # Plan menor que 32×nº_zonas: NO se puede repartir respetando el mínimo 32
+        # para todas. Aun así se fuerza el piso de 32 (la suma excederá el plan, se
+        # avisa en la UI). Nunca se pone menos de 32 a una zona.
+        asign = np.full(n, float(MIN_ZONA))
 
     sugerido = np.round(asign).astype(int)
+    # GARANTÍA del mínimo 32 y tope 96 en TODAS las zonas (red de seguridad)
+    sugerido = np.clip(sugerido, MIN_ZONA, tope)
     # Ajuste fino para cuadrar al plan
     diff = int(plan_total) - int(sugerido.sum())
     if diff != 0 and MIN_ZONA*n <= plan_total <= tope*n:
@@ -2165,7 +2205,7 @@ _JS_BUSCADOR_APILADO = r"""
         document.body.appendChild(panel); return panel;
     }
     function _panelMostrar(html){ var panel=_ensureInfoPanel(); var body=document.getElementById('infoPanelBody'); if(!panel||!body)return; body.innerHTML=html; panel.style.display='block'; }
-    window.cerrarInfoPanel=function(){ var panel=document.getElementById('infoPanel'); if(panel)panel.style.display='none'; try{_quitarResaltadoZona();}catch(e){} };
+    window.cerrarInfoPanel=function(){ var panel=document.getElementById('infoPanel'); if(panel)panel.style.display='none'; try{_quitarResaltadoZona();}catch(e){} try{_quitarResaltadoCP();}catch(e){} };
     function _resaltarZonaPorZid(zid){ var map=window._map||_findMap(); var ly=(window._zonaLayerByZid||{})[zid]; _quitarResaltadoZona(); if(!ly)return;
         _zonaHL_os={ fillColor:ly.options.fillColor||'#9e9e9e', fillOpacity:(typeof ly.options.fillOpacity!=='undefined')?ly.options.fillOpacity:0.45, color:ly.options.color||'black', weight:ly.options.weight||1 };
         try{ ly.setStyle({fillColor:'#146EB4',fillOpacity:0.7,color:'#146EB4',weight:3}); }catch(e){}
@@ -2188,11 +2228,25 @@ _JS_BUSCADOR_APILADO = r"""
         _panelMostrar('<div id="apiBox">'+partes.join('<hr style="border:none;border-top:2px dashed #94a3b8;margin:8px 0;">')+'</div>');
     }
     function _onMapClick(e){ _mostrarApilado(e.latlng,null); }
+    // Resaltado del POLÍGONO de CP en azul (como los círculos de zona)
+    var _cpHL=null, _cpHL_os=null;
+    function _quitarResaltadoCP(){ if(_cpHL&&_cpHL_os){try{_cpHL.setStyle(_cpHL_os);}catch(e){}} _cpHL=null;_cpHL_os=null; }
+    function _resaltarCP(ly){
+        _quitarResaltadoCP();
+        if(!ly||!ly.setStyle)return;
+        _cpHL_os={ fillColor:ly.options.fillColor||'#9e9e9e', fillOpacity:(typeof ly.options.fillOpacity!=='undefined')?ly.options.fillOpacity:0.45, color:ly.options.color||'#ffffff', weight:ly.options.weight||1.2 };
+        try{ ly.setStyle({fillColor:'#2563eb',fillOpacity:0.55,color:'#146EB4',weight:3}); }catch(e){}
+        try{ if(ly.bringToFront)ly.bringToFront(); }catch(e){}
+        _cpHL=ly;
+    }
     function _onLayerClick(e){
         if(e&&e.originalEvent){ try{L.DomEvent.stopPropagation(e);}catch(ex){} }
         var cpInfo=null;
         try{ var ly=e.target||e.layer;
-            if(ly&&ly.feature&&ly.feature.properties&&typeof ly.feature.properties.CP!=='undefined')cpInfo=_fmtCP(ly.feature.properties);
+            if(ly&&ly.feature&&ly.feature.properties&&typeof ly.feature.properties.CP!=='undefined'){
+                cpInfo=_fmtCP(ly.feature.properties);
+                _resaltarCP(ly);   // ← resaltar el polígono CP en azul
+            }
         }catch(ex){} _mostrarApilado(e.latlng,cpInfo);
     }
     document.addEventListener('click',function(ev){
@@ -2441,7 +2495,8 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
             R = procesar_dia(seteo, geo, tr2emp, tr2status, elig, dia, nodo=nodo, total=total, raw_pts=raw_pts)
 
             _pbar.progress(55, text="📊 Calculando histórico del periodo…")
-            hist = calcular_historico_periodo(seteo, geo, tr2emp, elig, dias, nodo=nodo)
+            hist = calcular_historico_raw(
+                st.session_state.get("rd_raw_full", raw_pts), seteo, dias, nodo=nodo)
             R["hist_por_zona"] = hist   # para mostrar máx/mín en el tooltip de zona
 
             _pbar.progress(75, text="🗺️ Construyendo el mapa (zonas, puntos, CP, heatmap)…")
@@ -2464,6 +2519,7 @@ def render_analisis_real_dia(gdf_cp_wgs84=None, nodo_default="DVR2"):
             st.session_state["rd_seteo_df"] = seteo
             st.session_state["rd_geo"] = geo
             st.session_state["rd_tr2emp"] = tr2emp
+            st.session_state["rd_raw_full"] = raw_pts   # Raw completo (todos los días)
 
             _pbar.progress(100, text="✅ ¡Análisis listo!")
             _tp.sleep(0.4)
