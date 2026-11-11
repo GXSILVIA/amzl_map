@@ -1194,7 +1194,7 @@ def construir_tabla_zonas(R, hist_por_zona=None):
         tot_in = pdp_in + pdnp_in
         pct_cumpl = round(pdp_in / tot_in * 100, 1) if tot_in else 0.0
         maxcap = int(z["MAXCAP"]) if z["MAXCAP"] else 0
-        ocup = round((desp / maxcap) * 100, 1) if maxcap > 0 else 0.0
+        ocup = round((_neto / maxcap) * 100, 1) if maxcap > 0 else 0.0
         tinfo = R["traslape_zona"].get(z["NOM"], {})
         pct_t = tinfo.get("pct", 0.0)
         if ocup < 70:
@@ -1209,9 +1209,8 @@ def construir_tabla_zonas(R, hist_por_zona=None):
             "VR (Store Name)": z["NOM"],
             "Seteo (SW Max Cap)": maxcap,
             "SW Coverage (m)": int(z["RAD"]),
-            "Volumen Despachado": desp,
+            "Volumen Despachado (de su zona)": _neto,
             "Volumen Bruto (Raw total)": _bruto,
-            "Volumen Neto (de su zona)": _neto,
             "PDP dentro (✔ perfil)": pdp_in,
             "PDNP dentro (✘ perfil)": pdnp_in,
             "% Cumplimiento": f"{pct_cumpl}%",
@@ -1231,7 +1230,7 @@ def construir_tabla_zonas(R, hist_por_zona=None):
         filas.append(fila)
     df = pd.DataFrame(filas)
     if not df.empty:
-        df = df.sort_values("Volumen Despachado", ascending=False).reset_index(drop=True)
+        df = df.sort_values("Volumen Despachado (de su zona)", ascending=False).reset_index(drop=True)
     return df
 
 
@@ -1642,13 +1641,29 @@ def construir_mapa_dia_html(R, gdf_cp_wgs84=None, mapas_dir='mapas'):
             )
             cob = gdf_cp_wgs84[["CP", "geometry"]].copy()
             cob["CP"] = cob["CP"].astype(str).map(_norm_cp)
-            # ⚡ Simplificar geometrías (~25 m) para aligerar el GeoJSON del mapa
-            #    sin perder la forma perceptible de los polígonos de CP.
+            # ── REPARAR geometrías inválidas y DESCARTAR polígonos corruptos ──
+            # Un CP con geometría inválida (auto-intersección) puede, en el sjoin,
+            # capturar puntos de TODO el país → conteos inflados (2315 en un CP).
+            try:
+                cob["geometry"] = cob["geometry"].buffer(0)  # repara auto-intersecciones
+            except Exception:
+                pass
+            # Descartar polígonos con área absurda (un CP real es pequeño; en grados²
+            # un CP difícilmente supera ~0.05). Esto elimina geometrías corruptas.
+            try:
+                _area_grados = cob["geometry"].area
+                cob = cob[_area_grados <= 0.05].copy()
+            except Exception:
+                pass
+            # Simplificar para aligerar el render (después de reparar)
             try:
                 _TOL = 25 / 111139.0
                 cob["geometry"] = cob["geometry"].simplify(_TOL, preserve_topology=True)
             except Exception:
                 pass
+            # Dedup de puntos por tracking+cat (robusto) antes de contar por CP
+            if "tracking_id" in gpts.columns and "_cat" in gpts.columns:
+                gpts = gpts.drop_duplicates(subset=["tracking_id", "_cat"])
             join = gpd.sjoin(gpts, cob, how="left", predicate="within").dropna(subset=["CP"])
             _pdp_cp = join[join["_cat"] == "PDP"].groupby("CP").size().to_dict()
             _pdnp_cp = join[join["_cat"] == "PDNP"].groupby("CP").size().to_dict()
